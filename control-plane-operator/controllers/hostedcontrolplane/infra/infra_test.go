@@ -1253,6 +1253,7 @@ func TestReconcileAPIServerService(t *testing.T) {
 				kasPublicService(func(s *corev1.Service) {
 					s.Spec.Type = corev1.ServiceTypeClusterIP
 					delete(s.Annotations, "external-dns.alpha.kubernetes.io/hostname")
+					delete(s.Annotations, "service.beta.kubernetes.io/aws-load-balancer-type")
 				}),
 			},
 			expectedRoutes: []routev1.Route{
@@ -1274,6 +1275,7 @@ func TestReconcileAPIServerService(t *testing.T) {
 				kasPublicService(func(s *corev1.Service) {
 					s.Spec.Type = corev1.ServiceTypeClusterIP
 					delete(s.Annotations, "external-dns.alpha.kubernetes.io/hostname")
+					delete(s.Annotations, "service.beta.kubernetes.io/aws-load-balancer-type")
 				}),
 			},
 			expectedRoutes: []routev1.Route{
@@ -1295,6 +1297,7 @@ func TestReconcileAPIServerService(t *testing.T) {
 				kasPublicService(func(s *corev1.Service) {
 					s.Spec.Type = corev1.ServiceTypeClusterIP
 					delete(s.Annotations, "external-dns.alpha.kubernetes.io/hostname")
+					delete(s.Annotations, "service.beta.kubernetes.io/aws-load-balancer-type")
 				}),
 			},
 			expectedRoutes: []routev1.Route{
