@@ -168,13 +168,7 @@ func updateMainContainer(podSpec *corev1.PodSpec, hcp *hyperv1.HostedControlPlan
 	podspec.UpdateContainer(ComponentName, podSpec.Containers, func(c *corev1.Container) {
 		c.Ports[0].ContainerPort = netutil.KASPodPort(hcp)
 
-		kasVerbosityLevel := 2
-		if hcp.Annotations[hyperv1.KubeAPIServerVerbosityLevelAnnotation] != "" {
-			parsedKASVerbosityValue, err := strconv.Atoi(hcp.Annotations[hyperv1.KubeAPIServerVerbosityLevelAnnotation])
-			if err == nil {
-				kasVerbosityLevel = parsedKASVerbosityValue
-			}
-		}
+		kasVerbosityLevel := util.KASVerbosityLevel(hcp)
 		c.Args = append(c.Args,
 			fmt.Sprintf("--v=%d", kasVerbosityLevel),
 		)
