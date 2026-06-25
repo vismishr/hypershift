@@ -8,8 +8,11 @@ import (
 
 // LogLevelToKlogVerbosity maps a LogLevel enum value to a klog verbosity integer.
 // Returns 2 (Normal) for unrecognized or empty values.
-func LogLevelToKlogVerbosity(level hyperv1.LogLevel) int {
-	switch level {
+func LogLevelToKlogVerbosity(level *hyperv1.LogLevel) int {
+	if level == nil {
+		return 2
+	}
+	switch *level {
 	case hyperv1.Debug:
 		return 4
 	case hyperv1.Trace:
@@ -27,7 +30,7 @@ func KASVerbosityLevel(hcp *hyperv1.HostedControlPlane) int {
 	// Structured API field takes priority over deprecated annotation.
 	if hcp.Spec.OperatorConfiguration != nil &&
 		hcp.Spec.OperatorConfiguration.KubeAPIServer.LogLevel != "" {
-		return LogLevelToKlogVerbosity(hcp.Spec.OperatorConfiguration.KubeAPIServer.LogLevel)
+		return LogLevelToKlogVerbosity(&hcp.Spec.OperatorConfiguration.KubeAPIServer.LogLevel)
 	}
 
 	// Deprecated annotation fallback for backward compatibility.

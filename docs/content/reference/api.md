@@ -14337,7 +14337,7 @@ This allows configuring how the default ingress controller endpoints are publish
 </tr>
 <tr>
 <td>
-<code>kubeAPIServer,omitzero</code></br>
+<code>kubeAPIServer</code></br>
 <em>
 <a href="#hypershift.openshift.io/v1beta1.ComponentLogLevelSpec">
 ComponentLogLevelSpec
