@@ -3,8 +3,8 @@ package hostedcluster
 import (
 	"testing"
 
+	"github.com/openshift/hypershift/support/k8sutil"
 	"github.com/openshift/hypershift/support/upsert"
-	hyperutil "github.com/openshift/hypershift/support/util"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,15 +43,11 @@ func TestCreateOrUpdateWithAnnotationFactory(t *testing.T) {
 				return func() error { return nil }
 			},
 			expected: &corev1.ConfigMap{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "ConfigMap",
-					APIVersion: "v1",
-				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "foo",
 					Namespace: "bar",
 					Annotations: map[string]string{
-						hyperutil.HostedClusterAnnotation: annotationValue,
+						k8sutil.HostedClusterAnnotation: annotationValue,
 					},
 				},
 			},
@@ -77,16 +73,12 @@ func TestCreateOrUpdateWithAnnotationFactory(t *testing.T) {
 				}
 			},
 			expected: &corev1.ConfigMap{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "ConfigMap",
-					APIVersion: "v1",
-				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "foo",
 					Namespace: "bar",
 					Annotations: map[string]string{
-						hyperutil.HostedClusterAnnotation: annotationValue,
-						"foo":                             "bar",
+						k8sutil.HostedClusterAnnotation: annotationValue,
+						"foo":                           "bar",
 					},
 				},
 			},
@@ -106,10 +98,6 @@ func TestCreateOrUpdateWithAnnotationFactory(t *testing.T) {
 				return func() error { return nil }
 			},
 			expected: &corev1.Namespace{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "Namespace",
-					APIVersion: "v1",
-				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "foo",
 				},

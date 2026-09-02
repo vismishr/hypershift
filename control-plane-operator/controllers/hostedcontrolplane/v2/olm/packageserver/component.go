@@ -2,7 +2,7 @@ package packageserver
 
 import (
 	component "github.com/openshift/hypershift/support/controlplane-component"
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/podspec"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -33,10 +33,14 @@ func (r *packageServer) NeedsManagementKASAccess() bool {
 func NewComponent() component.ControlPlaneComponent {
 	return component.NewDeploymentComponent(ComponentName, &packageServer{}).
 		WithAdaptFunction(adaptDeployment).
+		WithManifestAdapter(
+			"pdb.yaml",
+			component.AdaptPodDisruptionBudget(),
+		).
 		InjectKonnectivityContainer(component.KonnectivityContainerOptions{
 			Mode: component.Socks5,
 		}).
-		InjectAvailabilityProberContainer(util.AvailabilityProberOpts{
+		InjectAvailabilityProberContainer(podspec.AvailabilityProberOpts{
 			KubeconfigVolumeName: "kubeconfig",
 			RequiredAPIs: []schema.GroupVersionKind{
 				{Group: "operators.coreos.com", Version: "v1alpha1", Kind: "CatalogSource"},

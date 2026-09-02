@@ -11,6 +11,7 @@ import (
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/support/config"
+	"github.com/openshift/hypershift/support/netutil"
 	"github.com/openshift/hypershift/support/upsert"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -75,7 +76,7 @@ func GetAzureCloudConfiguration(cloudName string) (cloud.Configuration, error) {
 func GetSubnetNameFromSubnetID(subnetID string) (string, error) {
 	subnet, err := arm.ParseResourceID(subnetID)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse subnet ID %q: %v", subnetID, err)
+		return "", fmt.Errorf("failed to parse subnet ID %q: %w", subnetID, err)
 	}
 
 	if !strings.EqualFold(subnet.ResourceType.Type, "virtualnetworks/subnets") {
@@ -94,7 +95,7 @@ func GetSubnetNameFromSubnetID(subnetID string) (string, error) {
 func GetNameAndResourceGroupFromNetworkSecurityGroupID(nsgID string) (string, string, error) {
 	nsg, err := arm.ParseResourceID(nsgID)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to parse network security group ID %q: %v", nsgID, err)
+		return "", "", fmt.Errorf("failed to parse network security group ID %q: %w", nsgID, err)
 	}
 
 	if !strings.EqualFold(nsg.ResourceType.Type, "networkSecurityGroups") {
@@ -117,7 +118,7 @@ func GetNameAndResourceGroupFromNetworkSecurityGroupID(nsgID string) (string, st
 func GetVnetNameAndResourceGroupFromVnetID(vnetID string) (string, string, error) {
 	vnet, err := arm.ParseResourceID(vnetID)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to parse vnet ID %q: %v", vnetID, err)
+		return "", "", fmt.Errorf("failed to parse vnet ID %q: %w", vnetID, err)
 	}
 
 	if !strings.EqualFold(vnet.ResourceType.Type, "virtualNetworks") {
@@ -141,7 +142,7 @@ func GetVnetNameAndResourceGroupFromVnetID(vnetID string) (string, string, error
 func GetVnetInfoFromVnetID(ctx context.Context, vnetID string, subscriptionID string, azureCreds azcore.TokenCredential, cloudName string) (armnetwork.VirtualNetworksClientGetResponse, error) {
 	partialVnetInfo, err := arm.ParseResourceID(vnetID)
 	if err != nil {
-		return armnetwork.VirtualNetworksClientGetResponse{}, fmt.Errorf("failed to parse vnet information from vnet ID %q: %v", vnetID, err)
+		return armnetwork.VirtualNetworksClientGetResponse{}, fmt.Errorf("failed to parse vnet information from vnet ID %q: %w", vnetID, err)
 	}
 
 	if !strings.EqualFold(partialVnetInfo.ResourceType.Type, "virtualNetworks") {
@@ -210,7 +211,7 @@ func getFullVnetInfo(ctx context.Context, subscriptionID string, vnetResourceGro
 func GetNetworkSecurityGroupInfo(ctx context.Context, nsgID string, subscriptionID string, azureCreds azcore.TokenCredential, cloudName string) (armnetwork.SecurityGroupsClientGetResponse, error) {
 	partialNSGInfo, err := arm.ParseResourceID(nsgID)
 	if err != nil {
-		return armnetwork.SecurityGroupsClientGetResponse{}, fmt.Errorf("failed to parse network security group id %q: %v", nsgID, err)
+		return armnetwork.SecurityGroupsClientGetResponse{}, fmt.Errorf("failed to parse network security group id %q: %w", nsgID, err)
 	}
 
 	cloudConfig, err := GetAzureCloudConfiguration(cloudName)
@@ -260,14 +261,36 @@ func IsPrivateKeyVault(hcp *hyperv1.HostedControlPlane) bool {
 	return hcp.Spec.SecretEncryption.KMS.Azure.KeyVaultAccess == hyperv1.AzureKeyVaultPrivate
 }
 
-// IsAroHCP returns true if the managed service environment variable is set to ARO-HCP
+// IsAroHCP returns true if the managed service environment variable is set to ARO-HCP.
+// Use this only for management-cluster-level decisions where no HC/HCP context is available.
+// For per-cluster decisions, use IsAroHCPByHCP or IsAroHCPByHC instead.
 func IsAroHCP() bool {
 	return os.Getenv("MANAGED_SERVICE") == hyperv1.AroHCP
+}
+
+// IsAroHCPByHCP returns true when this HCP belongs to an ARO-managed cluster.
+// Delegates to netutil.IsAroHCPByHCP — defined there to avoid circular imports
+// with UseSharedIngressHCP.
+func IsAroHCPByHCP(hcp *hyperv1.HostedControlPlane) bool {
+	return netutil.IsAroHCPByHCP(hcp)
+}
+
+// IsAroHCPByHC returns true when this HostedCluster belongs to an ARO-managed cluster.
+func IsAroHCPByHC(hc *hyperv1.HostedCluster) bool {
+	return netutil.IsAroHCPByHC(hc)
 }
 
 // IsSelfManagedAzure returns true when the platform is Azure and the managed service is not ARO-HCP
 func IsSelfManagedAzure(platform hyperv1.PlatformType) bool {
 	return platform == hyperv1.AzurePlatform && !IsAroHCP()
+}
+
+// IsSelfManagedAzureWithWorkloadIdentity returns true if the platform is self-managed Azure
+// and workload identities are configured.
+func IsSelfManagedAzureWithWorkloadIdentity(platformType hyperv1.PlatformType, azure *hyperv1.AzurePlatformSpec) bool {
+	return IsSelfManagedAzure(platformType) &&
+		azure != nil &&
+		azure.AzureAuthenticationConfig.WorkloadIdentities != nil
 }
 
 // SetAsAroHCPTest sets the proper environment variable for the test, designating this is an ARO-HCP environment

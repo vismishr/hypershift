@@ -146,12 +146,12 @@ func (o *CreateBastionOpts) Run(ctx context.Context, logger logr.Logger) (string
 		var err error
 		sshPublicKey, err = os.ReadFile(o.SSHKeyFile)
 		if err != nil {
-			return "", "", fmt.Errorf("cannot read SSH public key from %s: %v", o.SSHKeyFile, err)
+			return "", "", fmt.Errorf("cannot read SSH public key from %s: %w", o.SSHKeyFile, err)
 		}
 	}
 
-	awsSession := awsutil.NewSessionV2(ctx, "cli-create-bastion", o.AWSCredentialsFile, o.AWSKey, o.AWSSecretKey, region)
-	awsConfig := awsutil.NewConfigV2()
+	awsSession := awsutil.NewSession(ctx, "cli-create-bastion", o.AWSCredentialsFile, o.AWSKey, o.AWSSecretKey, region)
+	awsConfig := awsutil.NewConfig()
 	ec2Client := ec2.NewFromConfig(*awsSession, func(o *ec2.Options) {
 		o.Retryer = awsConfig()
 	})
@@ -574,7 +574,7 @@ func existingInstance(ctx context.Context, ec2Client *ec2.Client, infraID string
 	return "", nil
 }
 
-func waitForInstanceRunning(ctx context.Context, logger logr.Logger, ec2Client *ec2.Client, instanceID string) (string, error) {
+func waitForInstanceRunning(ctx context.Context, _ logr.Logger, ec2Client *ec2.Client, instanceID string) (string, error) {
 
 	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()

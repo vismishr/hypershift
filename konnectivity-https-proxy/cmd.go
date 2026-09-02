@@ -1,6 +1,7 @@
 package konnectivityhttpsproxy
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
@@ -10,8 +11,8 @@ import (
 	"os"
 
 	"github.com/openshift/hypershift/support/konnectivityproxy"
+	"github.com/openshift/hypershift/support/netutil"
 	"github.com/openshift/hypershift/support/supportedversion"
-	"github.com/openshift/hypershift/support/util"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/ptr"
@@ -151,7 +152,6 @@ func NewStartCommand() *cobra.Command {
 				l.V(4).Info("Should proxy", "url", u)
 				return u, nil
 			},
-			Dial:        konnectivityDialer.Dial,
 			DialContext: konnectivityDialer.DialContext,
 		}
 		if httpsProxyURL != "" {
@@ -175,12 +175,11 @@ func NewStartCommand() *cobra.Command {
 }
 
 type dialFunc func(network, addr string) (net.Conn, error)
+type dialContextFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 type dialRequestFunc func(req *http.Request, network, addr string) (net.Conn, error)
 
-func dialDirectFunc(httpProxy *goproxy.ProxyHttpServer) dialFunc {
-	// NOTE: the function signature is determined by the goproxy library, it requires the deprecated version
-	// nolint:staticcheck
-	return httpProxy.Tr.Dial
+func dialDirectFunc(httpProxy *goproxy.ProxyHttpServer) dialContextFunc {
+	return httpProxy.Tr.DialContext
 }
 
 func dialThroughProxyFunc(httpProxy *goproxy.ProxyHttpServer, proxyURL string, proxyURLUser *url.Userinfo) dialFunc {
@@ -190,7 +189,7 @@ func dialThroughProxyFunc(httpProxy *goproxy.ProxyHttpServer, proxyURL string, p
 func shouldDialDirectFunc(connectDirectlyToCloudAPIs bool, isCloudAPI func(string) bool, userProxyFunc func(*url.URL) (*url.URL, error)) func(*url.URL) (bool, error) {
 	return func(u *url.URL) (bool, error) {
 		if connectDirectlyToCloudAPIs {
-			hostName, err := util.HostFromURL(u.String())
+			hostName, err := netutil.HostFromURL(u.String())
 			if err != nil {
 				return false, err
 			}
@@ -219,14 +218,14 @@ func addBasicAuthHeader(proxyUser *url.Userinfo) func(req *http.Request) {
 	}
 }
 
-func connectDialFunc(shouldDialDirect func(*url.URL) (bool, error), dialDirectly dialFunc, dialThroughProxy dialFunc) dialRequestFunc {
+func connectDialFunc(shouldDialDirect func(*url.URL) (bool, error), dialDirectly dialContextFunc, dialThroughProxy dialFunc) dialRequestFunc {
 	return func(req *http.Request, network, addr string) (net.Conn, error) {
 		shouldDialDirectly, err := shouldDialDirect(req.URL)
 		if err != nil {
 			return nil, err
 		}
 		if shouldDialDirectly {
-			return dialDirectly(network, addr)
+			return dialDirectly(req.Context(), network, addr)
 		}
 		return dialThroughProxy(network, addr)
 	}

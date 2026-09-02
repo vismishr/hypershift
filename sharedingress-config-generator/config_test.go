@@ -12,8 +12,8 @@ import (
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests/ignitionserver"
 	api "github.com/openshift/hypershift/support/api"
 	"github.com/openshift/hypershift/support/azureutil"
+	"github.com/openshift/hypershift/support/netutil"
 	testutil "github.com/openshift/hypershift/support/testutil"
-	"github.com/openshift/hypershift/support/util"
 
 	routev1 "github.com/openshift/api/route/v1"
 
@@ -28,7 +28,7 @@ func TestGenerateConfig(t *testing.T) {
 	// Library to create Routes and SVCs.
 	namedRoute := func(r *routev1.Route, mods ...func(*routev1.Route)) *routev1.Route {
 		r.Labels = map[string]string{
-			util.HCPRouteLabel: "test-ns-clustername",
+			netutil.HCPRouteLabel: "test-ns-clustername",
 		}
 		for _, m := range mods {
 			m(r)
@@ -108,6 +108,21 @@ func TestGenerateConfig(t *testing.T) {
 						Spec: hyperv1.HostedClusterSpec{
 							ClusterID:            "hc1-UUID",
 							KubeAPIServerDNSName: "kube-apiserver-public-custom.example.com",
+							Platform: hyperv1.PlatformSpec{
+								Type: hyperv1.AzurePlatform,
+								Azure: &hyperv1.AzurePlatformSpec{
+									Private: hyperv1.AzurePrivateSpec{
+										Type: hyperv1.AzurePrivateTypeSwift,
+										Swift: hyperv1.AzureSwiftSpec{
+											PodNetworkInstance: "test-pni",
+										},
+									},
+									Topology: hyperv1.AzureTopologyPublicAndPrivate,
+									AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{
+										AzureAuthenticationConfigType: hyperv1.AzureAuthenticationTypeManagedIdentities,
+									},
+								},
+							},
 						},
 					},
 					routes: []client.Object{
@@ -139,6 +154,21 @@ func TestGenerateConfig(t *testing.T) {
 									},
 								},
 							},
+							Platform: hyperv1.PlatformSpec{
+								Type: hyperv1.AzurePlatform,
+								Azure: &hyperv1.AzurePlatformSpec{
+									Private: hyperv1.AzurePrivateSpec{
+										Type: hyperv1.AzurePrivateTypeSwift,
+										Swift: hyperv1.AzureSwiftSpec{
+											PodNetworkInstance: "test-pni",
+										},
+									},
+									Topology: hyperv1.AzureTopologyPublicAndPrivate,
+									AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{
+										AzureAuthenticationConfigType: hyperv1.AzureAuthenticationTypeManagedIdentities,
+									},
+								},
+							},
 						},
 					},
 					routes: []client.Object{
@@ -146,12 +176,14 @@ func TestGenerateConfig(t *testing.T) {
 						route(manifests.KonnectivityServerRoute("").Name, testNamespace2, withHost("konnectivity.example.com"), withSvc("konnectivity-server")),
 						route(manifests.OauthServerExternalPublicRoute("").Name, testNamespace2, withHost("oauth-public.example.com"), withSvc("openshift-oauth")),
 						route(manifests.KubeAPIServerExternalPublicRoute("").Name, testNamespace2, withHost("kube-apiserver-public.example.com"), withSvc("kube-apiserver")),
+						route(manifests.MetricsProxyRoute("").Name, testNamespace2, withHost("metrics-proxy.example.com"), withSvc("metrics-proxy")),
 					},
 					svcs: []client.Object{
 						svc("ignition-server-proxy", testNamespace2, withClusterIP("1.1.1.1")),
 						svc("konnectivity-server", testNamespace2, withClusterIP("2.2.2.2")),
 						svc("openshift-oauth", testNamespace2, withClusterIP("3.3.3.3")),
 						svc("kube-apiserver", testNamespace2, withClusterIP("4.4.4.4"), withPort(int32(6443))),
+						svc("metrics-proxy", testNamespace2, withClusterIP("5.5.5.5"), withPort(int32(443))),
 					},
 				},
 			},
@@ -172,14 +204,20 @@ func TestGenerateConfig(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "hc1",
 							Namespace: "test",
-							Annotations: map[string]string{
-								hyperv1.SwiftPodNetworkInstanceAnnotation: "test-swift-instance",
-							},
 						},
 						Spec: hyperv1.HostedClusterSpec{
 							ClusterID: "hc1-UUID",
 							Platform: hyperv1.PlatformSpec{
 								Type: hyperv1.AzurePlatform,
+								Azure: &hyperv1.AzurePlatformSpec{
+									Private: hyperv1.AzurePrivateSpec{
+										Type: hyperv1.AzurePrivateTypeSwift,
+										Swift: hyperv1.AzureSwiftSpec{
+											PodNetworkInstance: "test-pni",
+										},
+									},
+									Topology: hyperv1.AzureTopologyPrivate,
+								},
 							},
 						},
 					},

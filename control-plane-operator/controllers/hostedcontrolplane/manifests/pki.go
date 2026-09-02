@@ -258,11 +258,21 @@ func HCCOClientCertSecret(ns string) *corev1.Secret {
 	return secretFor(ns, "hcco-client")
 }
 
+func KASBootstrapContainerSigner(ns string) *corev1.Secret {
+	return secretFor(ns, "kas-bootstrap-container-signer")
+}
+
+func KASBootstrapContainerClientCertSecret(ns string) *corev1.Secret {
+	return secretFor(ns, "kas-bootstrap-container-client")
+}
+
 func KASMachineBootstrapClientCertSecret(ns string) *corev1.Secret {
 	return secretFor(ns, "kas-bootstrap-client")
 }
 
 func KCMServerCertSecret(ns string) *corev1.Secret { return secretFor(ns, "kcm-server") }
+
+func SchedulerServerCertSecret(ns string) *corev1.Secret { return secretFor(ns, "scheduler-server") }
 
 func ServiceAccountSigningKeySecret(ns string) *corev1.Secret { return secretFor(ns, "sa-signing-key") }
 
@@ -294,6 +304,22 @@ func KonnectivitySignerSecret(ns string) *corev1.Secret {
 	return secretFor(ns, "konnectivity-signer")
 }
 
+func KonnectivityServerServingSignerSecret(ns string) *corev1.Secret {
+	return secretFor(ns, "konnectivity-server-serving-signer")
+}
+
+func KonnectivityClusterServingSignerSecret(ns string) *corev1.Secret {
+	return secretFor(ns, "konnectivity-cluster-serving-signer")
+}
+
+func KonnectivityServerAuthSignerSecret(ns string) *corev1.Secret {
+	return secretFor(ns, "konnectivity-server-auth-signer")
+}
+
+func KonnectivityClientAuthSignerSecret(ns string) *corev1.Secret {
+	return secretFor(ns, "konnectivity-client-auth-signer")
+}
+
 func KonnectivityServerSecret(ns string) *corev1.Secret { return secretFor(ns, "konnectivity-server") }
 
 func KonnectivityClusterSecret(ns string) *corev1.Secret {
@@ -322,6 +348,14 @@ func MachineConfigServerCert(ns string) *corev1.Secret { return secretFor(ns, "m
 
 func ClusterNodeTuningOperatorServingCertSecret(ns string) *corev1.Secret {
 	return secretFor(ns, "node-tuning-operator-tls")
+}
+
+func AzureDiskCSIDriverOperatorServingCertSecret(ns string) *corev1.Secret {
+	return secretFor(ns, "azure-disk-csi-driver-operator-serving-cert")
+}
+
+func AzureFileCSIDriverOperatorServingCertSecret(ns string) *corev1.Secret {
+	return secretFor(ns, "azure-file-csi-driver-operator-serving-cert")
 }
 
 func OLMPackageServerCertSecret(ns string) *corev1.Secret { return secretFor(ns, "packageserver-cert") }
@@ -362,6 +396,10 @@ func AzureDiskCsiDriverControllerMetricsServingCert(ns string) *corev1.Secret {
 
 func AzureFileCsiDriverControllerMetricsServingCert(ns string) *corev1.Secret {
 	return secretFor(ns, "azure-file-csi-driver-controller-metrics-serving-cert")
+}
+
+func AWSEBSCsiDriverOperatorServingCert(ns string) *corev1.Secret {
+	return secretFor(ns, "aws-ebs-csi-driver-operator-serving-cert")
 }
 
 func AWSEBSCsiDriverControllerMetricsServingCert(ns string) *corev1.Secret {

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	. "github.com/onsi/gomega"
+
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/api/util/ipnet"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/sharedingress"
@@ -76,6 +78,12 @@ func TestAPIServerHAProxyConfig(t *testing.T) {
 			noProxy:  "localhost,127.0.0.1," + externalAddress,
 		},
 		{
+			name:     "when noproxy has leading-dot domain matching external kas address it should create an haproxy",
+			proxy:    "proxy",
+			platform: "fakePlatform",
+			noProxy:  "localhost,.example.com",
+		},
+		{
 			name:             "when use shared router it should use proxy protocol",
 			proxy:            "",
 			noProxy:          "",
@@ -106,6 +114,112 @@ func TestAPIServerHAProxyConfig(t *testing.T) {
 				t.Fatalf("cannot convert to yaml: %v", err)
 			}
 			testutil.CompareWithFixture(t, yamlConfig)
+		})
+	}
+}
+
+func TestShouldSkipProxyForKAS(t *testing.T) {
+	const (
+		externalAddress = "api.test.example.com"
+		internalAddress = "172.20.0.1"
+		serviceNetwork  = "10.134.0.0/16"
+		clusterNetwork  = "10.128.0.0/14"
+	)
+
+	testCases := []struct {
+		name     string
+		noProxy  string
+		expected bool
+	}{
+		{
+			name:     "When noProxy is empty it should not skip proxy",
+			noProxy:  "",
+			expected: false,
+		},
+		{
+			name:     "When noProxy contains exact external address it should skip proxy",
+			noProxy:  "localhost,127.0.0.1," + externalAddress,
+			expected: true,
+		},
+		{
+			name:     "When noProxy contains exact internal address it should skip proxy",
+			noProxy:  "localhost,127.0.0.1," + internalAddress,
+			expected: true,
+		},
+		{
+			name:     "When noProxy contains leading-dot domain matching external address it should skip proxy",
+			noProxy:  "localhost,.example.com",
+			expected: true,
+		},
+		{
+			name:     "When noProxy contains bare parent domain matching external address it should skip proxy",
+			noProxy:  "localhost,example.com",
+			expected: true,
+		},
+		{
+			name:     "When noProxy contains leading-dot partial domain matching external address it should skip proxy",
+			noProxy:  "localhost,.test.example.com",
+			expected: true,
+		},
+		{
+			name:     "When noProxy contains CIDR covering internal address it should skip proxy",
+			noProxy:  "localhost,172.16.0.0/12",
+			expected: true,
+		},
+		{
+			name:     "When noProxy contains kubernetes keyword it should skip proxy",
+			noProxy:  "localhost,kubernetes.svc,127.0.0.1",
+			expected: true,
+		},
+		{
+			name:     "When noProxy contains exact service network CIDR it should skip proxy",
+			noProxy:  "localhost," + serviceNetwork,
+			expected: true,
+		},
+		{
+			name:     "When noProxy contains exact cluster network CIDR it should skip proxy",
+			noProxy:  "localhost," + clusterNetwork,
+			expected: true,
+		},
+		{
+			name:     "When noProxy contains wildcard it should skip proxy",
+			noProxy:  "*",
+			expected: true,
+		},
+		{
+			name:     "When noProxy contains unrelated entries it should not skip proxy",
+			noProxy:  "localhost,127.0.0.1,.other-domain.com,192.168.0.0/16",
+			expected: false,
+		},
+		{
+			name:     "When noProxy has extra whitespace around entries it should still match",
+			noProxy:  " localhost , .example.com , 127.0.0.1 ",
+			expected: true,
+		},
+		{
+			name:     "When noProxy contains port-qualified domain matching KAS port it should skip proxy",
+			noProxy:  "localhost,api.test.example.com:6443",
+			expected: true,
+		},
+		{
+			name:     "When noProxy contains port-qualified IP matching KAS port it should skip proxy",
+			noProxy:  "localhost,172.20.0.1:6443",
+			expected: true,
+		},
+		{
+			name:     "When noProxy contains port-qualified domain with non-matching port it should not skip proxy",
+			noProxy:  "localhost,api.test.example.com:8080",
+			expected: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := shouldSkipProxyForKAS(tc.noProxy, externalAddress, 6443, internalAddress, 6443, serviceNetwork, clusterNetwork)
+			if result != tc.expected {
+				t.Errorf("shouldSkipProxyForKAS(%q, %q, %q, %q, %q) = %v, want %v",
+					tc.noProxy, externalAddress, internalAddress, serviceNetwork, clusterNetwork, result, tc.expected)
+			}
 		})
 	}
 }
@@ -282,6 +396,14 @@ kind: Config`
 			hc: hc(func(hc *hyperv1.HostedCluster) {
 				hc.Spec.Platform.Type = hyperv1.AzurePlatform
 				hc.Spec.Platform.AWS = nil
+				hc.Spec.Platform.Azure = &hyperv1.AzurePlatformSpec{
+					Private: hyperv1.AzurePrivateSpec{
+						Type: hyperv1.AzurePrivateTypeSwift,
+						Swift: hyperv1.AzureSwiftSpec{
+							PodNetworkInstance: "test-swift-instance",
+						},
+					},
+				}
 				hc.ObjectMeta.Annotations = map[string]string{
 					hyperv1.SwiftPodNetworkInstanceAnnotation: "test-swift-instance",
 				}
@@ -308,13 +430,25 @@ kind: Config`
 			expectedHAProxyConfigContent: []string{"api.hc.hypershift.local:443"},
 		},
 		{
-			name: "When ARO  and no Swift is used (CI) it should use the shared ingress LB service IP, port 6443 and proxy protocol",
+			name: "When ARO shared ingress is used it should use the shared ingress LB service IP, port 6443 and proxy protocol",
 			setupEnv: func(t *testing.T) {
 				azureutil.SetAsAroHCPTest(t)
 			},
 			hc: hc(func(hc *hyperv1.HostedCluster) {
 				hc.Spec.Platform.Type = hyperv1.AzurePlatform
 				hc.Spec.Platform.AWS = nil
+				hc.Spec.Platform.Azure = &hyperv1.AzurePlatformSpec{
+					Topology: hyperv1.AzureTopologyPublic,
+					Private: hyperv1.AzurePrivateSpec{
+						Type: hyperv1.AzurePrivateTypeSwift,
+						Swift: hyperv1.AzureSwiftSpec{
+							PodNetworkInstance: "test-pni",
+						},
+					},
+					AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{
+						AzureAuthenticationConfigType: hyperv1.AzureAuthenticationTypeManagedIdentities,
+					},
+				}
 				hc.Status.KubeConfig = &corev1.LocalObjectReference{Name: "kk"}
 				hc.Spec.Networking.ServiceNetwork = []hyperv1.ServiceNetworkEntry{{CIDR: *ipnet.MustParseCIDR("192.168.1.0/24")}}
 				hc.Spec.Services = []hyperv1.ServicePublishingStrategyMapping{
@@ -401,6 +535,50 @@ kind: Config`
 			}
 
 			testutil.CompareWithFixture(t, haproxyConfig.Data)
+		})
+	}
+}
+
+func TestJoinDefaultPortIfMissing(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		addr     string
+		expected string
+		wantErr  bool
+	}{
+		{
+			name:     "When HTTPS URL has no port it should add port 443",
+			addr:     "https://proxy.example.com",
+			expected: "https://proxy.example.com:443",
+		},
+		{
+			name:     "When HTTP URL has no port it should add port 80",
+			addr:     "http://proxy.example.com",
+			expected: "http://proxy.example.com:80",
+		},
+		{
+			name:     "When HTTPS URL already has a port it should keep existing port",
+			addr:     "https://proxy.example.com:8443",
+			expected: "https://proxy.example.com:8443",
+		},
+		{
+			name:    "When URL has no scheme it should return an error",
+			addr:    "proxy.example.com",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			result, err := joinDefaultPortIfMissing(tt.addr)
+			if tt.wantErr {
+				g.Expect(err).To(HaveOccurred())
+				return
+			}
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(result).To(Equal(tt.expected))
 		})
 	}
 }

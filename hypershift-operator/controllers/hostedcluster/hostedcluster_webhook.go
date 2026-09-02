@@ -12,11 +12,14 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
 
+	capiv1beta1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/conversion"
 
 	jsonpatch "github.com/evanphx/json-patch/v5"
 	"github.com/go-logr/logr"
@@ -104,7 +107,7 @@ func (defaulter *nodePoolDefaulter) Default(ctx context.Context, obj runtime.Obj
 
 		err := defaulter.client.Get(ctx, client.ObjectKeyFromObject(hc), hc)
 		if err != nil {
-			return fmt.Errorf("error retrieving HostedCluster named [%s], %v", np.Spec.ClusterName, err)
+			return fmt.Errorf("error retrieving HostedCluster named [%s], %w", np.Spec.ClusterName, err)
 		}
 		np.Spec.Release.Image = hc.Spec.Release.Image
 	}
@@ -150,6 +153,22 @@ func SetupWebhookWithManager(mgr ctrl.Manager, imageMetaDataProvider *hyperutil.
 	if err != nil {
 		return fmt.Errorf("unable to register hostedcontrolplane webhook: %w", err)
 	}
+
+	// CAPI conversion between API versions requires resolving GroupKind to an API version string
+	// to convert between corev1.ObjectReference and ContractVersionedObjectReference.
+	// Without this, Cluster spec/status conversion fails and MachineDeployment controller
+	// sees an empty Cluster status, never creates MachineSets or Machines.
+	capiv1beta1.SetAPIVersionGetter(func(gk schema.GroupKind) (string, error) {
+		versions := mgr.GetScheme().VersionsForGroupKind(gk)
+		if len(versions) == 0 {
+			return "", fmt.Errorf("no versions registered for GroupKind %s", gk)
+		}
+		return gk.WithVersion(versions[0].Version).GroupVersion().String(), nil
+	})
+
+	// Register conversion webhook handler for CRD version conversions (HyperShift and CAPI types)
+	mgr.GetWebhookServer().Register("/convert", conversion.NewWebhookHandler(mgr.GetScheme()))
+
 	return nil
 }
 
@@ -196,7 +215,7 @@ func (v hostedClusterValidator) ValidateDelete(_ context.Context, _ runtime.Obje
 	return nil, nil
 }
 
-func (v hostedClusterValidator) validateCreateKubevirtHostedCluster(ctx context.Context, hc *hyperv1.HostedCluster) (admission.Warnings, error) {
+func (v hostedClusterValidator) validateCreateKubevirtHostedCluster(_ context.Context, hc *hyperv1.HostedCluster) (admission.Warnings, error) {
 	err := validateJsonAnnotation(hc.Annotations)
 	if err != nil {
 		return nil, err
@@ -205,7 +224,7 @@ func (v hostedClusterValidator) validateCreateKubevirtHostedCluster(ctx context.
 	return nil, nil
 }
 
-func (v hostedClusterValidator) validateUpdateKubevirtHostedCluster(ctx context.Context, oldHC, newHC *hyperv1.HostedCluster) error {
+func (v hostedClusterValidator) validateUpdateKubevirtHostedCluster(_ context.Context, _, newHC *hyperv1.HostedCluster) error {
 	err := validateJsonAnnotation(newHC.Annotations)
 	if err != nil {
 		return err
@@ -264,7 +283,7 @@ func (v nodePoolValidator) ValidateDelete(_ context.Context, _ runtime.Object) (
 	return nil, nil
 }
 
-func (v nodePoolValidator) validateCreateKubevirtNodePool(ctx context.Context, np *hyperv1.NodePool) (admission.Warnings, error) {
+func (v nodePoolValidator) validateCreateKubevirtNodePool(_ context.Context, np *hyperv1.NodePool) (admission.Warnings, error) {
 	err := validateJsonAnnotation(np.Annotations)
 	if err != nil {
 		return nil, err
@@ -273,7 +292,7 @@ func (v nodePoolValidator) validateCreateKubevirtNodePool(ctx context.Context, n
 	return nil, nil
 }
 
-func (v nodePoolValidator) validateUpdateKubevirtNodePool(ctx context.Context, oldNP, newNP *hyperv1.NodePool) error {
+func (v nodePoolValidator) validateUpdateKubevirtNodePool(_ context.Context, _, newNP *hyperv1.NodePool) error {
 	err := validateJsonAnnotation(newNP.Annotations)
 	if err != nil {
 		return err

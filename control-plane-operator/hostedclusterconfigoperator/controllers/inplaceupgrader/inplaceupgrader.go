@@ -6,8 +6,10 @@ import (
 	"strconv"
 	"time"
 
+	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/control-plane-operator/hostedclusterconfigoperator/controllers/resources/manifests"
 	"github.com/openshift/hypershift/support/globalconfig"
+	"github.com/openshift/hypershift/support/k8sutil"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	"github.com/openshift/hypershift/support/upsert"
 
@@ -19,7 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
-	capiv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -54,8 +56,14 @@ const (
 	nodePoolAnnotationUpgradeInProgressFalse = "hypershift.openshift.io/nodePoolUpgradeInProgressFalse"
 	nodePoolAnnotationMaxUnavailable         = "hypershift.openshift.io/nodePoolMaxUnavailable"
 
-	TokenSecretPayloadKey = "payload"
-	TokenSecretReleaseKey = "release"
+	TokenSecretPayloadKey        = "payload"
+	TokenSecretReleaseKey        = "release"
+	TokenSecretReleaseVersionKey = "release-version"
+
+	// upgradeRequeueInterval is how often the controller rechecks while an
+	// upgrade is in progress, closing the gap when a force-deleted pod's
+	// deletion event is missed.
+	upgradeRequeueInterval = 30 * time.Second
 )
 
 type Reconciler struct {
@@ -69,7 +77,6 @@ type Reconciler struct {
 
 func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
-	log.Info("Reconciling")
 
 	// Fetch the MachineSet.
 	machineSet := &capiv1.MachineSet{}
@@ -140,7 +147,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	}
 	log.Info("discovered mco image", "image", mcoImage)
 
-	return ctrl.Result{}, r.reconcileInPlaceUpgrade(ctx, nodePoolUpgradeAPI, tokenSecret, mcoImage)
+	releaseVersion := string(tokenSecret.Data[TokenSecretReleaseVersionKey])
+	if releaseVersion == "" {
+		return ctrl.Result{}, fmt.Errorf("token secret %s/%s is missing %q key", tokenSecret.Namespace, tokenSecret.Name, TokenSecretReleaseVersionKey)
+	}
+
+	if err := r.reconcileInPlaceUpgrade(ctx, nodePoolUpgradeAPI, tokenSecret, mcoImage, releaseVersion); err != nil {
+		return ctrl.Result{}, err
+	}
+	// Requeue periodically while an upgrade is in progress. The controller only
+	// watches Nodes and MachineSets, so if an upgrade pod is force-deleted the
+	// deletion event is missed and the replacement pod is never created. A
+	// periodic recheck closes that gap.
+	return ctrl.Result{RequeueAfter: upgradeRequeueInterval}, nil
 }
 
 type nodePoolUpgradeAPI struct {
@@ -155,7 +174,7 @@ type nodePoolUpgradeAPI struct {
 }
 
 // reconcileInPlaceUpgrade loops over all Nodes that belong to a NodePool and performs an in place upgrade if necessary.
-func (r *Reconciler) reconcileInPlaceUpgrade(ctx context.Context, nodePoolUpgradeAPI *nodePoolUpgradeAPI, tokenSecret *corev1.Secret, mcoImage string) error {
+func (r *Reconciler) reconcileInPlaceUpgrade(ctx context.Context, nodePoolUpgradeAPI *nodePoolUpgradeAPI, tokenSecret *corev1.Secret, mcoImage, releaseVersion string) error {
 	log := ctrl.LoggerFrom(ctx)
 
 	currentConfigVersionHash := nodePoolUpgradeAPI.status.currentConfigVersion
@@ -165,7 +184,7 @@ func (r *Reconciler) reconcileInPlaceUpgrade(ctx context.Context, nodePoolUpgrad
 	}
 	machineSet := nodePoolUpgradeAPI.spec.poolRef
 
-	nodes, err := getNodesForMachineSet(ctx, r.client, r.guestClusterClient, machineSet)
+	nodes, nodeToMachine, err := getNodesForMachineSet(ctx, r.client, r.guestClusterClient, machineSet)
 	if err != nil {
 		return err
 	}
@@ -213,11 +232,26 @@ func (r *Reconciler) reconcileInPlaceUpgrade(ctx context.Context, nodePoolUpgrad
 				log.Info("Reconciled MachineSet", "result", result)
 			}
 
-			return fmt.Errorf("degraded node found, cannot progress in-place upgrade. Degraded reason: %v", node.Annotations[MachineConfigDaemonMessageAnnotationKey])
+			return fmt.Errorf("degraded node %s found, cannot progress in-place upgrade. Degraded reason: %s", node.Name, node.Annotations[MachineConfigDaemonMessageAnnotationKey])
 		}
 
 		if nodeNeedsUpgrade(node, currentConfigVersionHash, targetConfigVersionHash) {
 			nodeNeedUpgradeCount++
+		} else if machine, ok := nodeToMachine[node.Name]; ok {
+			// Node has completed upgrade — annotate its Machine with the release version.
+			if machine.Annotations[hyperv1.NodePoolReleaseVersionAnnotation] != releaseVersion {
+				result, err := r.CreateOrUpdate(ctx, r.client, machine, func() error {
+					if machine.Annotations == nil {
+						machine.Annotations = make(map[string]string)
+					}
+					machine.Annotations[hyperv1.NodePoolReleaseVersionAnnotation] = releaseVersion
+					return nil
+				})
+				if err != nil {
+					return fmt.Errorf("failed to annotate Machine %s with release version: %w", machine.Name, err)
+				}
+				log.Info("Annotated Machine with release version", "machine", machine.Name, "version", releaseVersion, "result", result)
+			}
 		}
 	}
 
@@ -255,12 +289,12 @@ func (r *Reconciler) reconcileInPlaceUpgrade(ctx context.Context, nodePoolUpgrad
 
 	err = r.reconcileUpgradePods(ctx, r.guestClusterClient, nodes, nodePoolUpgradeAPI.spec.poolRef.GetName(), mcoImage, nodePoolUpgradeAPI.proxy)
 	if err != nil {
-		return fmt.Errorf("failed to delete idle upgrade pods: %w", err)
+		return fmt.Errorf("failed to reconcile upgrade pods: %w", err)
 	}
 	return nil
 }
 
-func (r *Reconciler) setNodesDesiredConfig(ctx context.Context, hostedClusterClient client.Client, poolName string, nodes []*corev1.Node, targetConfigVersionHash string) error {
+func (r *Reconciler) setNodesDesiredConfig(ctx context.Context, hostedClusterClient client.Client, _ string, nodes []*corev1.Node, targetConfigVersionHash string) error {
 	log := ctrl.LoggerFrom(ctx)
 
 	for _, node := range nodes {
@@ -290,24 +324,14 @@ func (r *Reconciler) reconcileUpgradePods(ctx context.Context, hostedClusterClie
 		pod := inPlaceUpgradePod(namespace.Name, node.Name)
 
 		if node.Annotations[CurrentMachineConfigAnnotationKey] == node.Annotations[DesiredMachineConfigAnnotationKey] &&
-			node.Annotations[DesiredDrainerAnnotationKey] == node.Annotations[LastAppliedDrainerAnnotationKey] {
+			node.Annotations[DesiredDrainerAnnotationKey] == node.Annotations[LastAppliedDrainerAnnotationKey] &&
+			node.Annotations[MachineConfigDaemonStateAnnotationKey] == MachineConfigDaemonStateDone {
 			// the node is updated and does not require a MCD running
-			if err := hostedClusterClient.Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil {
-				if apierrors.IsNotFound(err) {
-					continue
-				}
-				return fmt.Errorf("error getting upgrade MCD pod: %w", err)
+			if existed, err := k8sutil.DeleteIfNeeded(ctx, hostedClusterClient, pod); err != nil {
+				return err
+			} else if existed {
+				log.Info("Deleted idle upgrade pod")
 			}
-			if pod.DeletionTimestamp != nil {
-				continue
-			}
-			if err := hostedClusterClient.Delete(ctx, pod); err != nil {
-				if apierrors.IsNotFound(err) {
-					continue
-				}
-				return fmt.Errorf("error deleting upgrade MCD pod: %w", err)
-			}
-			log.Info("Deleted idle upgrade pod")
 		} else {
 			if err := hostedClusterClient.Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}, pod); err != nil {
 				if !apierrors.IsNotFound(err) {
@@ -327,13 +351,26 @@ func (r *Reconciler) reconcileUpgradePods(ctx context.Context, hostedClusterClie
 				} else {
 					log.Info("create upgrade pod", "result", result)
 				}
+				// A pod with RestartPolicy=OnFailure only reaches a terminal phase after kubelet has exhausted its restart attempts (e.g. eviction or node loss), so deleting it here does not interrupt an active retry.
+			} else if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+				if pod.DeletionTimestamp != nil {
+					continue
+				}
+				log.Info("Detected terminated upgrade pod on node that still needs upgrade, deleting for retry",
+					"node", node.Name, "podPhase", pod.Status.Phase)
+				if err := hostedClusterClient.Delete(ctx, pod); err != nil {
+					if apierrors.IsNotFound(err) {
+						continue
+					}
+					return fmt.Errorf("error deleting terminated upgrade MCD pod for node %s: %w", node.Name, err)
+				}
 			}
 		}
 	}
 	return nil
 }
 
-// getPayloadImage gets the specified image reference from the payload
+// getPayloadImage gets the specified image reference from the payload.
 func (r *Reconciler) getPayloadImage(ctx context.Context, imageName string) (string, error) {
 	hcp := manifests.HostedControlPlane(r.hcpNamespace, r.hcpName)
 	if err := r.client.Get(ctx, client.ObjectKeyFromObject(hcp), hcp); err != nil {
@@ -462,20 +499,8 @@ func deleteUpgradeManifests(ctx context.Context, hostedClusterClient client.Clie
 	namespace := inPlaceUpgradeNamespace(poolName)
 	for _, node := range nodes {
 		pod := inPlaceUpgradePod(namespace.Name, node.Name)
-		if err := hostedClusterClient.Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return fmt.Errorf("error getting upgrade MCD pod: %w", err)
-		}
-		if pod.DeletionTimestamp != nil {
-			continue
-		}
-		if err := hostedClusterClient.Delete(ctx, pod); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return fmt.Errorf("error deleting upgrade MCD pod: %w", err)
+		if _, err := k8sutil.DeleteIfNeeded(ctx, hostedClusterClient, pod); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -492,7 +517,7 @@ func getNodesToUpgrade(nodes []*corev1.Node, targetConfig string, maxUnavailable
 	return append(availableCandidates, alreadyUnavailableNodes...)
 }
 
-func getCapacity(nodes []*corev1.Node, targetConfig string, maxUnavailable int) int {
+func getCapacity(nodes []*corev1.Node, _ string, maxUnavailable int) int {
 	// get how many machines we can update based on maxUnavailable
 	// In the MCO logic, unavailable is defined as any of:
 	// - config does not match
@@ -639,10 +664,10 @@ func (r *Reconciler) nodeToMachineSet(ctx context.Context, o client.Object) []re
 	}}}
 }
 
-func getNodesForMachineSet(ctx context.Context, c client.Reader, hostedClusterClient client.Client, machineSet *capiv1.MachineSet) ([]*corev1.Node, error) {
+func getNodesForMachineSet(ctx context.Context, c client.Reader, hostedClusterClient client.Client, machineSet *capiv1.MachineSet) ([]*corev1.Node, map[string]*capiv1.Machine, error) {
 	selectorMap, err := metav1.LabelSelectorAsMap(&machineSet.Spec.Selector)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert MachineSet %q label selector to a map: %w", machineSet.Name, err)
+		return nil, nil, fmt.Errorf("failed to convert MachineSet %q label selector to a map: %w", machineSet.Name, err)
 	}
 
 	// Get all Machines linked to this MachineSet.
@@ -652,7 +677,7 @@ func getNodesForMachineSet(ctx context.Context, c client.Reader, hostedClusterCl
 		client.InNamespace(machineSet.Namespace),
 		client.MatchingLabels(selectorMap),
 	); err != nil {
-		return nil, fmt.Errorf("failed to list machines: %w", err)
+		return nil, nil, fmt.Errorf("failed to list machines: %w", err)
 	}
 
 	var machineSetOwnedMachines []capiv1.Machine
@@ -663,17 +688,19 @@ func getNodesForMachineSet(ctx context.Context, c client.Reader, hostedClusterCl
 	}
 
 	var nodes []*corev1.Node
-	for _, machine := range machineSetOwnedMachines {
+	nodeToMachine := make(map[string]*capiv1.Machine)
+	for i, machine := range machineSetOwnedMachines {
 		if machine.Status.NodeRef != nil {
 			node := &corev1.Node{}
 			if err := hostedClusterClient.Get(ctx, client.ObjectKey{Name: machine.Status.NodeRef.Name}, node); err != nil {
-				return nil, fmt.Errorf("error getting node: %w", err)
+				return nil, nil, fmt.Errorf("error getting node: %w", err)
 			}
 			nodes = append(nodes, node)
+			nodeToMachine[node.Name] = &machineSetOwnedMachines[i]
 		}
 	}
 
-	return nodes, nil
+	return nodes, nodeToMachine, nil
 }
 
 func nodeNeedsUpgrade(node *corev1.Node, currentConfigVersion, targetConfigVersion string) bool {

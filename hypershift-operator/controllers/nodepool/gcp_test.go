@@ -14,6 +14,8 @@ import (
 	"k8s.io/utils/ptr"
 
 	capigcp "sigs.k8s.io/cluster-api-provider-gcp/api/v1beta1"
+
+	"github.com/coreos/stream-metadata-go/stream"
 )
 
 func TestGcpMachineTemplateSpec(t *testing.T) {
@@ -89,8 +91,8 @@ func TestGcpMachineTemplateSpec(t *testing.T) {
 							MachineType: "n1-standard-2",
 							Zone:        "us-central1-a",
 							BootDisk: &hyperv1.GCPBootDisk{
-								DiskSizeGB: ptr.To[int64](100),
-								DiskType:   ptr.To("pd-ssd"),
+								DiskSizeGB: 100,
+								DiskType:   "pd-ssd",
 							},
 						},
 					},
@@ -138,7 +140,7 @@ func TestGcpMachineTemplateSpec(t *testing.T) {
 						GCP: &hyperv1.GCPNodePoolPlatform{
 							MachineType:       "n1-standard-2",
 							Zone:              "us-central1-a",
-							ProvisioningModel: ptr.To(hyperv1.GCPProvisioningModelPreemptible),
+							ProvisioningModel: hyperv1.GCPProvisioningModelPreemptible,
 						},
 					},
 				},
@@ -187,7 +189,7 @@ func TestGcpMachineTemplateSpec(t *testing.T) {
 						GCP: &hyperv1.GCPNodePoolPlatform{
 							MachineType:       "n1-standard-2",
 							Zone:              "us-central1-a",
-							ProvisioningModel: ptr.To(hyperv1.GCPProvisioningModelSpot),
+							ProvisioningModel: hyperv1.GCPProvisioningModelSpot,
 						},
 					},
 				},
@@ -237,7 +239,7 @@ func TestGcpMachineTemplateSpec(t *testing.T) {
 						GCP: &hyperv1.GCPNodePoolPlatform{
 							MachineType: "n1-standard-2",
 							Zone:        "us-central1-a",
-							Image:       ptr.To("projects/my-project/global/images/custom-rhcos-image"),
+							Image:       "projects/my-project/global/images/custom-rhcos-image",
 						},
 					},
 				},
@@ -287,7 +289,7 @@ func TestGcpMachineTemplateSpec(t *testing.T) {
 								{Key: "env", Value: ptr.To("test")},
 								{Key: "team", Value: ptr.To("platform")},
 							},
-							NetworkTags: []string{"allow-ssh", "allow-internal"},
+							NetworkTags: []hyperv1.GCPResourceName{"allow-ssh", "allow-internal"},
 						},
 					},
 				},
@@ -343,9 +345,9 @@ func TestGcpMachineTemplateSpec(t *testing.T) {
 							MachineType: "n1-standard-2",
 							Zone:        "us-central1-a",
 							BootDisk: &hyperv1.GCPBootDisk{
-								DiskSizeGB: ptr.To[int64](64),
-								DiskType:   ptr.To("pd-standard"),
-								EncryptionKey: &hyperv1.GCPDiskEncryptionKey{
+								DiskSizeGB: 64,
+								DiskType:   "pd-standard",
+								EncryptionKey: hyperv1.GCPDiskEncryptionKey{
 									KMSKeyName: "projects/test-project/locations/us-central1/keyRings/test-ring/cryptoKeys/test-key",
 								},
 							},
@@ -444,7 +446,7 @@ func TestGcpMachineTemplateSpec(t *testing.T) {
 							MachineType: "n1-standard-2",
 							Zone:        "us-central1-a",
 							ServiceAccount: &hyperv1.GCPNodeServiceAccount{
-								Email: ptr.To("test-nodepool@test-project.iam.gserviceaccount.com"),
+								Email: "test-nodepool@test-project.iam.gserviceaccount.com",
 								Scopes: []string{
 									"https://www.googleapis.com/auth/cloud-platform",
 								},
@@ -493,11 +495,11 @@ func TestGcpMachineTemplateSpec(t *testing.T) {
 				ImageStream: &imageapi.ImageStream{
 					ObjectMeta: metav1.ObjectMeta{Name: "4.18.0"},
 				},
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							Images: releaseinfo.CoreOSImages{
-								GCP: releaseinfo.CoreOSGCPImage{
+							Images: stream.Images{
+								Gcp: &stream.GcpImage{
 									Project: "rhcos-cloud",
 									Name:    "rhcos-x86-64-418",
 								},
@@ -542,11 +544,11 @@ func TestDefaultNodePoolGCPImage(t *testing.T) {
 			name: "When stream metadata has project and name for amd64, it should construct image path",
 			arch: hyperv1.ArchitectureAMD64,
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							Images: releaseinfo.CoreOSImages{
-								GCP: releaseinfo.CoreOSGCPImage{
+							Images: stream.Images{
+								Gcp: &stream.GcpImage{
 									Project: "rhcos-cloud",
 									Name:    "rhcos-9-6-20251023-0-gcp-x86-64",
 								},
@@ -562,11 +564,11 @@ func TestDefaultNodePoolGCPImage(t *testing.T) {
 			name: "When stream metadata has project and name for arm64, it should construct image path",
 			arch: hyperv1.ArchitectureARM64,
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"aarch64": {
-							Images: releaseinfo.CoreOSImages{
-								GCP: releaseinfo.CoreOSGCPImage{
+							Images: stream.Images{
+								Gcp: &stream.GcpImage{
 									Project: "rhcos-cloud",
 									Name:    "rhcos-9-6-20251023-0-gcp-aarch64",
 								},
@@ -582,11 +584,11 @@ func TestDefaultNodePoolGCPImage(t *testing.T) {
 			name: "When architecture is not found in release metadata, it should return error",
 			arch: "unsupported-arch",
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							Images: releaseinfo.CoreOSImages{
-								GCP: releaseinfo.CoreOSGCPImage{
+							Images: stream.Images{
+								Gcp: &stream.GcpImage{
 									Project: "rhcos-cloud",
 									Name:    "rhcos-9-6-20251023-0-gcp-x86-64",
 								},
@@ -602,11 +604,11 @@ func TestDefaultNodePoolGCPImage(t *testing.T) {
 			name: "When GCP project and name are empty, it should return error",
 			arch: hyperv1.ArchitectureAMD64,
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							Images: releaseinfo.CoreOSImages{
-								GCP: releaseinfo.CoreOSGCPImage{},
+							Images: stream.Images{
+								Gcp: &stream.GcpImage{},
 							},
 						},
 					},
@@ -619,11 +621,11 @@ func TestDefaultNodePoolGCPImage(t *testing.T) {
 			name: "When GCP project is empty but name is set, it should return error",
 			arch: hyperv1.ArchitectureAMD64,
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							Images: releaseinfo.CoreOSImages{
-								GCP: releaseinfo.CoreOSGCPImage{
+							Images: stream.Images{
+								Gcp: &stream.GcpImage{
 									Name: "rhcos-x86-64",
 								},
 							},
@@ -638,11 +640,11 @@ func TestDefaultNodePoolGCPImage(t *testing.T) {
 			name: "When GCP name is empty but project is set, it should return error",
 			arch: hyperv1.ArchitectureAMD64,
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							Images: releaseinfo.CoreOSImages{
-								GCP: releaseinfo.CoreOSGCPImage{
+							Images: stream.Images{
+								Gcp: &stream.GcpImage{
 									Project: "rhcos-cloud",
 								},
 							},
@@ -678,38 +680,38 @@ func TestDefaultNodePoolGCPImage(t *testing.T) {
 func TestConfigureGCPMaintenanceBehavior(t *testing.T) {
 	testCases := []struct {
 		name              string
-		userMaintenance   *string
-		provisioningModel *hyperv1.GCPProvisioningModel
+		userMaintenance   hyperv1.GCPOnHostMaintenance
+		provisioningModel hyperv1.GCPProvisioningModel
 		expectedBehavior  capigcp.HostMaintenancePolicy
 	}{
 		{
 			name:              "When user specifies TERMINATE maintenance, it should return terminate policy",
-			userMaintenance:   ptr.To("TERMINATE"),
-			provisioningModel: ptr.To(hyperv1.GCPProvisioningModelStandard),
+			userMaintenance:   hyperv1.GCPOnHostMaintenanceTerminate,
+			provisioningModel: hyperv1.GCPProvisioningModelStandard,
 			expectedBehavior:  capigcp.HostMaintenancePolicyTerminate,
 		},
 		{
 			name:              "When user specifies MIGRATE maintenance, it should return migrate policy",
-			userMaintenance:   ptr.To("MIGRATE"),
-			provisioningModel: ptr.To(hyperv1.GCPProvisioningModelStandard),
+			userMaintenance:   hyperv1.GCPOnHostMaintenanceMigrate,
+			provisioningModel: hyperv1.GCPProvisioningModelStandard,
 			expectedBehavior:  capigcp.HostMaintenancePolicyMigrate,
 		},
 		{
 			name:              "When instance is preemptible with no user setting, it should return terminate policy",
-			userMaintenance:   ptr.To(""),
-			provisioningModel: ptr.To(hyperv1.GCPProvisioningModelPreemptible),
+			userMaintenance:   "",
+			provisioningModel: hyperv1.GCPProvisioningModelPreemptible,
 			expectedBehavior:  capigcp.HostMaintenancePolicyTerminate,
 		},
 		{
 			name:              "When instance is Spot with no user setting, it should return terminate policy",
-			userMaintenance:   ptr.To(""),
-			provisioningModel: ptr.To(hyperv1.GCPProvisioningModelSpot),
+			userMaintenance:   "",
+			provisioningModel: hyperv1.GCPProvisioningModelSpot,
 			expectedBehavior:  capigcp.HostMaintenancePolicyTerminate,
 		},
 		{
 			name:              "When instance is not preemptible with no user setting, it should return migrate policy",
-			userMaintenance:   ptr.To(""),
-			provisioningModel: ptr.To(hyperv1.GCPProvisioningModelStandard),
+			userMaintenance:   "",
+			provisioningModel: hyperv1.GCPProvisioningModelStandard,
 			expectedBehavior:  capigcp.HostMaintenancePolicyMigrate,
 		},
 	}

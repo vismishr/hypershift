@@ -9,7 +9,7 @@ import (
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
 	"github.com/openshift/hypershift/support/config"
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/podspec"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -20,7 +20,7 @@ import (
 )
 
 var (
-	ibmCloudKMSVolumeMounts = util.PodVolumeMounts{
+	ibmCloudKMSVolumeMounts = podspec.VolumeMounts{
 		KasMainContainerName: {
 			kasVolumeKMSSocket().Name: "/tmp",
 		},
@@ -41,6 +41,13 @@ const (
 	ibmKeyNamePrefix              = "ibm"
 	ibmCloudKMSHealthPort         = 8081
 )
+
+// IBMCloudKMSProviderName returns the fixed EncryptionConfiguration KMS provider
+// name used for IBM Cloud. Unlike AWS/Azure, IBM Cloud always uses a single
+// provider with all key versions bundled into the sidecar.
+func IBMCloudKMSProviderName() string {
+	return fmt.Sprintf("%s%s", ibmKeyNamePrefix, "v2")
+}
 
 var _ KMSProvider = &ibmCloudKMSProvider{}
 
@@ -65,7 +72,7 @@ func (p *ibmCloudKMSProvider) GenerateKMSEncryptionConfig(_ string) (*v1.Encrypt
 		{
 			KMS: &v1.KMSConfiguration{
 				APIVersion: "v2",
-				Name:       fmt.Sprintf("%s%s", ibmKeyNamePrefix, "v2"),
+				Name:       IBMCloudKMSProviderName(),
 				Endpoint:   ibmCloudKMSUnixSocket,
 				Timeout:    &metav1.Duration{Duration: 35 * time.Second},
 			},
@@ -275,7 +282,7 @@ func (p *ibmCloudKMSProvider) GenerateKMSPodConfig() (*KMSPodConfig, error) {
 
 	podConfig := &KMSPodConfig{}
 
-	podConfig.Volumes = append(podConfig.Volumes, util.BuildVolume(kasVolumeKMSSocket(), buildVolumeKMSSocket), util.BuildVolume(kasVolumeIBMCloudKMSKP(), buildVolumeIBMCloudKMSKP), util.BuildVolume(kasVolumeIBMCloudKMSProjectedToken(), buildVolumeIBMCloudKMSProjectedToken))
+	podConfig.Volumes = append(podConfig.Volumes, podspec.BuildVolume(kasVolumeKMSSocket(), buildVolumeKMSSocket), podspec.BuildVolume(kasVolumeIBMCloudKMSKP(), buildVolumeIBMCloudKMSKP), podspec.BuildVolume(kasVolumeIBMCloudKMSProjectedToken(), buildVolumeIBMCloudKMSProjectedToken))
 	var customerAPIKeyReference *corev1.EnvVarSource
 	switch p.ibmCloud.Auth.Type {
 	case hyperv1.IBMCloudKMSUnmanagedAuth:
@@ -290,16 +297,15 @@ func (p *ibmCloudKMSProvider) GenerateKMSPodConfig() (*KMSPodConfig, error) {
 				Key: hyperv1.IBMCloudIAMAPIKeySecretKey,
 			},
 		}
-		podConfig.Volumes = append(podConfig.Volumes, util.BuildVolume(kasVolumeIBMCloudKMSCustomerCredentials(), buildVolumeIBMCloudKMSCustomerCredentials(p.ibmCloud.Auth.Unmanaged.Credentials.Name)))
+		podConfig.Volumes = append(podConfig.Volumes, podspec.BuildVolume(kasVolumeIBMCloudKMSCustomerCredentials(), buildVolumeIBMCloudKMSCustomerCredentials(p.ibmCloud.Auth.Unmanaged.Credentials.Name)))
 	case hyperv1.IBMCloudKMSManagedAuth:
 	default:
 		return nil, fmt.Errorf("unrecognized ibmcloud kms auth type %s", p.ibmCloud.Auth.Type)
 	}
-	podConfig.Containers = append(podConfig.Containers, util.BuildContainer(kasContainerIBMCloudKMS(), buildKASContainerIBMCloudKMS(p.kmsImage, p.ibmCloud.Region, kmsKPInfo, customerAPIKeyReference)))
+	podConfig.Containers = append(podConfig.Containers, podspec.BuildContainer(kasContainerIBMCloudKMS(), buildKASContainerIBMCloudKMS(p.kmsImage, p.ibmCloud.Region, kmsKPInfo, customerAPIKeyReference)))
 
 	podConfig.KASContainerMutate = func(c *corev1.Container) {
 		c.VolumeMounts = append(c.VolumeMounts, ibmCloudKMSVolumeMounts.ContainerMounts(KasMainContainerName)...)
-		c.Args = append(c.Args, "--encryption-provider-config-automatic-reload=false")
 	}
 
 	return podConfig, nil

@@ -17,8 +17,10 @@ package install
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -26,6 +28,7 @@ import (
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/cmd/install/assets"
+	crdassets "github.com/openshift/hypershift/cmd/install/assets/crds"
 	"github.com/openshift/hypershift/cmd/util"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/sharedingress"
 	hyperapi "github.com/openshift/hypershift/support/api"
@@ -35,6 +38,7 @@ import (
 
 	configv1 "github.com/openshift/api/config/v1"
 	imageapi "github.com/openshift/api/image/v1"
+	operatorv1alpha1 "github.com/openshift/api/operator/v1alpha1"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -47,6 +51,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/client-go/discovery"
 	"k8s.io/utils/ptr"
 	"k8s.io/utils/set"
 
@@ -58,9 +63,9 @@ import (
 )
 
 const (
-	// ExternalDNSImage - This is specifically tag 1.1.0-3 from https://catalog.redhat.com/software/containers/edo/external-dns-rhel8/61d4c35023156829b87a434a?container-tabs=overview&tag=1.1.0-3&push_date=1671131187000
+	// ExternalDNSImage - This is specifically tag 1.2.1 from https://catalog.redhat.com/software/containers/edo/external-dns-rhel8/61d4c35023156829b87a434a
 	// TODO this needs to be updated to a multi-arch image including Arm - https://issues.redhat.com/browse/NE-1298
-	ExternalDNSImage = "registry.redhat.io/edo/external-dns-rhel8@sha256:638fb6b5fc348f5cf52b9800d3d8e9f5315078fc9b1e57e800cb0a4a50f1b4b9"
+	ExternalDNSImage = "registry.redhat.io/edo/external-dns-rhel8@sha256:9f60c682b44497d9736a04991c0d2b3485d477f6c89a87c4a44a211a3d1f3cd4"
 )
 
 var HyperShiftImage = fmt.Sprintf("%s:%s", config.HypershiftImageBase, config.HypershiftImageTag)
@@ -87,6 +92,7 @@ type Options struct {
 	EnableDefaultingWebhook                   bool
 	EnableValidatingWebhook                   bool
 	EnableConversionWebhook                   bool
+	DisableCAPIConversionWebhook              bool
 	Template                                  bool
 	Format                                    string
 	OutputFile                                string
@@ -150,6 +156,8 @@ type Options struct {
 	ScaleFromZeroCreds                        string
 	ScaleFromZeroCredentialsSecret            string
 	ScaleFromZeroCredentialsSecretKey         string
+	RenderSensitive                           bool
+	HCPEgressBlockCIDRs                       []string
 }
 
 func (o *Options) Validate() error {
@@ -160,6 +168,30 @@ func (o *Options) Validate() error {
 		o.ScaleFromZeroProvider = strings.ToLower(o.ScaleFromZeroProvider)
 	}
 
+	errs = append(errs, o.validatePlatformConfig()...)
+	errs = append(errs, o.validateOIDCConfig()...)
+	errs = append(errs, o.validateExternalDNSConfig()...)
+	errs = append(errs, o.validateImageConfig()...)
+	errs = append(errs, o.validateScaleFromZeroConfig()...)
+	errs = append(errs, o.validateMonitoringConfig()...)
+	errs = append(errs, o.validateMiscConfig()...)
+	errs = append(errs, o.validateHCPEgressBlockCIDRs()...)
+
+	return errors.NewAggregate(errs)
+}
+
+func (o *Options) validateHCPEgressBlockCIDRs() []error {
+	var errs []error
+	for _, cidr := range o.HCPEgressBlockCIDRs {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			errs = append(errs, fmt.Errorf("invalid --hcp-egress-block-cidrs value %q: %w", cidr, err))
+		}
+	}
+	return errs
+}
+
+func (o *Options) validatePlatformConfig() []error {
+	var errs []error
 	switch hyperv1.PlatformType(o.PrivatePlatform) {
 	case hyperv1.AWSPlatform:
 		if (len(o.AWSPrivateCreds) == 0 && len(o.AWSPrivateCredentialsSecret) == 0) || len(o.AWSPrivateRegion) == 0 {
@@ -172,24 +204,44 @@ func (o *Options) Validate() error {
 			errs = append(errs, fmt.Errorf("--gcp-project and --gcp-region must be set together when --private-platform=%s", hyperv1.GCPPlatform))
 		}
 	case hyperv1.AzurePlatform:
-		if len(o.AzurePrivateCreds) > 0 && len(o.AzurePLSManagedIdentityClientID) > 0 {
-			errs = append(errs, fmt.Errorf("--azure-private-creds and --azure-pls-managed-identity-client-id are mutually exclusive"))
-		}
-		if len(o.AzurePrivateCredentialsSecret) > 0 && len(o.AzurePLSManagedIdentityClientID) > 0 {
-			errs = append(errs, fmt.Errorf("--azure-private-secret and --azure-pls-managed-identity-client-id are mutually exclusive"))
-		}
-		if len(o.AzurePLSManagedIdentityClientID) > 0 && len(o.AzurePLSSubscriptionID) == 0 {
-			errs = append(errs, fmt.Errorf("--azure-pls-subscription-id is required with --azure-pls-managed-identity-client-id"))
-		}
+		errs = append(errs, o.validateAzurePlatformConfig()...)
 	case hyperv1.NonePlatform:
 	default:
 		errs = append(errs, fmt.Errorf("--private-platform must be either %s, %s, %s, or %s", hyperv1.AWSPlatform, hyperv1.AzurePlatform, hyperv1.GCPPlatform, hyperv1.NonePlatform))
 	}
+	return errs
+}
 
+func (o *Options) validateAzurePlatformConfig() []error {
+	if o.ManagedService == hyperv1.AroHCP {
+		return nil
+	}
+	var errs []error
+	hasCredFile := len(o.AzurePrivateCreds) != 0 || len(o.AzurePrivateCredentialsSecret) != 0
+	hasManagedIdentity := len(o.AzurePLSManagedIdentityClientID) != 0
+	if !hasCredFile && !hasManagedIdentity {
+		errs = append(errs, fmt.Errorf("--azure-private-creds, --azure-private-secret, or --azure-pls-managed-identity-client-id is required with --private-platform=%s", hyperv1.AzurePlatform))
+	}
+	if hasCredFile && hasManagedIdentity {
+		errs = append(errs, fmt.Errorf("--azure-pls-managed-identity-client-id cannot be used with --azure-private-creds or --azure-private-secret"))
+	}
+	if hasManagedIdentity && len(o.AzurePLSSubscriptionID) == 0 {
+		errs = append(errs, fmt.Errorf("--azure-pls-subscription-id is required when using --azure-pls-managed-identity-client-id"))
+	}
+	if len(o.AzurePrivateCreds) != 0 && len(o.AzurePrivateCredentialsSecret) != 0 {
+		errs = append(errs, fmt.Errorf("only one of --azure-private-creds or --azure-private-secret is supported"))
+	}
+	if len(o.AzurePLSResourceGroup) == 0 {
+		errs = append(errs, fmt.Errorf("--azure-pls-resource-group is required with --private-platform=%s", hyperv1.AzurePlatform))
+	}
+	return errs
+}
+
+func (o *Options) validateOIDCConfig() []error {
+	var errs []error
 	if len(o.OIDCStorageProviderS3CredentialsSecret) > 0 && len(o.OIDCStorageProviderS3Credentials) > 0 {
 		errs = append(errs, fmt.Errorf("only one of --oidc-storage-provider-s3-secret or --oidc-storage-provider-s3-credentials is supported"))
 	}
-
 	if (len(o.OIDCStorageProviderS3CredentialsSecret) > 0 || len(o.OIDCStorageProviderS3Credentials) > 0) &&
 		(len(o.OIDCStorageProviderS3BucketName) == 0 || len(o.OIDCStorageProviderS3Region) == 0 || len(o.OIDCStorageProviderS3CredentialsSecretKey) == 0) {
 		errs = append(errs, fmt.Errorf("all required oidc information is not set"))
@@ -197,83 +249,101 @@ func (o *Options) Validate() error {
 	if strings.Contains(o.OIDCStorageProviderS3BucketName, ".") {
 		errs = append(errs, fmt.Errorf("oidc bucket name must not contain dots (.); see the notes on HTTPS at https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html"))
 	}
+	return errs
+}
 
-	if len(o.ExternalDNSProvider) > 0 {
-		// Credentials are optional for GCP when using Workload Identity
-		credentialsRequired := o.ExternalDNSProvider != "google"
-		if credentialsRequired && len(o.ExternalDNSCredentials) == 0 && len(o.ExternalDNSCredentialsSecret) == 0 {
-			errs = append(errs, fmt.Errorf("--external-dns-credentials or --external-dns-credentials-secret are required with --external-dns-provider"))
-		}
-		if len(o.ExternalDNSCredentials) != 0 && len(o.ExternalDNSCredentialsSecret) != 0 {
-			errs = append(errs, fmt.Errorf("only one of --external-dns-credentials or --external-dns-credentials-secret is supported"))
-		}
-		if len(o.ExternalDNSDomainFilter) == 0 {
-			errs = append(errs, fmt.Errorf("--external-dns-domain-filter is required with --external-dns-provider"))
-		}
-		if len(o.ExternalDNSInterval) > 0 {
-			if _, err := time.ParseDuration(o.ExternalDNSInterval); err != nil {
-				errs = append(errs, fmt.Errorf("--external-dns-interval is not a valid duration: %w", err))
-			}
-		}
-		if len(o.ExternalDNSAWSZonesCacheDuration) > 0 {
-			if _, err := time.ParseDuration(o.ExternalDNSAWSZonesCacheDuration); err != nil {
-				errs = append(errs, fmt.Errorf("--external-dns-aws-zones-cache-duration is not a valid duration: %w", err))
-			}
-			if o.ExternalDNSProvider != "aws" {
-				errs = append(errs, fmt.Errorf("--external-dns-aws-zones-cache-duration is only effective with --external-dns-provider=aws"))
-			}
+func (o *Options) validateExternalDNSConfig() []error {
+	if len(o.ExternalDNSProvider) == 0 {
+		return nil
+	}
+	var errs []error
+	// Credentials are optional for GCP when using Workload Identity
+	credentialsRequired := o.ExternalDNSProvider != "google"
+	if credentialsRequired && len(o.ExternalDNSCredentials) == 0 && len(o.ExternalDNSCredentialsSecret) == 0 {
+		errs = append(errs, fmt.Errorf("--external-dns-credentials or --external-dns-credentials-secret are required with --external-dns-provider"))
+	}
+	if len(o.ExternalDNSCredentials) != 0 && len(o.ExternalDNSCredentialsSecret) != 0 {
+		errs = append(errs, fmt.Errorf("only one of --external-dns-credentials or --external-dns-credentials-secret is supported"))
+	}
+	if len(o.ExternalDNSDomainFilter) == 0 {
+		errs = append(errs, fmt.Errorf("--external-dns-domain-filter is required with --external-dns-provider"))
+	}
+	if len(o.ExternalDNSInterval) > 0 {
+		if _, err := time.ParseDuration(o.ExternalDNSInterval); err != nil {
+			errs = append(errs, fmt.Errorf("--external-dns-interval is not a valid duration: %w", err))
 		}
 	}
+	if len(o.ExternalDNSAWSZonesCacheDuration) > 0 {
+		if _, err := time.ParseDuration(o.ExternalDNSAWSZonesCacheDuration); err != nil {
+			errs = append(errs, fmt.Errorf("--external-dns-aws-zones-cache-duration is not a valid duration: %w", err))
+		}
+		if o.ExternalDNSProvider != "aws" {
+			errs = append(errs, fmt.Errorf("--external-dns-aws-zones-cache-duration is only effective with --external-dns-provider=aws"))
+		}
+	}
+	return errs
+}
+
+func (o *Options) validateImageConfig() []error {
+	var errs []error
 	if o.HyperShiftImage != HyperShiftImage && len(o.ImageRefsFile) > 0 {
 		errs = append(errs, fmt.Errorf("only one of --hypershift-image or --image-refs-file should be specified"))
 	}
 	if o.RHOBSMonitoring && os.Getenv(rhobsmonitoring.EnvironmentVariable) != "1" {
 		errs = append(errs, fmt.Errorf("when invoking this command with the --rhobs-monitoring flag, the RHOBS_MONITORING environment variable must be set to \"1\""))
 	}
-
 	if o.CertRotationScale > 24*time.Hour {
 		errs = append(errs, fmt.Errorf("cannot set --cert-rotation-scale longer than 24h, invalid value: %s", o.CertRotationScale.String()))
 	}
+	return errs
+}
 
-	// Validate scale-from-zero credentials
+// Validate scale-from-zero credentials
+func (o *Options) validateScaleFromZeroConfig() []error {
+	if len(o.ScaleFromZeroCreds) == 0 && len(o.ScaleFromZeroCredentialsSecret) == 0 {
+		return nil
+	}
+	var errs []error
 	supportedProviders := set.New("aws")
-	if len(o.ScaleFromZeroCreds) != 0 || len(o.ScaleFromZeroCredentialsSecret) != 0 {
-		// Check mutual exclusivity - only one of file or secret should be provided
-		if len(o.ScaleFromZeroCreds) != 0 && len(o.ScaleFromZeroCredentialsSecret) != 0 {
-			errs = append(errs, fmt.Errorf("only one of --scale-from-zero-creds or --scale-from-zero-secret is supported"))
-		}
-
-		// Provider is required when using scale-from-zero credentials
-		if len(o.ScaleFromZeroProvider) == 0 {
-			errs = append(errs, fmt.Errorf("--scale-from-zero-provider is required when using scale-from-zero credentials"))
-		} else if !supportedProviders.Has(o.ScaleFromZeroProvider) {
-			errs = append(errs, fmt.Errorf("invalid --scale-from-zero-provider: %s (must be one of: %v)", o.ScaleFromZeroProvider, supportedProviders.UnsortedList()))
-		}
-
-		// Validate credentials file exists and is accessible if provided
-		if len(o.ScaleFromZeroCreds) > 0 {
-			if _, err := os.Stat(o.ScaleFromZeroCreds); err != nil {
-				if os.IsNotExist(err) {
-					errs = append(errs, fmt.Errorf("--scale-from-zero-creds file does not exist: %s", o.ScaleFromZeroCreds))
-				} else {
-					errs = append(errs, fmt.Errorf("--scale-from-zero-creds file is not accessible: %w", err))
-				}
+	// Check mutual exclusivity - only one of file or secret should be provided
+	if len(o.ScaleFromZeroCreds) != 0 && len(o.ScaleFromZeroCredentialsSecret) != 0 {
+		errs = append(errs, fmt.Errorf("only one of --scale-from-zero-creds or --scale-from-zero-secret is supported"))
+	}
+	// Provider is required when using scale-from-zero credentials
+	if len(o.ScaleFromZeroProvider) == 0 {
+		errs = append(errs, fmt.Errorf("--scale-from-zero-provider is required when using scale-from-zero credentials"))
+	} else if !supportedProviders.Has(o.ScaleFromZeroProvider) {
+		errs = append(errs, fmt.Errorf("invalid --scale-from-zero-provider: %s (must be one of: %v)", o.ScaleFromZeroProvider, supportedProviders.UnsortedList()))
+	}
+	// Validate credentials file exists and is accessible if provided
+	if len(o.ScaleFromZeroCreds) > 0 {
+		if _, err := os.Stat(o.ScaleFromZeroCreds); err != nil {
+			if os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("--scale-from-zero-creds file does not exist: %s", o.ScaleFromZeroCreds))
+			} else {
+				errs = append(errs, fmt.Errorf("--scale-from-zero-creds file is not accessible: %w", err))
 			}
 		}
 	}
+	return errs
+}
 
+func (o *Options) validateMonitoringConfig() []error {
+	var errs []error
 	if o.RHOBSMonitoring && o.EnableCVOManagementClusterMetricsAccess {
 		errs = append(errs, fmt.Errorf("when invoking this command with the --rhobs-monitoring flag, the --enable-cvo-management-cluster-metrics-access flag is not supported "))
 	}
-
 	if len(o.CVOPrometheusURL) > 0 && !o.RHOBSMonitoring && !o.EnableCVOManagementClusterMetricsAccess {
 		errs = append(errs, fmt.Errorf("--cvo-prometheus-url requires either --rhobs-monitoring or --enable-cvo-management-cluster-metrics-access to be enabled"))
 	}
+	return errs
+}
 
+func (o *Options) validateMiscConfig() []error {
+	var errs []error
 	if len(o.ManagedService) > 0 && o.ManagedService != hyperv1.AroHCP {
 		errs = append(errs, fmt.Errorf("not a valid managed service type: %s", o.ManagedService))
 	}
-
 	// Validate all the platforms in the list are valid
 	for _, platform := range o.PlatformsToInstall {
 		platformToCheck := strings.ToLower(platform)
@@ -281,7 +351,6 @@ func (o *Options) Validate() error {
 			errs = append(errs, fmt.Errorf("not a valid platform type: %s", platform))
 		}
 	}
-
 	if len(o.ImagePullPolicy) > 0 {
 		normalized := strings.ToLower(o.ImagePullPolicy)
 		switch normalized {
@@ -290,8 +359,7 @@ func (o *Options) Validate() error {
 			errs = append(errs, fmt.Errorf("invalid --image-pull-policy: %s (want Always|Never|IfNotPresent)", o.ImagePullPolicy))
 		}
 	}
-
-	return errors.NewAggregate(errs)
+	return errs
 }
 
 func (o *Options) ApplyDefaults() {
@@ -299,7 +367,7 @@ func (o *Options) ApplyDefaults() {
 	switch {
 	case o.Development:
 		o.HyperShiftOperatorReplicas = 0
-	case o.EnableDefaultingWebhook || o.EnableConversionWebhook || o.EnableValidatingWebhook:
+	case o.EnableDefaultingWebhook || o.EnableConversionWebhook || o.EnableValidatingWebhook || !o.DisableCAPIConversionWebhook:
 		o.HyperShiftOperatorReplicas = 2
 	default:
 		o.HyperShiftOperatorReplicas = 1
@@ -322,6 +390,7 @@ func NewCommand() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&opts.EnableDefaultingWebhook, "enable-defaulting-webhook", opts.EnableDefaultingWebhook, "Enable webhook for defaulting hypershift API types")
 	cmd.PersistentFlags().BoolVar(&opts.EnableValidatingWebhook, "enable-validating-webhook", opts.EnableValidatingWebhook, "Enable webhook for validating hypershift API types")
 	cmd.PersistentFlags().BoolVar(&opts.EnableConversionWebhook, "enable-conversion-webhook", opts.EnableConversionWebhook, "Enable webhook for converting hypershift API types")
+	cmd.PersistentFlags().BoolVar(&opts.DisableCAPIConversionWebhook, "disable-capi-conversion-webhook", opts.DisableCAPIConversionWebhook, "Disable conversion webhook for CAPI CRDs during v1beta1/v1beta2 transition")
 	cmd.PersistentFlags().BoolVar(&opts.ExcludeEtcdManifests, "exclude-etcd", opts.ExcludeEtcdManifests, "Leave out etcd manifests")
 	cmd.PersistentFlags().Var(&opts.PlatformMonitoring, "platform-monitoring", "Select an option for enabling platform cluster monitoring. Valid values are: None, OperatorOnly, All")
 	cmd.PersistentFlags().BoolVar(&opts.EnableCIDebugOutput, "enable-ci-debug-output", opts.EnableCIDebugOutput, "If extra CI debug output should be enabled")
@@ -383,6 +452,7 @@ func NewCommand() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&opts.ScaleFromZeroCreds, "scale-from-zero-creds", opts.ScaleFromZeroCreds, "Path to credentials file for scale-from-zero instance type queries")
 	cmd.PersistentFlags().StringVar(&opts.ScaleFromZeroCredentialsSecret, "scale-from-zero-secret", opts.ScaleFromZeroCredentialsSecret, "Name of existing secret containing scale-from-zero credentials (alternative to --scale-from-zero-creds)")
 	cmd.PersistentFlags().StringVar(&opts.ScaleFromZeroCredentialsSecretKey, "scale-from-zero-secret-key", opts.ScaleFromZeroCredentialsSecretKey, "Key within the scale-from-zero credentials secret (default: credentials)")
+	cmd.PersistentFlags().StringArrayVar(&opts.HCPEgressBlockCIDRs, "hcp-egress-block-cidrs", nil, "Static CIDRs to block in HCP namespace egress NetworkPolicies instead of dynamically-discovered hosting cluster KAS endpoint IPs. When specified, eliminates NetworkPolicy churn during hosting cluster KAS rolling restarts and avoids OVN port-group reconciliation races that can drop traffic to HCP routers. May be specified multiple times.")
 
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		return InstallHyperShiftOperator(cmd.Context(), cmd.OutOrStdout(), opts)
@@ -411,6 +481,39 @@ func InstallHyperShiftOperator(ctx context.Context, out io.Writer, opts Options)
 	crds, objects, err := hyperShiftOperatorManifests(ctx, client, opts)
 	if err != nil {
 		return err
+	}
+
+	// Validate all CRDs via dry-run before applying
+	if err := dryRunValidateCRDs(ctx, out, crds); err != nil {
+		return err
+	}
+
+	// Coordinate with Cluster CAPI Operator if the ClusterAPI API is available.
+	// This is done after dry-run so the ClusterAPI config is not mutated if CRDs
+	// cannot be applied.
+	config, err := util.GetConfig()
+	if err != nil {
+		return fmt.Errorf("failed to get kubernetes config: %w", err)
+	}
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
+	if err != nil {
+		return fmt.Errorf("failed to create discovery client: %w", err)
+	}
+	registered, err := isClusterAPIRegistered(discoveryClient)
+	if err != nil {
+		return err
+	}
+	if registered {
+		fmt.Fprintf(out, "ClusterAPI API detected, coordinating with Cluster CAPI Operator\n")
+		generation, err := ensureUnmanagedCRDs(ctx, out, client, crds)
+		if err != nil {
+			return err
+		}
+		if generation > 0 {
+			if err := waitForCAPIOperatorSync(ctx, out, client, generation); err != nil {
+				return err
+			}
+		}
 	}
 
 	err = apply(ctx, out, crds)
@@ -589,7 +692,6 @@ func WaitUntilAvailable(ctx context.Context, opts Options) (*appsv1.Deployment, 
 		}
 		fmt.Printf("Endpoints available\n")
 		return true, nil
-
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to wait for operator service endpoints: %w", err)
@@ -684,7 +786,7 @@ func hyperShiftOperatorManifests(ctx context.Context, client crclient.Client, op
 	}
 
 	// Setup Secrets
-	oidcSecret, operatorCredentialsSecret, scaleFromZeroSecret, secretObjs, err := setupAuth(opts, operatorNamespace)
+	oidcSecret, operatorCredentialsSecret, azureCredentialsSecret, scaleFromZeroSecret, secretObjs, err := setupAuth(opts, operatorNamespace)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -709,7 +811,7 @@ func hyperShiftOperatorManifests(ctx context.Context, client crclient.Client, op
 	// Setup HyperShift Operator Deployment and Service
 	operatorService, operatorObjs := setupOperatorResources(
 		opts, userCABundleCM, trustedCABundle, operatorNamespace, operatorServiceAccount, operatorCredentialsSecret,
-		oidcSecret, scaleFromZeroSecret, images,
+		azureCredentialsSecret, oidcSecret, scaleFromZeroSecret, images,
 	)
 	objects = append(objects, operatorObjs...)
 
@@ -773,15 +875,63 @@ var ipamCRDNames = set.New(
 // related to etcd are excluded from the list. If the option EnableConversionWebhook is set to true, the CRDs related
 // to hypershift.openshift.io group are annotated with the necessary annotations to enable the conversion webhook.
 // If a client is provided, IPAM CRDs that already exist in the cluster are skipped to avoid conflicts.
+func crdIncludeFilter(opts Options, existingIPAMCRDs set.Set[string]) func(string, *apiextensionsv1.CustomResourceDefinition) bool {
+	return func(path string, crd *apiextensionsv1.CustomResourceDefinition) bool {
+		if strings.Contains(path, "payload-manifests") || strings.Contains(path, "tests/") {
+			return false
+		}
+		if strings.Contains(path, "etcd") && opts.ExcludeEtcdManifests {
+			return false
+		}
+		if strings.Contains(path, "zz_generated.crd-manifests") {
+			if strings.Contains(path, "awsendpointservices") {
+				return isAWSPlatformEnabled(opts.PlatformsToInstall)
+			}
+			if strings.Contains(path, "azureprivatelinkservices") {
+				return isAzurePlatformEnabled(opts.PlatformsToInstall)
+			}
+			if opts.TechPreviewNoUpgrade {
+				if featureSet, ok := crd.Annotations["release.openshift.io/feature-set"]; ok {
+					if featureSet != "TechPreviewNoUpgrade" {
+						return false
+					}
+				}
+			} else {
+				if featureSet, ok := crd.Annotations["release.openshift.io/feature-set"]; ok {
+					if featureSet != "Default" {
+						return false
+					}
+				}
+			}
+		}
+		if strings.Contains(path, "hypershift-operator/") {
+			return true
+		}
+		if strings.Contains(path, "cluster-api/") {
+			return !existingIPAMCRDs.Has(crd.Name)
+		}
+		if strings.Contains(path, "auditlogpersistence") {
+			return opts.EnableAuditLogPersistence
+		}
+		if len(opts.PlatformsToInstall) > 0 {
+			for _, platform := range opts.PlatformsToInstall {
+				if strings.Contains(path, strings.ToLower(platform)) {
+					return true
+				}
+			}
+			return false
+		}
+		return true
+	}
+}
+
 func setupCRDs(ctx context.Context, client crclient.Client, opts Options, operatorNamespace *corev1.Namespace, operatorService *corev1.Service) ([]crclient.Object, error) {
-	// Build a set of existing IPAM CRDs if a client is available
 	existingIPAMCRDs := set.New[string]()
 	if client != nil {
 		for crdName := range ipamCRDNames {
 			existing := &apiextensionsv1.CustomResourceDefinition{}
 			err := client.Get(ctx, crclient.ObjectKey{Name: crdName}, existing)
 			if err == nil {
-				// CRD exists, add to the set so we can skip it
 				existingIPAMCRDs.Insert(crdName)
 				fmt.Printf("Skipping existing IPAM CRD %s\n", crdName)
 			} else if !apierrors.IsNotFound(err) {
@@ -792,78 +942,46 @@ func setupCRDs(ctx context.Context, client crclient.Client, opts Options, operat
 
 	var crds []crclient.Object
 	crds = append(
-		crds, assets.CustomResourceDefinitions(
-			func(path string, crd *apiextensionsv1.CustomResourceDefinition) bool {
-				if strings.Contains(path, "etcd") && opts.ExcludeEtcdManifests {
-					return false
-				}
-				// If the feature generated CRD has any featureSet version then it has the format nodepool-<featureSet>.
-				if strings.Contains(path, "zz_generated.crd-manifests") {
-					if strings.Contains(path, "awsendpointservices") {
-						return isAWSPlatformEnabled(opts.PlatformsToInstall)
-					}
-					if opts.TechPreviewNoUpgrade {
-						// Skip all featureSets but TechPreviewNoUpgrade.
-						if featureSet, ok := crd.Annotations["release.openshift.io/feature-set"]; ok {
-							if featureSet != "TechPreviewNoUpgrade" {
-								return false
-							}
-						}
-					} else {
-						// Skip all featureSets but Default.
-						if featureSet, ok := crd.Annotations["release.openshift.io/feature-set"]; ok {
-							if featureSet != "Default" {
-								return false
-							}
-						}
+		crds, crdassets.CustomResourceDefinitions(
+			crdIncludeFilter(opts, existingIPAMCRDs),
+			func(crd *apiextensionsv1.CustomResourceDefinition) {
+				// Check if this CRD needs a conversion webhook
+				var needsConversion bool
+				var conversionReviewVersions []string
+
+				// Hypershift conversion can be toggled with a flag
+				if crd.Spec.Group == "hypershift.openshift.io" && opts.EnableConversionWebhook {
+					needsConversion = true
+					conversionReviewVersions = []string{"v1beta1", "v1alpha1"}
+
+					// CAPI conversion is required during v1beta1 -> v1beta2 transition period
+				} else if !opts.DisableCAPIConversionWebhook {
+					if override, ok := crdassets.CAPICRDOverrides[crd.Name]; ok && override.NeedsConversion {
+						needsConversion = true
+						conversionReviewVersions = []string{"v1beta1", "v1beta2"}
 					}
 				}
-				if strings.Contains(path, "hypershift-operator/") {
-					return true
+
+				if !needsConversion {
+					return
 				}
-				if strings.Contains(path, "cluster-api/") {
-					// Skip IPAM CRDs if they already exist in the cluster
-					if existingIPAMCRDs.Has(crd.Name) {
-						return false
-					}
-					return true
+
+				if crd.Annotations == nil {
+					crd.Annotations = map[string]string{}
 				}
-				// Conditionally include auditlogpersistence CRD only if feature is enabled
-				if strings.Contains(path, "auditlogpersistence") {
-					return opts.EnableAuditLogPersistence
-				}
-				if len(opts.PlatformsToInstall) > 0 {
-					for _, platform := range opts.PlatformsToInstall {
-						if strings.Contains(path, strings.ToLower(platform)) {
-							return true
-						}
-					}
-					return false
-				}
-				return true
-			}, func(crd *apiextensionsv1.CustomResourceDefinition) {
-				if crd.Spec.Group == "hypershift.openshift.io" {
-					if !opts.EnableConversionWebhook {
-						return
-					}
-					if crd.Annotations != nil {
-						crd.Annotations = map[string]string{}
-					}
-					crd.Annotations["service.beta.openshift.io/inject-cabundle"] = "true"
-					crd.Spec.Conversion = &apiextensionsv1.CustomResourceConversion{
-						Strategy: apiextensionsv1.WebhookConverter,
-						Webhook: &apiextensionsv1.WebhookConversion{
-							ClientConfig: &apiextensionsv1.WebhookClientConfig{
-								Service: &apiextensionsv1.ServiceReference{
-									Namespace: operatorNamespace.Name,
-									Name:      operatorService.Name,
-									Port:      ptr.To[int32](443),
-									Path:      ptr.To("/convert"),
-								},
+				crd.Spec.Conversion = &apiextensionsv1.CustomResourceConversion{
+					Strategy: apiextensionsv1.WebhookConverter,
+					Webhook: &apiextensionsv1.WebhookConversion{
+						ClientConfig: &apiextensionsv1.WebhookClientConfig{
+							Service: &apiextensionsv1.ServiceReference{
+								Namespace: operatorNamespace.Name,
+								Name:      operatorService.Name,
+								Port:      ptr.To[int32](443),
+								Path:      ptr.To("/convert"),
 							},
-							ConversionReviewVersions: []string{"v1beta1", "v1alpha1"},
 						},
-					}
+						ConversionReviewVersions: conversionReviewVersions,
+					},
 				}
 			},
 		)...,
@@ -876,11 +994,165 @@ func isAWSPlatformEnabled(platformsToInstall []string) bool {
 		return true
 	}
 	for _, platform := range platformsToInstall {
-		if strings.Contains("aws", strings.ToLower(platform)) {
+		if strings.EqualFold(platform, "aws") {
 			return true
 		}
 	}
 	return false
+}
+
+func isAzurePlatformEnabled(platformsToInstall []string) bool {
+	if len(platformsToInstall) == 0 {
+		return true
+	}
+	for _, platform := range platformsToInstall {
+		if strings.EqualFold(platform, "azure") {
+			return true
+		}
+	}
+	return false
+}
+
+// groupVersionDiscoverer is a subset of discovery.ServerResourcesInterface
+// used for checking if a specific API group version has a given resource.
+type groupVersionDiscoverer interface {
+	ServerResourcesForGroupVersion(groupVersion string) (*metav1.APIResourceList, error)
+}
+
+// isClusterAPIRegistered checks whether the ClusterAPI API resource (clusterapis)
+// is served on the management cluster via the discovery API. This indicates that the
+// cluster knows about the ClusterAPI config type, independent of whether a config
+// instance exists.
+func isClusterAPIRegistered(discoveryClient groupVersionDiscoverer) (bool, error) {
+	apis, err := discoveryClient.ServerResourcesForGroupVersion(operatorv1alpha1.GroupVersion.String())
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to discover API resources for %s: %w", operatorv1alpha1.GroupVersion, err)
+	}
+	if apis != nil {
+		for _, api := range apis.APIResources {
+			if api.Kind == "ClusterAPI" {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// ensureUnmanagedCRDs ensures the singleton ClusterAPI config resource exists and has
+// HyperShift's CAPI CRD names listed in unmanagedCustomResourceDefinitions. This tells
+// the Cluster CAPI Operator to skip these CRDs during its own installation.
+// Server-Side Apply is used so the API server handles create-or-update atomically and
+// merges set entries across field owners without conflicts.
+// Returns the metadata.generation of the applied ClusterAPI resource so the caller
+// can wait for the CAPI Operator to reconcile this specific version.
+func ensureUnmanagedCRDs(ctx context.Context, out io.Writer, c crclient.Client, capiCRDs []crclient.Object) (int64, error) {
+	capiCRDNames := set.New[string]()
+	for _, crd := range capiCRDs {
+		name := crd.GetName()
+		if strings.HasSuffix(name, ".cluster.x-k8s.io") {
+			capiCRDNames.Insert(name)
+		}
+	}
+	if capiCRDNames.Len() == 0 {
+		return 0, nil
+	}
+
+	// Build the SSA patch payload as a map so only the fields we intend to own
+	// are included. ApplyConfiguration types for operator/v1alpha1 are not yet
+	// available in openshift/client-go.
+	patchData, err := json.Marshal(map[string]any{
+		"apiVersion": operatorv1alpha1.GroupVersion.String(),
+		"kind":       "ClusterAPI",
+		"metadata": map[string]any{
+			"name": "cluster",
+		},
+		"spec": map[string]any{
+			"unmanagedCustomResourceDefinitions": capiCRDNames.SortedList(),
+		},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal ClusterAPI config: %w", err)
+	}
+
+	clusterAPI := &operatorv1alpha1.ClusterAPI{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cluster",
+		},
+		Spec: &operatorv1alpha1.ClusterAPISpec{
+			UnmanagedCustomResourceDefinitions: capiCRDNames.SortedList(),
+		},
+	}
+	if err := c.Patch(ctx, clusterAPI, crclient.RawPatch(types.ApplyPatchType, patchData),
+		crclient.ForceOwnership, crclient.FieldOwner("hypershift"),
+	); err != nil {
+		return 0, fmt.Errorf("failed to apply ClusterAPI config: %w", err)
+	}
+	fmt.Fprintf(out, "Applied ClusterAPI config with %d unmanaged CRDs\n", capiCRDNames.Len())
+	return clusterAPI.Generation, nil
+}
+
+// waitForCAPIOperatorSync waits for the Cluster CAPI Operator to fully reconcile after
+// unmanaged CRDs are set in the ClusterAPI config. It polls until:
+// 1. status.observedRevisionGeneration >= generation (from the patch response)
+// 2. status.currentRevision == status.desiredRevision
+// The generation parameter must be the metadata.generation returned by the SSA patch
+// to avoid false positives from reading a stale object.
+func waitForCAPIOperatorSync(ctx context.Context, out io.Writer, c crclient.Client, generation int64) error {
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	fmt.Fprintf(out, "Waiting for Cluster CAPI Operator to sync...\n")
+	return wait.PollUntilContextCancel(waitCtx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
+		clusterAPI := &operatorv1alpha1.ClusterAPI{}
+		if err := c.Get(ctx, crclient.ObjectKey{Name: "cluster"}, clusterAPI); err != nil {
+			return false, fmt.Errorf("failed to get ClusterAPI config: %w", err)
+		}
+
+		if clusterAPI.Status.ObservedRevisionGeneration < generation {
+			return false, nil
+		}
+		if clusterAPI.Status.CurrentRevision == "" || clusterAPI.Status.CurrentRevision != clusterAPI.Status.DesiredRevision {
+			return false, nil
+		}
+
+		fmt.Fprintf(out, "Cluster CAPI Operator synced successfully\n")
+		return true, nil
+	})
+}
+
+// dryRunValidateCRDs validates all CRDs through the API server's admission webhooks
+// using server-side dry-run. This catches malformed CRDs, webhook rejections, and
+// schema conflicts before any CRDs are persisted.
+func dryRunValidateCRDs(ctx context.Context, out io.Writer, crds []crclient.Object) error {
+	client, err := util.GetClient()
+	if err != nil {
+		return err
+	}
+
+	var errs []error
+	for _, crd := range crds {
+		var objectBytes bytes.Buffer
+		if err := hyperapi.YamlSerializer.Encode(crd, &objectBytes); err != nil {
+			errs = append(errs, fmt.Errorf("failed to encode CRD %s: %w", crd.GetName(), err))
+			continue
+		}
+		// Use a deep copy so the dry-run response (which includes managedFields)
+		// does not mutate the original CRD objects passed to apply().
+		crdCopy := crd.DeepCopyObject().(crclient.Object)
+		if err := client.Patch(ctx, crdCopy, crclient.RawPatch(types.ApplyPatchType, objectBytes.Bytes()),
+			crclient.ForceOwnership, crclient.FieldOwner("hypershift"), crclient.DryRunAll,
+		); err != nil {
+			errs = append(errs, fmt.Errorf("dry-run validation failed for CRD %s: %w", crd.GetName(), err))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("CRD dry-run validation failed:\n%w", errors.NewAggregate(errs))
+	}
+	fmt.Fprintf(out, "All %d CRDs passed dry-run validation\n", len(crds))
+	return nil
 }
 
 // setupMonitoring creates the Prometheus resources for monitoring
@@ -985,7 +1257,7 @@ func setupSharedIngress() []crclient.Object {
 // setupOperatorResources creates the operator Deployment and Service resources.
 //
 // Returns the Service and a list of resources to apply.
-func setupOperatorResources(opts Options, userCABundleCM *corev1.ConfigMap, trustedCABundle *corev1.ConfigMap, operatorNamespace *corev1.Namespace, operatorServiceAccount *corev1.ServiceAccount, operatorCredentialsSecret *corev1.Secret, oidcSecret *corev1.Secret, scaleFromZeroSecret *corev1.Secret, images map[string]string) (*corev1.Service, []crclient.Object) {
+func setupOperatorResources(opts Options, userCABundleCM *corev1.ConfigMap, trustedCABundle *corev1.ConfigMap, operatorNamespace *corev1.Namespace, operatorServiceAccount *corev1.ServiceAccount, operatorCredentialsSecret *corev1.Secret, azureCredentialsSecret *corev1.Secret, oidcSecret *corev1.Secret, scaleFromZeroSecret *corev1.Secret, images map[string]string) (*corev1.Service, []crclient.Object) {
 	operatorDeployment := assets.HyperShiftOperatorDeployment{
 		AdditionalTrustBundle:                   userCABundleCM,
 		OpenShiftTrustBundle:                    trustedCABundle,
@@ -995,7 +1267,7 @@ func setupOperatorResources(opts Options, userCABundleCM *corev1.ConfigMap, trus
 		Replicas:                                opts.HyperShiftOperatorReplicas,
 		EnableOCPClusterMonitoring:              opts.PlatformMonitoring == metrics.PlatformMonitoringAll,
 		EnableCIDebugOutput:                     opts.EnableCIDebugOutput,
-		EnableWebhook:                           opts.EnableDefaultingWebhook || opts.EnableConversionWebhook || opts.EnableValidatingWebhook || opts.EnableAuditLogPersistence,
+		EnableWebhook:                           opts.EnableDefaultingWebhook || opts.EnableConversionWebhook || !opts.DisableCAPIConversionWebhook || opts.EnableValidatingWebhook || opts.EnableAuditLogPersistence,
 		EnableValidatingWebhook:                 opts.EnableValidatingWebhook,
 		PrivatePlatform:                         opts.PrivatePlatform,
 		AWSPrivateRegion:                        opts.AWSPrivateRegion,
@@ -1003,6 +1275,11 @@ func setupOperatorResources(opts Options, userCABundleCM *corev1.ConfigMap, trus
 		GCPRegion:                               opts.GCPRegion,
 		AWSPrivateSecret:                        operatorCredentialsSecret,
 		AWSPrivateSecretKey:                     opts.AWSPrivateCredentialsSecretKey,
+		AzurePrivateSecret:                      azureCredentialsSecret,
+		AzurePrivateSecretKey:                   opts.AzurePrivateCredentialsSecretKey,
+		AzurePLSManagedIdentityClientID:         opts.AzurePLSManagedIdentityClientID,
+		AzurePLSSubscriptionID:                  opts.AzurePLSSubscriptionID,
+		AzurePLSResourceGroup:                   opts.AzurePLSResourceGroup,
 		OIDCBucketName:                          opts.OIDCStorageProviderS3BucketName,
 		OIDCBucketRegion:                        opts.OIDCStorageProviderS3Region,
 		OIDCStorageProviderS3Secret:             oidcSecret,
@@ -1031,6 +1308,7 @@ func setupOperatorResources(opts Options, userCABundleCM *corev1.ConfigMap, trus
 		ScaleFromZeroSecret:                     scaleFromZeroSecret,
 		ScaleFromZeroSecretKey:                  opts.ScaleFromZeroCredentialsSecretKey,
 		ScaleFromZeroProvider:                   opts.ScaleFromZeroProvider,
+		HCPEgressBlockCIDRs:                     opts.HCPEgressBlockCIDRs,
 	}.Build()
 	operatorService := assets.HyperShiftOperatorService{
 		Namespace: operatorNamespace,
@@ -1193,6 +1471,14 @@ func setupRBAC(opts Options, operatorNamespace *corev1.Namespace) (*corev1.Servi
 	operatorServiceAccount := assets.HyperShiftOperatorServiceAccount{
 		Namespace: operatorNamespace,
 	}.Build()
+	// When using Azure Workload Identity for PLS operations, annotate the SA
+	// so the Azure AD Workload Identity webhook injects federated tokens.
+	if opts.AzurePLSManagedIdentityClientID != "" {
+		if operatorServiceAccount.Annotations == nil {
+			operatorServiceAccount.Annotations = map[string]string{}
+		}
+		operatorServiceAccount.Annotations["azure.workload.identity/client-id"] = opts.AzurePLSManagedIdentityClientID
+	}
 	objects = append(objects, operatorServiceAccount)
 
 	operatorClusterRole := assets.HyperShiftOperatorClusterRole{
@@ -1279,17 +1565,18 @@ func setupAdminRBAC(operatorNamespace *corev1.Namespace) []crclient.Object {
 // - OIDC S3 credentials secret
 // - Platform specific secrets (e.g. AWS credentials)
 //
-// Returns the OIDC S3 credentials secret, operator credentials secret, and a list of resources to apply
-func setupAuth(opts Options, operatorNamespace *corev1.Namespace) (*corev1.Secret, *corev1.Secret, *corev1.Secret, []crclient.Object, error) {
+// Returns the OIDC S3 credentials secret, operator credentials secret, Azure credentials secret, and a list of resources to apply
+func setupAuth(opts Options, operatorNamespace *corev1.Namespace) (*corev1.Secret, *corev1.Secret, *corev1.Secret, *corev1.Secret, []crclient.Object, error) {
 	var objects []crclient.Object
 	var operatorCredentialsSecret *corev1.Secret
+	var azureCredentialsSecret *corev1.Secret
 	var oidcSecret *corev1.Secret
 	var scaleFromZeroSecret *corev1.Secret
 
 	if len(opts.PullSecretFile) > 0 {
 		pullSecretBytes, err := os.ReadFile(opts.PullSecretFile)
 		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("failed to read pull secret file: %w", err)
+			return nil, nil, nil, nil, nil, fmt.Errorf("failed to read pull secret file: %w", err)
 		}
 
 		pullSecret := assets.HyperShiftPullSecret{
@@ -1302,7 +1589,7 @@ func setupAuth(opts Options, operatorNamespace *corev1.Namespace) (*corev1.Secre
 	if opts.OIDCStorageProviderS3Credentials != "" {
 		oidcCreds, err := os.ReadFile(opts.OIDCStorageProviderS3Credentials)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
 
 		oidcSecret = assets.HyperShiftOperatorOIDCProviderS3Secret{
@@ -1325,7 +1612,7 @@ func setupAuth(opts Options, operatorNamespace *corev1.Namespace) (*corev1.Secre
 		if opts.AWSPrivateCreds != "" {
 			credBytes, err := os.ReadFile(opts.AWSPrivateCreds)
 			if err != nil {
-				return nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, err
 			}
 
 			operatorCredentialsSecret = assets.HyperShiftOperatorCredentialsSecret{
@@ -1339,6 +1626,31 @@ func setupAuth(opts Options, operatorNamespace *corev1.Namespace) (*corev1.Secre
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: operatorNamespace.Name,
 					Name:      opts.AWSPrivateCredentialsSecret,
+				},
+			}
+		}
+	case hyperv1.AzurePlatform:
+		// ARO HCP uses Swift networking, not Private Link Services
+		if opts.ManagedService == hyperv1.AroHCP {
+			break
+		}
+		if opts.AzurePrivateCreds != "" {
+			credBytes, err := os.ReadFile(opts.AzurePrivateCreds)
+			if err != nil {
+				return nil, nil, nil, nil, nil, err
+			}
+
+			azureCredentialsSecret = assets.HyperShiftOperatorAzureCredentialsSecret{
+				Namespace:  operatorNamespace,
+				CredsBytes: credBytes,
+				CredsKey:   opts.AzurePrivateCredentialsSecretKey,
+			}.Build()
+			objects = append(objects, azureCredentialsSecret)
+		} else if opts.AzurePrivateCredentialsSecret != "" {
+			azureCredentialsSecret = &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: operatorNamespace.Name,
+					Name:      opts.AzurePrivateCredentialsSecret,
 				},
 			}
 		}
@@ -1362,7 +1674,7 @@ func setupAuth(opts Options, operatorNamespace *corev1.Namespace) (*corev1.Secre
 	if opts.ScaleFromZeroCreds != "" {
 		credBytes, err := os.ReadFile(opts.ScaleFromZeroCreds)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
 
 		scaleFromZeroSecret = assets.ScaleFromZeroCredentialsSecret{
@@ -1381,5 +1693,5 @@ func setupAuth(opts Options, operatorNamespace *corev1.Namespace) (*corev1.Secre
 		}
 	}
 
-	return oidcSecret, operatorCredentialsSecret, scaleFromZeroSecret, objects, nil
+	return oidcSecret, operatorCredentialsSecret, azureCredentialsSecret, scaleFromZeroSecret, objects, nil
 }

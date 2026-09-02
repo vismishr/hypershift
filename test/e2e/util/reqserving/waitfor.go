@@ -7,7 +7,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
-	supportutil "github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/podspec"
 	e2eutil "github.com/openshift/hypershift/test/e2e/util"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -60,7 +60,7 @@ func WaitForControlPlaneWorkloadsReady(ctx context.Context, hc *hyperv1.HostedCl
 			return false, nil
 		}
 		for _, deployment := range deployments.Items {
-			if supportutil.IsDeploymentReady(ctx, &deployment) {
+			if podspec.IsDeploymentReady(ctx, &deployment) {
 				continue
 			}
 			return false, nil
@@ -76,13 +76,13 @@ func WaitForControlPlaneWorkloadsReady(ctx context.Context, hc *hyperv1.HostedCl
 	defer cancel()
 	err = wait.PollUntilContextCancel(statefulSetCtx, DefaultPollingInterval, true, func(ctx context.Context) (bool, error) {
 		if err := client.List(ctx, statefulSets, crclient.InNamespace(cpNamespace)); err != nil {
-			return false, nil
+			return false, nil //nolint:nilerr // retry until statefulsets are listable
 		}
 		if len(statefulSets.Items) == 0 {
 			return false, nil
 		}
 		for _, statefulSet := range statefulSets.Items {
-			if supportutil.IsStatefulSetReady(ctx, &statefulSet) {
+			if podspec.IsStatefulSetReady(ctx, &statefulSet) {
 				continue
 			}
 			return false, nil

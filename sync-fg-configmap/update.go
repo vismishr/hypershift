@@ -14,6 +14,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/spf13/cobra"
@@ -39,7 +40,7 @@ func NewRunCommand() *cobra.Command {
 		Name:           "feature-gate",
 		PayloadVersion: os.Getenv("PAYLOAD_VERSION"),
 	}
-	cmd.Flags().StringVar(&opts.File, "file", opts.File, "The path path to the file that contains the feature gate YAML to apply.")
+	cmd.Flags().StringVar(&opts.File, "file", opts.File, "The path to the file that contains the feature gate YAML to apply.")
 	cmd.Flags().StringVar(&opts.Namespace, "namespace", opts.Namespace, "The control plane namespace for the feature gate configmap.")
 	cmd.Flags().StringVar(&opts.Name, "name", opts.Name, "The name of the feature gate configmap.")
 	cmd.Flags().StringVar(&opts.PayloadVersion, "payload-version", opts.PayloadVersion, "The payload version of the control plane.")
@@ -72,6 +73,10 @@ func (o *syncFGConfigMapOptions) run(ctx context.Context) error {
 		return fmt.Errorf("failed to create client: %w", err)
 	}
 
+	return o.reconcile(ctx, c, content)
+}
+
+func (o *syncFGConfigMapOptions) reconcile(ctx context.Context, c crclient.Client, content []byte) error {
 	cm := &corev1.ConfigMap{}
 	cm.Name = o.Name
 	cm.Namespace = o.Namespace

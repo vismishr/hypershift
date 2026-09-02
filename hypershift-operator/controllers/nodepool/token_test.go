@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	ignitionapi "github.com/coreos/ignition/v2/config/v3_2/types"
+	"github.com/coreos/stream-metadata-go/stream"
 	"github.com/go-logr/logr/testr"
 	"github.com/google/uuid"
 )
@@ -739,6 +740,8 @@ func TestTokenReconcile(t *testing.T) {
 			g.Expect(UUIDToken).To(BeAssignableToTypeOf(uuid.UUID{}))
 			g.Expect(gotTokenSecret.Data[TokenSecretReleaseKey]).To(Equal([]byte(tc.configGenerator.nodePool.Spec.Release.Image)))
 			g.Expect(gotTokenSecret.Data[TokenSecretReleaseKey]).ToNot(BeEmpty())
+			g.Expect(gotTokenSecret.Data[TokenSecretReleaseVersionKey]).To(Equal([]byte(tc.configGenerator.releaseImage.Version())))
+			g.Expect(gotTokenSecret.Data[TokenSecretReleaseVersionKey]).ToNot(BeEmpty())
 
 			// Validate the config is compressed and encoded in the token secret.
 			compressedAndEncodedConfig := gotTokenSecret.Data[TokenSecretConfigKey]
@@ -1136,12 +1139,12 @@ func TestSetKarpenterAMILabels(t *testing.T) {
 				ImageStream: &imageapi.ImageStream{
 					ObjectMeta: metav1.ObjectMeta{Name: "test-release"},
 				},
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							Images: releaseinfo.CoreOSImages{
-								AWS: releaseinfo.CoreOSAWSImages{
-									Regions: map[string]releaseinfo.CoreOSAWSImage{
+							Images: stream.Images{
+								Aws: &stream.AwsImage{
+									Regions: map[string]stream.SingleImage{
 										"us-east-1": {Image: "ami-amd64-only"},
 									},
 								},

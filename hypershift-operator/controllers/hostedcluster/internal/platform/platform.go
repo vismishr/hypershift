@@ -14,7 +14,6 @@ import (
 	"github.com/openshift/hypershift/hypershift-operator/controllers/hostedcluster/internal/platform/none"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/hostedcluster/internal/platform/openstack"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/hostedcluster/internal/platform/powervs"
-	"github.com/openshift/hypershift/support/backwardcompat"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	"github.com/openshift/hypershift/support/upsert"
 	imgUtil "github.com/openshift/hypershift/support/util"
@@ -88,6 +87,8 @@ type OrphanDeleter interface {
 }
 
 // GetPlatform gets and initializes the cloud platform the hosted cluster was created on
+//
+//nolint:gocyclo
 func GetPlatform(ctx context.Context, hcluster *hyperv1.HostedCluster, releaseProvider releaseinfo.Provider, utilitiesImage string, pullSecretBytes []byte) (Platform, error) {
 	var (
 		platform          Platform
@@ -107,16 +108,6 @@ func GetPlatform(ctx context.Context, hcluster *hyperv1.HostedCluster, releasePr
 			payloadVersion, err = imgUtil.GetPayloadVersion(ctx, releaseProvider, hcluster, pullSecretBytes)
 			if err != nil {
 				return nil, fmt.Errorf("failed to fetch payload version: %w", err)
-			}
-
-			if payloadVersion != nil {
-				imageOverride, err := backwardcompat.GetBackwardCompatibleCAPIImage(ctx, pullSecretBytes, releaseProvider, *payloadVersion, AWSCAPIProvider)
-				if err != nil {
-					return nil, err
-				}
-				if imageOverride != "" {
-					capiImageProvider = imageOverride
-				}
 			}
 		}
 
@@ -138,16 +129,6 @@ func GetPlatform(ctx context.Context, hcluster *hyperv1.HostedCluster, releasePr
 			payloadVersion, err = imgUtil.GetPayloadVersion(ctx, releaseProvider, hcluster, pullSecretBytes)
 			if err != nil {
 				return nil, fmt.Errorf("failed to fetch payload version: %w", err)
-			}
-
-			if payloadVersion != nil {
-				imageOverride, err := backwardcompat.GetBackwardCompatibleCAPIImage(ctx, pullSecretBytes, releaseProvider, *payloadVersion, AzureCAPIProvider)
-				if err != nil {
-					return nil, err
-				}
-				if imageOverride != "" {
-					capiImageProvider = imageOverride
-				}
 			}
 		}
 

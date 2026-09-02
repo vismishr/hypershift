@@ -40,6 +40,10 @@ func NewComponent() component.ControlPlaneComponent {
 			component.WithAdaptFunction(adaptPodMonitor),
 		).
 		WithManifestAdapter(
+			"controller-config.yaml",
+			component.WithAdaptFunction(adaptControllerConfig),
+		).
+		WithManifestAdapter(
 			"azure-secretprovider.yaml",
 			component.WithAdaptFunction(adaptAzureSecretProvider),
 			component.WithPredicate(isAroHCP),
@@ -60,5 +64,5 @@ func isImageRegistryCapabilityEnabled(cpContext component.WorkloadContext) (bool
 }
 
 func isAroHCP(cpContext component.WorkloadContext) bool {
-	return azureutil.IsAroHCP()
+	return azureutil.IsAroHCPByHCP(cpContext.HCP)
 }

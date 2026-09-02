@@ -2,8 +2,11 @@ package nodepool
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+
+	. "github.com/onsi/gomega"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/support/api"
@@ -20,10 +23,12 @@ import (
 	"k8s.io/utils/ptr"
 
 	capiaws "sigs.k8s.io/cluster-api-provider-aws/v2/api/v1beta2"
-	capiv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/coreos/stream-metadata-go/stream"
+	"github.com/coreos/stream-metadata-go/stream/rhcos"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -146,8 +151,8 @@ func TestAWSMachineTemplateSpec(t *testing.T) {
 			name:          "NotReady error is returned if no sg specified and no cluster sg is available",
 			clusterStatus: &hyperv1.HostedClusterStatus{Platform: &hyperv1.PlatformStatus{AWS: &hyperv1.AWSPlatformStatus{DefaultWorkerSecurityGroupID: ""}}},
 			checkError: func(t *testing.T, err error) {
-				_, isNotReady := err.(*NotReadyError)
-				if err == nil || !isNotReady {
+				var notReadyErr *NotReadyError
+				if err == nil || !errors.As(err, &notReadyErr) {
 					t.Errorf("did not get expected NotReady error")
 				}
 			},
@@ -266,12 +271,12 @@ func TestAWSMachineTemplateSpec(t *testing.T) {
 						Name: "4.17.0",
 					},
 				},
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							RHCOS: releaseinfo.CoreRHCOSImage{
-								AWSWinLi: releaseinfo.CoreAWSWinLi{
-									Regions: map[string]releaseinfo.CoreAWSWinLiRegion{
+							RHELCoreOSExtensions: &rhcos.Extensions{
+								AwsWinLi: &rhcos.ReplicatedImage{
+									Regions: map[string]rhcos.SingleImage{
 										"us-east-1": {
 											Release: "418.94.202410090804-0",
 											Image:   "ami-0abcdef1234567890",
@@ -704,11 +709,49 @@ func TestGetWindowsAMI(t *testing.T) {
 						Name: "4.17.0",
 					},
 				},
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{},
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{},
 				},
 			},
 			expectedError: "couldn't find OS metadata for architecture \"amd64\"",
+		},
+		{
+			name:   "When RHELCoreOSExtensions is nil, it should return error",
+			region: "us-east-1",
+			arch:   hyperv1.ArchitectureAMD64,
+			releaseImage: &releaseinfo.ReleaseImage{
+				ImageStream: &v1.ImageStream{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "4.17.0",
+					},
+				},
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
+						"x86_64": {},
+					},
+				},
+			},
+			expectedError: "no rhel-coreos-extensions data found in release image metadata",
+		},
+		{
+			name:   "When AwsWinLi is nil, it should return error",
+			region: "us-east-1",
+			arch:   hyperv1.ArchitectureAMD64,
+			releaseImage: &releaseinfo.ReleaseImage{
+				ImageStream: &v1.ImageStream{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "4.17.0",
+					},
+				},
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
+						"x86_64": {
+							RHELCoreOSExtensions: &rhcos.Extensions{},
+						},
+					},
+				},
+			},
+			expectedError: "no aws-winli regions data found in release image metadata",
 		},
 		{
 			name:   "no aws-winli regions data",
@@ -720,11 +763,11 @@ func TestGetWindowsAMI(t *testing.T) {
 						Name: "4.17.0",
 					},
 				},
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							RHCOS: releaseinfo.CoreRHCOSImage{
-								AWSWinLi: releaseinfo.CoreAWSWinLi{
+							RHELCoreOSExtensions: &rhcos.Extensions{
+								AwsWinLi: &rhcos.ReplicatedImage{
 									Regions: nil,
 								},
 							},
@@ -744,12 +787,12 @@ func TestGetWindowsAMI(t *testing.T) {
 						Name: "4.17.0",
 					},
 				},
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							RHCOS: releaseinfo.CoreRHCOSImage{
-								AWSWinLi: releaseinfo.CoreAWSWinLi{
-									Regions: map[string]releaseinfo.CoreAWSWinLiRegion{
+							RHELCoreOSExtensions: &rhcos.Extensions{
+								AwsWinLi: &rhcos.ReplicatedImage{
+									Regions: map[string]rhcos.SingleImage{
 										"us-east-1": {
 											Release: "418.94.202410090804-0",
 											Image:   "ami-testimage",
@@ -773,12 +816,12 @@ func TestGetWindowsAMI(t *testing.T) {
 						Name: "4.17.0",
 					},
 				},
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							RHCOS: releaseinfo.CoreRHCOSImage{
-								AWSWinLi: releaseinfo.CoreAWSWinLi{
-									Regions: map[string]releaseinfo.CoreAWSWinLiRegion{
+							RHELCoreOSExtensions: &rhcos.Extensions{
+								AwsWinLi: &rhcos.ReplicatedImage{
+									Regions: map[string]rhcos.SingleImage{
 										"us-east-1": {
 											Release: "418.94.202410090804-0",
 											Image:   "",
@@ -802,12 +845,12 @@ func TestGetWindowsAMI(t *testing.T) {
 						Name: "4.17.0",
 					},
 				},
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							RHCOS: releaseinfo.CoreRHCOSImage{
-								AWSWinLi: releaseinfo.CoreAWSWinLi{
-									Regions: map[string]releaseinfo.CoreAWSWinLiRegion{
+							RHELCoreOSExtensions: &rhcos.Extensions{
+								AwsWinLi: &rhcos.ReplicatedImage{
+									Regions: map[string]rhcos.SingleImage{
 										"us-east-1": {
 											Release: "418.94.202410090804-0",
 											Image:   "ami-0abcdef1234567890",
@@ -835,12 +878,12 @@ func TestGetWindowsAMI(t *testing.T) {
 						Name: "4.17.0",
 					},
 				},
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							RHCOS: releaseinfo.CoreRHCOSImage{
-								AWSWinLi: releaseinfo.CoreAWSWinLi{
-									Regions: map[string]releaseinfo.CoreAWSWinLiRegion{
+							RHELCoreOSExtensions: &rhcos.Extensions{
+								AwsWinLi: &rhcos.ReplicatedImage{
+									Regions: map[string]rhcos.SingleImage{
 										"us-east-1": {
 											Release: "418.94.202410090804-0",
 											Image:   "ami-0abcdef1234567890",
@@ -1036,6 +1079,788 @@ func TestIsSpotEnabled(t *testing.T) {
 			if result != tc.expected {
 				t.Errorf("expected %v, got %v", tc.expected, result)
 			}
+		})
+	}
+}
+
+func TestSetAWSConditions(t *testing.T) {
+	t.Parallel()
+
+	releaseImageWithStreams := &releaseinfo.ReleaseImage{
+		ImageStream: &v1.ImageStream{
+			ObjectMeta: metav1.ObjectMeta{Name: "4.17.0"},
+		},
+		StreamMetadata: &stream.Stream{
+			Architectures: map[string]stream.Arch{
+				"x86_64": {
+					Images: stream.Images{
+						Aws: &stream.AwsImage{
+							Regions: map[string]stream.SingleImage{
+								"us-east-1": {Release: "4.17.0", Image: "ami-linux-us-east-1"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	testCases := []struct {
+		name              string
+		nodePool          *hyperv1.NodePool
+		hostedCluster     *hyperv1.HostedCluster
+		releaseImage      *releaseinfo.ReleaseImage
+		expectError       bool
+		expectedCondType  string
+		expectedCondValue corev1.ConditionStatus
+	}{
+		{
+			name: "When Linux nodePool resolves AMI successfully it should set ValidPlatformImage to true",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Arch:     hyperv1.ArchitectureAMD64,
+					Platform: hyperv1.NodePoolPlatform{Type: hyperv1.AWSPlatform, AWS: &hyperv1.AWSNodePoolPlatform{}},
+				},
+			},
+			hostedCluster: &hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Platform: hyperv1.PlatformSpec{AWS: &hyperv1.AWSPlatformSpec{Region: "us-east-1"}},
+				},
+				Status: hyperv1.HostedClusterStatus{
+					Platform: &hyperv1.PlatformStatus{AWS: &hyperv1.AWSPlatformStatus{DefaultWorkerSecurityGroupID: "sg-123"}},
+				},
+			},
+			releaseImage:      releaseImageWithStreams,
+			expectedCondType:  string(hyperv1.NodePoolValidPlatformImageType),
+			expectedCondValue: corev1.ConditionTrue,
+		},
+		{
+			name: "When stream metadata is nil it should set ValidPlatformImage to false",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Arch:     hyperv1.ArchitectureAMD64,
+					Platform: hyperv1.NodePoolPlatform{Type: hyperv1.AWSPlatform, AWS: &hyperv1.AWSNodePoolPlatform{}},
+					Release:  hyperv1.Release{Image: "quay.io/test:4.17"},
+				},
+			},
+			hostedCluster: &hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Platform: hyperv1.PlatformSpec{AWS: &hyperv1.AWSPlatformSpec{Region: "us-east-1"}},
+				},
+			},
+			releaseImage: &releaseinfo.ReleaseImage{
+				ImageStream:    &v1.ImageStream{ObjectMeta: metav1.ObjectMeta{Name: "4.17.0"}},
+				StreamMetadata: nil,
+			},
+			expectError:       true,
+			expectedCondType:  string(hyperv1.NodePoolValidPlatformImageType),
+			expectedCondValue: corev1.ConditionFalse,
+		},
+		{
+			name: "When region has no AMI it should set ValidPlatformImage to false",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Arch:     hyperv1.ArchitectureAMD64,
+					Platform: hyperv1.NodePoolPlatform{Type: hyperv1.AWSPlatform, AWS: &hyperv1.AWSNodePoolPlatform{}},
+					Release:  hyperv1.Release{Image: "quay.io/test:4.17"},
+				},
+			},
+			hostedCluster: &hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Platform: hyperv1.PlatformSpec{AWS: &hyperv1.AWSPlatformSpec{Region: "ap-nowhere-1"}},
+				},
+			},
+			releaseImage:      releaseImageWithStreams,
+			expectError:       true,
+			expectedCondType:  string(hyperv1.NodePoolValidPlatformImageType),
+			expectedCondValue: corev1.ConditionFalse,
+		},
+		{
+			name: "When HostedCluster has no AWS platform it should return error",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Arch:     hyperv1.ArchitectureAMD64,
+					Platform: hyperv1.NodePoolPlatform{Type: hyperv1.AWSPlatform, AWS: &hyperv1.AWSNodePoolPlatform{}},
+				},
+			},
+			hostedCluster: &hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Platform: hyperv1.PlatformSpec{},
+				},
+			},
+			releaseImage: releaseImageWithStreams,
+			expectError:  true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := NewWithT(t)
+
+			r := &NodePoolReconciler{}
+			err := r.setAWSConditions(t.Context(), tc.nodePool, tc.hostedCluster, "", tc.releaseImage)
+			if tc.expectError {
+				g.Expect(err).To(HaveOccurred())
+			} else {
+				g.Expect(err).ToNot(HaveOccurred())
+			}
+
+			if tc.expectedCondType != "" {
+				cond := FindStatusCondition(tc.nodePool.Status.Conditions, tc.expectedCondType)
+				g.Expect(cond).ToNot(BeNil())
+				g.Expect(cond.Status).To(Equal(tc.expectedCondValue))
+			}
+		})
+	}
+}
+
+func TestResolveAWSAMI(t *testing.T) {
+	releaseImageWithMetadata := &releaseinfo.ReleaseImage{
+		ImageStream: &v1.ImageStream{
+			ObjectMeta: metav1.ObjectMeta{Name: "4.17.0"},
+		},
+		StreamMetadata: &stream.Stream{
+			Architectures: map[string]stream.Arch{
+				"x86_64": {
+					Images: stream.Images{
+						Aws: &stream.AwsImage{
+							Regions: map[string]stream.SingleImage{
+								"us-east-1": {Release: "4.17.0", Image: "ami-linux-us-east-1"},
+							},
+						},
+					},
+					RHELCoreOSExtensions: &rhcos.Extensions{
+						AwsWinLi: &rhcos.ReplicatedImage{
+							Regions: map[string]rhcos.SingleImage{
+								"us-east-1": {
+									Release: "418.94.202410090804-0",
+									Image:   "ami-windows-us-east-1",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	testCases := []struct {
+		name          string
+		hostedCluster *hyperv1.HostedCluster
+		nodePool      *hyperv1.NodePool
+		releaseImage  *releaseinfo.ReleaseImage
+		expectedAMI   string
+		expectError   bool
+	}{
+		{
+			name: "When nodePool has explicit AMI, it should return that AMI directly",
+			hostedCluster: &hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Platform: hyperv1.PlatformSpec{AWS: &hyperv1.AWSPlatformSpec{Region: "us-east-1"}},
+				},
+			},
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{AWS: &hyperv1.AWSNodePoolPlatform{AMI: "ami-explicit"}},
+				},
+			},
+			releaseImage: releaseImageWithMetadata,
+			expectedAMI:  "ami-explicit",
+		},
+		{
+			name: "When nodePool has Windows ImageType, it should resolve Windows AMI from metadata",
+			hostedCluster: &hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Platform: hyperv1.PlatformSpec{AWS: &hyperv1.AWSPlatformSpec{Region: "us-east-1"}},
+				},
+			},
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Arch:     hyperv1.ArchitectureAMD64,
+					Platform: hyperv1.NodePoolPlatform{AWS: &hyperv1.AWSNodePoolPlatform{ImageType: hyperv1.ImageTypeWindows}},
+				},
+			},
+			releaseImage: releaseImageWithMetadata,
+			expectedAMI:  "ami-windows-us-east-1",
+		},
+		{
+			name: "When nodePool has Windows ImageType with unsupported region, it should return error",
+			hostedCluster: &hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Platform: hyperv1.PlatformSpec{AWS: &hyperv1.AWSPlatformSpec{Region: "ap-southeast-99"}},
+				},
+			},
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Arch:     hyperv1.ArchitectureAMD64,
+					Platform: hyperv1.NodePoolPlatform{AWS: &hyperv1.AWSNodePoolPlatform{ImageType: hyperv1.ImageTypeWindows}},
+				},
+			},
+			releaseImage: releaseImageWithMetadata,
+			expectError:  true,
+		},
+		{
+			name: "When nodePool has default Linux type it should resolve AMI from stream metadata",
+			hostedCluster: &hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Platform: hyperv1.PlatformSpec{AWS: &hyperv1.AWSPlatformSpec{Region: "us-east-1"}},
+				},
+			},
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Arch:     hyperv1.ArchitectureAMD64,
+					Platform: hyperv1.NodePoolPlatform{AWS: &hyperv1.AWSNodePoolPlatform{}},
+				},
+			},
+			releaseImage: releaseImageWithMetadata,
+			expectedAMI:  "ami-linux-us-east-1",
+		},
+		{
+			name: "When nodePool has no AMI and default Linux type with nil stream metadata, it should return error",
+			hostedCluster: &hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Platform: hyperv1.PlatformSpec{AWS: &hyperv1.AWSPlatformSpec{Region: "us-east-1"}},
+				},
+			},
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Arch:     hyperv1.ArchitectureAMD64,
+					Platform: hyperv1.NodePoolPlatform{AWS: &hyperv1.AWSNodePoolPlatform{}},
+				},
+			},
+			releaseImage: &releaseinfo.ReleaseImage{
+				ImageStream:    &v1.ImageStream{ObjectMeta: metav1.ObjectMeta{Name: "4.17.0"}},
+				StreamMetadata: nil,
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+			ami, err := resolveAWSAMI(tc.hostedCluster, tc.nodePool, tc.releaseImage)
+			if tc.expectError {
+				g.Expect(err).To(HaveOccurred())
+			} else {
+				g.Expect(err).ToNot(HaveOccurred())
+				g.Expect(ami).To(Equal(tc.expectedAMI))
+			}
+		})
+	}
+}
+
+func TestBuildAWSSubnet(t *testing.T) {
+	testCases := []struct {
+		name           string
+		nodePool       *hyperv1.NodePool
+		expectedSubnet *capiaws.AWSResourceReference
+	}{
+		{
+			name: "When subnet has only ID, it should return subnet with ID set",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							Subnet: hyperv1.AWSResourceReference{
+								ID: ptr.To("subnet-abc123"),
+							},
+						},
+					},
+				},
+			},
+			expectedSubnet: &capiaws.AWSResourceReference{
+				ID: ptr.To("subnet-abc123"),
+			},
+		},
+		{
+			name: "When subnet has filters, it should copy filters to CAPI format",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							Subnet: hyperv1.AWSResourceReference{
+								Filters: []hyperv1.Filter{
+									{Name: "tag:Name", Values: []string{"my-subnet"}},
+									{Name: "vpc-id", Values: []string{"vpc-123"}},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedSubnet: &capiaws.AWSResourceReference{
+				Filters: []capiaws.Filter{
+					{Name: "tag:Name", Values: []string{"my-subnet"}},
+					{Name: "vpc-id", Values: []string{"vpc-123"}},
+				},
+			},
+		},
+		{
+			name: "When subnet has no ID and no filters, it should return empty subnet reference",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							Subnet: hyperv1.AWSResourceReference{},
+						},
+					},
+				},
+			},
+			expectedSubnet: &capiaws.AWSResourceReference{},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+			subnet := buildAWSSubnet(tc.nodePool)
+			g.Expect(subnet).To(Equal(tc.expectedSubnet))
+		})
+	}
+}
+
+func TestBuildAWSRootVolume(t *testing.T) {
+	testCases := []struct {
+		name           string
+		nodePool       *hyperv1.NodePool
+		expectedVolume *capiaws.Volume
+	}{
+		{
+			name: "When RootVolume is nil, it should return default volume with default size",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							RootVolume: nil,
+						},
+					},
+				},
+			},
+			expectedVolume: &capiaws.Volume{
+				Size: EC2VolumeDefaultSize,
+			},
+		},
+		{
+			name: "When RootVolume has custom type and size, it should use them",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							RootVolume: &hyperv1.Volume{
+								Type: "io1",
+								Size: 100,
+								IOPS: 5000,
+							},
+						},
+					},
+				},
+			},
+			expectedVolume: &capiaws.Volume{
+				Type: capiaws.VolumeType("io1"),
+				Size: 100,
+				IOPS: 5000,
+			},
+		},
+		{
+			name: "When RootVolume has empty type, it should use default type",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							RootVolume: &hyperv1.Volume{
+								Type: "",
+								Size: 50,
+							},
+						},
+					},
+				},
+			},
+			expectedVolume: &capiaws.Volume{
+				Type: capiaws.VolumeType(EC2VolumeDefaultType),
+				Size: 50,
+			},
+		},
+		{
+			name: "When RootVolume has zero size, it should keep default size",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							RootVolume: &hyperv1.Volume{
+								Type: "gp3",
+								Size: 0,
+							},
+						},
+					},
+				},
+			},
+			expectedVolume: &capiaws.Volume{
+				Type: capiaws.VolumeType("gp3"),
+				Size: EC2VolumeDefaultSize,
+			},
+		},
+		{
+			name: "When RootVolume has encryption settings, it should propagate them",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							RootVolume: &hyperv1.Volume{
+								Type:          "gp3",
+								Size:          64,
+								Encrypted:     ptr.To(true),
+								EncryptionKey: "arn:aws:kms:us-east-1:123:key/abc",
+							},
+						},
+					},
+				},
+			},
+			expectedVolume: &capiaws.Volume{
+				Type:          capiaws.VolumeType("gp3"),
+				Size:          64,
+				Encrypted:     ptr.To(true),
+				EncryptionKey: "arn:aws:kms:us-east-1:123:key/abc",
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+			volume := buildAWSRootVolume(tc.nodePool)
+			g.Expect(volume).To(Equal(tc.expectedVolume))
+		})
+	}
+}
+
+func TestBuildAWSSecurityGroups(t *testing.T) {
+	testCases := []struct {
+		name           string
+		nodePool       *hyperv1.NodePool
+		hostedCluster  *hyperv1.HostedCluster
+		defaultSG      bool
+		expectedSGs    []capiaws.AWSResourceReference
+		expectError    bool
+		expectNotReady bool
+	}{
+		{
+			name: "When nodePool has security groups and defaultSG is true, it should include both",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							SecurityGroups: []hyperv1.AWSResourceReference{
+								{ID: ptr.To("sg-custom")},
+							},
+						},
+					},
+				},
+			},
+			hostedCluster: &hyperv1.HostedCluster{
+				Status: hyperv1.HostedClusterStatus{
+					Platform: &hyperv1.PlatformStatus{
+						AWS: &hyperv1.AWSPlatformStatus{
+							DefaultWorkerSecurityGroupID: "sg-default",
+						},
+					},
+				},
+			},
+			defaultSG: true,
+			expectedSGs: []capiaws.AWSResourceReference{
+				{ID: ptr.To("sg-custom")},
+				{ID: ptr.To("sg-default")},
+			},
+		},
+		{
+			name: "When nodePool has no security groups and defaultSG is true, it should use only default",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{},
+					},
+				},
+			},
+			hostedCluster: &hyperv1.HostedCluster{
+				Status: hyperv1.HostedClusterStatus{
+					Platform: &hyperv1.PlatformStatus{
+						AWS: &hyperv1.AWSPlatformStatus{
+							DefaultWorkerSecurityGroupID: "sg-default",
+						},
+					},
+				},
+			},
+			defaultSG: true,
+			expectedSGs: []capiaws.AWSResourceReference{
+				{ID: ptr.To("sg-default")},
+			},
+		},
+		{
+			name: "When defaultSG is true but no default SG available, it should return NotReadyError",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{},
+					},
+				},
+			},
+			hostedCluster: &hyperv1.HostedCluster{
+				Status: hyperv1.HostedClusterStatus{
+					Platform: &hyperv1.PlatformStatus{
+						AWS: &hyperv1.AWSPlatformStatus{
+							DefaultWorkerSecurityGroupID: "",
+						},
+					},
+				},
+			},
+			defaultSG:      true,
+			expectError:    true,
+			expectNotReady: true,
+		},
+		{
+			name: "When defaultSG is false, it should only return nodePool security groups",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							SecurityGroups: []hyperv1.AWSResourceReference{
+								{ID: ptr.To("sg-1")},
+								{ID: ptr.To("sg-2")},
+							},
+						},
+					},
+				},
+			},
+			hostedCluster: &hyperv1.HostedCluster{},
+			defaultSG:     false,
+			expectedSGs: []capiaws.AWSResourceReference{
+				{ID: ptr.To("sg-1")},
+				{ID: ptr.To("sg-2")},
+			},
+		},
+		{
+			name: "When security group has filters, it should copy filters to CAPI format",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							SecurityGroups: []hyperv1.AWSResourceReference{
+								{
+									Filters: []hyperv1.Filter{
+										{Name: "tag:Role", Values: []string{"worker"}},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			hostedCluster: &hyperv1.HostedCluster{},
+			defaultSG:     false,
+			expectedSGs: []capiaws.AWSResourceReference{
+				{
+					Filters: []capiaws.Filter{
+						{Name: "tag:Role", Values: []string{"worker"}},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+			sgs, err := buildAWSSecurityGroups(tc.nodePool, tc.hostedCluster, tc.defaultSG)
+			if tc.expectError {
+				g.Expect(err).To(HaveOccurred())
+				if tc.expectNotReady {
+					var notReadyErr *NotReadyError
+					g.Expect(errors.As(err, &notReadyErr)).To(BeTrue())
+				}
+			} else {
+				g.Expect(err).ToNot(HaveOccurred())
+				g.Expect(sgs).To(Equal(tc.expectedSGs))
+			}
+		})
+	}
+}
+
+func TestApplyAWSPlacementOptions(t *testing.T) {
+	capacityReservationID := "cr-0123456789abcdef0"
+
+	testCases := []struct {
+		name                             string
+		nodePool                         *hyperv1.NodePool
+		expectedSpotMarketOptions        *capiaws.SpotMarketOptions
+		expectedMarketType               capiaws.MarketType
+		expectedTenancy                  string
+		expectedCapacityReservationID    *string
+		expectedCapReservationPreference capiaws.CapacityReservationPreference
+	}{
+		{
+			name: "When placement is nil, it should not modify spec",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							Placement: nil,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "When marketType is Spot with no MaxPrice, it should set empty SpotMarketOptions",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							Placement: &hyperv1.PlacementOptions{
+								MarketType: hyperv1.MarketTypeSpot,
+								Spot:       hyperv1.SpotOptions{},
+							},
+						},
+					},
+				},
+			},
+			expectedSpotMarketOptions: &capiaws.SpotMarketOptions{},
+		},
+		{
+			name: "When marketType is Spot with MaxPrice, it should set SpotMarketOptions with MaxPrice",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							Placement: &hyperv1.PlacementOptions{
+								MarketType: hyperv1.MarketTypeSpot,
+								Spot: hyperv1.SpotOptions{
+									MaxPrice: "1.50",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedSpotMarketOptions: &capiaws.SpotMarketOptions{
+				MaxPrice: ptr.To("1.50"),
+			},
+		},
+		{
+			name: "When marketType is CapacityBlock, it should set MarketType to CapacityBlock",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							Placement: &hyperv1.PlacementOptions{
+								MarketType: hyperv1.MarketTypeCapacityBlock,
+							},
+						},
+					},
+				},
+			},
+			expectedMarketType: capiaws.MarketTypeCapacityBlock,
+		},
+		{
+			name: "When marketType is OnDemand, it should set MarketType to OnDemand",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							Placement: &hyperv1.PlacementOptions{
+								MarketType: hyperv1.MarketTypeOnDemand,
+							},
+						},
+					},
+				},
+			},
+			expectedMarketType: capiaws.MarketTypeOnDemand,
+		},
+		{
+			name: "When tenancy is dedicated, it should set tenancy on spec",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							Placement: &hyperv1.PlacementOptions{
+								Tenancy: "dedicated",
+							},
+						},
+					},
+				},
+			},
+			expectedTenancy: "dedicated",
+		},
+		{
+			name: "When capacityReservation has ID and preference, it should set both on spec",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							Placement: &hyperv1.PlacementOptions{
+								CapacityReservation: &hyperv1.CapacityReservationOptions{
+									ID:         &capacityReservationID,
+									Preference: hyperv1.CapacityReservationPreferenceOnly,
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCapacityReservationID:    &capacityReservationID,
+			expectedCapReservationPreference: capiaws.CapacityReservationPreference(hyperv1.CapacityReservationPreferenceOnly),
+			expectedMarketType:               capiaws.MarketTypeCapacityBlock,
+		},
+		{
+			name: "When deprecated capacityReservation.MarketType is CapacityBlock and no top-level marketType, it should use deprecated value",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							Placement: &hyperv1.PlacementOptions{
+								CapacityReservation: &hyperv1.CapacityReservationOptions{
+									MarketType: hyperv1.MarketTypeCapacityBlock,
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedMarketType: capiaws.MarketTypeCapacityBlock,
+		},
+		{
+			name: "When tenancy is host with capacityReservation ID but no marketType, it should not default to CapacityBlock",
+			nodePool: &hyperv1.NodePool{
+				Spec: hyperv1.NodePoolSpec{
+					Platform: hyperv1.NodePoolPlatform{
+						AWS: &hyperv1.AWSNodePoolPlatform{
+							Placement: &hyperv1.PlacementOptions{
+								Tenancy: "host",
+								CapacityReservation: &hyperv1.CapacityReservationOptions{
+									ID: &capacityReservationID,
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedTenancy:               "host",
+			expectedMarketType:            "",
+			expectedCapacityReservationID: &capacityReservationID,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+			spec := &capiaws.AWSMachineTemplateSpec{}
+			applyAWSPlacementOptions(tc.nodePool, spec)
+
+			g.Expect(spec.Template.Spec.SpotMarketOptions).To(Equal(tc.expectedSpotMarketOptions))
+			g.Expect(spec.Template.Spec.MarketType).To(Equal(tc.expectedMarketType))
+			g.Expect(spec.Template.Spec.Tenancy).To(Equal(tc.expectedTenancy))
+			g.Expect(spec.Template.Spec.CapacityReservationID).To(Equal(tc.expectedCapacityReservationID))
+			g.Expect(spec.Template.Spec.CapacityReservationPreference).To(Equal(tc.expectedCapReservationPreference))
 		})
 	}
 }

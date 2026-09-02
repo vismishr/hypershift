@@ -17,7 +17,7 @@ import (
 	"github.com/openshift/hypershift/support/infraid"
 	"github.com/openshift/hypershift/support/oidc"
 
-	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -219,21 +219,21 @@ func (o *DrOidcIamOptions) validate() error {
 	return nil
 }
 
-func (o *DrOidcIamOptions) getAWSConfig(ctx context.Context, agent string, region string) (*awsv2.Config, error) {
+func (o *DrOidcIamOptions) getAWSConfig(ctx context.Context, agent string, region string) (*aws.Config, error) {
 	if o.AWSCredentialsFile != "" {
 		if _, err := os.Stat(o.AWSCredentialsFile); err != nil {
 			return nil, fmt.Errorf("failed to read AWS credentials file %s: %w", o.AWSCredentialsFile, err)
 		}
-		return awsutil.NewSessionV2(ctx, agent, o.AWSCredentialsFile, "", "", region), nil
+		return awsutil.NewSession(ctx, agent, o.AWSCredentialsFile, "", "", region), nil
 	}
 
 	if o.STSCredentialsFile != "" {
-		creds, err := awsutil.ParseSTSCredentialsFileV2(o.STSCredentialsFile)
+		creds, err := awsutil.ParseSTSCredentialsFile(o.STSCredentialsFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse STS credentials: %w", err)
 		}
 
-		return awsutil.NewSTSSessionV2(ctx, agent, o.RoleArn, region, creds)
+		return awsutil.NewSTSSession(ctx, agent, o.RoleArn, region, creds)
 	}
 
 	return nil, fmt.Errorf("no credentials provided")
@@ -431,7 +431,7 @@ func (o *DrOidcIamOptions) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create AWS config: %w", err)
 	}
-	retryerFn := awsutil.NewConfigV2()
+	retryerFn := awsutil.NewConfig()
 	iamClient := iam.NewFromConfig(*iamCfg, func(o *iam.Options) {
 		o.Retryer = retryerFn()
 	})
@@ -449,38 +449,13 @@ func (o *DrOidcIamOptions) Run(ctx context.Context) error {
 		o.Retryer = retryerFn()
 	})
 
-	// Step 1: Check if OIDC documents exist in S3
-	fmt.Println("Step 1: Checking OIDC documents in S3")
-	oidcDocsExist := o.checkOIDCDocumentsExist(ctx, s3Client)
-	if oidcDocsExist && !o.ForceRecreate {
-		fmt.Printf("- (%s) OIDC documents found in S3\n", greenCheck())
-	} else {
-		if o.ForceRecreate {
-			fmt.Printf("- (%s) Force recreate enabled - will regenerate OIDC documents\n", yellowForce())
-		} else {
-			fmt.Printf("- (%s) OIDC documents missing in S3 - will create them\n", redX())
-		}
-	}
-
-	// Step 2: Check if OIDC identity provider exists in IAM
-	fmt.Println("Step 2: Checking OIDC identity provider in IAM")
-	providerARN, exists, err := o.checkOIDCProvider(ctx, iamClient)
+	oidcDocsExist, providerARN, exists, err := o.checkOIDCState(ctx, s3Client, iamClient)
 	if err != nil {
-		return fmt.Errorf("failed to check OIDC provider: %w", err)
+		return err
 	}
-
-	if exists && !o.ForceRecreate {
-		fmt.Printf("- (%s) OIDC identity provider exists\n", greenCheck())
-		if oidcDocsExist {
-			fmt.Println("\nAll OIDC components are in place - no action needed!")
-			return nil
-		}
-	} else {
-		if o.ForceRecreate {
-			fmt.Printf("- (%s) Force recreate enabled - will regenerate OIDC provider\n", yellowForce())
-		} else {
-			fmt.Printf("- (%s) OIDC identity provider missing - needs to be recreated\n", redX())
-		}
+	if oidcDocsExist && exists && !o.ForceRecreate {
+		fmt.Println("\nAll OIDC components are in place - no action needed!")
+		return nil
 	}
 
 	// Step 3: Create/ensure S3 bucket exists
@@ -490,20 +465,8 @@ func (o *DrOidcIamOptions) Run(ctx context.Context) error {
 	}
 	fmt.Printf("- (%s) S3 bucket ready with public access enabled\n", greenCheck())
 
-	// Step 4: Generate and upload OIDC documents using the EXISTING cluster key
-	if !oidcDocsExist || o.ForceRecreate {
-		fmt.Println("Step 4: Generating and uploading OIDC documents")
-		if o.DryRun {
-			fmt.Printf("- (%s) DRY RUN: Would generate and upload OIDC documents using existing cluster signing key\n", yellowQuestion())
-		} else {
-			if err := o.generateAndUploadOIDCDocuments(ctx, k8sClient, s3Client); err != nil {
-				return fmt.Errorf("failed to generate OIDC documents: %w", err)
-			}
-			fmt.Printf("- (%s) OIDC documents generated and uploaded\n", greenCheck())
-		}
-	} else {
-		fmt.Println("Step 4: OIDC documents")
-		fmt.Printf("- (%s) OIDC documents already exist\n", greenCheck())
+	if err := o.ensureOIDCDocuments(ctx, k8sClient, s3Client, oidcDocsExist); err != nil {
+		return err
 	}
 
 	// Step 5: Get SSL certificate thumbprint
@@ -514,26 +477,8 @@ func (o *DrOidcIamOptions) Run(ctx context.Context) error {
 	}
 	fmt.Printf("- (%s) SSL certificate thumbprint retrieved\n", greenCheck())
 
-	// Step 6: Create/recreate OIDC provider
-	if !exists || o.ForceRecreate {
-		fmt.Println("Step 6: Creating/recreating OIDC identity provider")
-		if o.DryRun {
-			fmt.Printf("- (%s) DRY RUN: Would create OIDC provider\n", yellowQuestion())
-			fmt.Printf("    Issuer: %s\n", o.Issuer)
-			fmt.Printf("    Thumbprint: %s\n", thumbprint)
-			fmt.Printf("    Allowed clients: openshift, sts.amazonaws.com\n")
-		} else {
-			if err := o.deleteOIDCProviderIfExists(ctx, iamClient, providerARN); err != nil {
-				return fmt.Errorf("failed to delete existing OIDC provider: %w", err)
-			}
-			if _, err := o.createOIDCProvider(ctx, iamClient, thumbprint); err != nil {
-				return fmt.Errorf("failed to create OIDC provider: %w", err)
-			}
-			fmt.Printf("- (%s) OIDC identity provider successfully created\n", greenCheck())
-		}
-	} else {
-		fmt.Println("Step 6: OIDC identity provider")
-		fmt.Printf("- (%s) OIDC identity provider already exists\n", greenCheck())
+	if err := o.ensureOIDCProvider(ctx, iamClient, providerARN, thumbprint, exists); err != nil {
+		return err
 	}
 
 	// Step 7: Verify configuration and update HostedCluster
@@ -545,6 +490,80 @@ func (o *DrOidcIamOptions) Run(ctx context.Context) error {
 
 	fmt.Println("\nOIDC identity provider disaster recovery completed successfully!")
 
+	return nil
+}
+
+func (o *DrOidcIamOptions) checkOIDCState(ctx context.Context, s3Client *s3.Client, iamClient *iam.Client) (bool, string, bool, error) {
+	fmt.Println("Step 1: Checking OIDC documents in S3")
+	oidcDocsExist := o.checkOIDCDocumentsExist(ctx, s3Client)
+	if oidcDocsExist && !o.ForceRecreate {
+		fmt.Printf("- (%s) OIDC documents found in S3\n", greenCheck())
+	} else if o.ForceRecreate {
+		fmt.Printf("- (%s) Force recreate enabled - will regenerate OIDC documents\n", yellowForce())
+	} else {
+		fmt.Printf("- (%s) OIDC documents missing in S3 - will create them\n", redX())
+	}
+
+	fmt.Println("Step 2: Checking OIDC identity provider in IAM")
+	providerARN, exists, err := o.checkOIDCProvider(ctx, iamClient)
+	if err != nil {
+		return false, "", false, fmt.Errorf("failed to check OIDC provider: %w", err)
+	}
+
+	if exists && !o.ForceRecreate {
+		fmt.Printf("- (%s) OIDC identity provider exists\n", greenCheck())
+	} else if o.ForceRecreate {
+		fmt.Printf("- (%s) Force recreate enabled - will regenerate OIDC provider\n", yellowForce())
+	} else {
+		fmt.Printf("- (%s) OIDC identity provider missing - needs to be recreated\n", redX())
+	}
+
+	return oidcDocsExist, providerARN, exists, nil
+}
+
+func (o *DrOidcIamOptions) ensureOIDCDocuments(ctx context.Context, k8sClient client.Client, s3Client *s3.Client, oidcDocsExist bool) error {
+	if oidcDocsExist && !o.ForceRecreate {
+		fmt.Println("Step 4: OIDC documents")
+		fmt.Printf("- (%s) OIDC documents already exist\n", greenCheck())
+		return nil
+	}
+
+	fmt.Println("Step 4: Generating and uploading OIDC documents")
+	if o.DryRun {
+		fmt.Printf("- (%s) DRY RUN: Would generate and upload OIDC documents using existing cluster signing key\n", yellowQuestion())
+		return nil
+	}
+
+	if err := o.generateAndUploadOIDCDocuments(ctx, k8sClient, s3Client); err != nil {
+		return fmt.Errorf("failed to generate OIDC documents: %w", err)
+	}
+	fmt.Printf("- (%s) OIDC documents generated and uploaded\n", greenCheck())
+	return nil
+}
+
+func (o *DrOidcIamOptions) ensureOIDCProvider(ctx context.Context, iamClient *iam.Client, providerARN, thumbprint string, exists bool) error {
+	if exists && !o.ForceRecreate {
+		fmt.Println("Step 6: OIDC identity provider")
+		fmt.Printf("- (%s) OIDC identity provider already exists\n", greenCheck())
+		return nil
+	}
+
+	fmt.Println("Step 6: Creating/recreating OIDC identity provider")
+	if o.DryRun {
+		fmt.Printf("- (%s) DRY RUN: Would create OIDC provider\n", yellowQuestion())
+		fmt.Printf("    Issuer: %s\n", o.Issuer)
+		fmt.Printf("    Thumbprint: %s\n", thumbprint)
+		fmt.Printf("    Allowed clients: openshift, sts.amazonaws.com\n")
+		return nil
+	}
+
+	if err := o.deleteOIDCProviderIfExists(ctx, iamClient, providerARN); err != nil {
+		return fmt.Errorf("failed to delete existing OIDC provider: %w", err)
+	}
+	if _, err := o.createOIDCProvider(ctx, iamClient, thumbprint); err != nil {
+		return fmt.Errorf("failed to create OIDC provider: %w", err)
+	}
+	fmt.Printf("- (%s) OIDC identity provider successfully created\n", greenCheck())
 	return nil
 }
 
@@ -640,8 +659,8 @@ func (o *DrOidcIamOptions) checkOIDCDocumentsExist(ctx context.Context, s3Client
 
 	for _, doc := range documents {
 		_, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{
-			Bucket: awsv2.String(o.OIDCStorageProviderS3Bucket),
-			Key:    awsv2.String(doc),
+			Bucket: aws.String(o.OIDCStorageProviderS3Bucket),
+			Key:    aws.String(doc),
 		})
 		if err != nil {
 			return false
@@ -654,12 +673,12 @@ func (o *DrOidcIamOptions) checkOIDCDocumentsExist(ctx context.Context, s3Client
 // disabling the Block Public Access settings and applying a read-all policy.
 func configureBucketPublicAccess(ctx context.Context, s3Client *s3.Client, bucketName string) error {
 	_, err := s3Client.PutPublicAccessBlock(ctx, &s3.PutPublicAccessBlockInput{
-		Bucket: awsv2.String(bucketName),
+		Bucket: aws.String(bucketName),
 		PublicAccessBlockConfiguration: &s3types.PublicAccessBlockConfiguration{
-			BlockPublicAcls:       awsv2.Bool(false),
-			BlockPublicPolicy:     awsv2.Bool(false),
-			IgnorePublicAcls:      awsv2.Bool(false),
-			RestrictPublicBuckets: awsv2.Bool(false),
+			BlockPublicAcls:       aws.Bool(false),
+			BlockPublicPolicy:     aws.Bool(false),
+			IgnorePublicAcls:      aws.Bool(false),
+			RestrictPublicBuckets: aws.Bool(false),
 		},
 	})
 	if err != nil {
@@ -667,8 +686,8 @@ func configureBucketPublicAccess(ctx context.Context, s3Client *s3.Client, bucke
 	}
 
 	_, err = s3Client.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
-		Bucket: awsv2.String(bucketName),
-		Policy: awsv2.String(fmt.Sprintf(`{
+		Bucket: aws.String(bucketName),
+		Policy: aws.String(fmt.Sprintf(`{
 			"Version": "2012-10-17",
 			"Statement": [
 				{
@@ -689,7 +708,7 @@ func configureBucketPublicAccess(ctx context.Context, s3Client *s3.Client, bucke
 
 func (o *DrOidcIamOptions) ensureOIDCBucket(ctx context.Context, s3Client *s3.Client) error {
 	_, err := s3Client.HeadBucket(ctx, &s3.HeadBucketInput{
-		Bucket: awsv2.String(o.OIDCStorageProviderS3Bucket),
+		Bucket: aws.String(o.OIDCStorageProviderS3Bucket),
 	})
 
 	if err == nil {
@@ -718,7 +737,7 @@ func (o *DrOidcIamOptions) ensureOIDCBucket(ctx context.Context, s3Client *s3.Cl
 	}
 
 	createBucketInput := &s3.CreateBucketInput{
-		Bucket: awsv2.String(o.OIDCStorageProviderS3Bucket),
+		Bucket: aws.String(o.OIDCStorageProviderS3Bucket),
 	}
 
 	// Use the OIDC bucket region for LocationConstraint, not the cluster region.
@@ -775,10 +794,10 @@ func (o *DrOidcIamOptions) generateAndUploadOIDCDocuments(ctx context.Context, k
 			return fmt.Errorf("failed to generate OIDC document %s: %w", path, err)
 		}
 		_, err = s3Client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket:      awsv2.String(o.OIDCStorageProviderS3Bucket),
-			Key:         awsv2.String(o.InfraID + path),
+			Bucket:      aws.String(o.OIDCStorageProviderS3Bucket),
+			Key:         aws.String(o.InfraID + path),
 			Body:        bodyReader,
-			ContentType: awsv2.String("application/json"),
+			ContentType: aws.String("application/json"),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to upload OIDC document %s: %w", path, err)
@@ -854,7 +873,7 @@ func (o *DrOidcIamOptions) deleteOIDCProviderIfExists(ctx context.Context, iamCl
 		return nil
 	}
 	_, err := iamClient.DeleteOpenIDConnectProvider(ctx, &iam.DeleteOpenIDConnectProviderInput{
-		OpenIDConnectProviderArn: awsv2.String(providerARN),
+		OpenIDConnectProviderArn: aws.String(providerARN),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to remove existing OIDC provider %s: %w", providerARN, err)
@@ -871,7 +890,7 @@ func (o *DrOidcIamOptions) createOIDCProvider(ctx context.Context, iamClient *ia
 		ThumbprintList: []string{
 			thumbprint,
 		},
-		Url: awsv2.String(o.Issuer),
+		Url: aws.String(o.Issuer),
 	}
 
 	var output *iam.CreateOpenIDConnectProviderOutput

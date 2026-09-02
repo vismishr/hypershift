@@ -15,6 +15,7 @@ aliases:
     - sjenning
     - muraee
     - bryan-cox
+    - cblecker
     - jparrill
     - devguyio
   core-reviewers:
@@ -23,8 +24,12 @@ aliases:
     - sjenning
     - muraee
     - bryan-cox
+    - cblecker
     - jparrill
     - devguyio
+    - sdminonne
+    - clebs
+    - Nirshal
   karpenter-approvers:
     - elmiko
     - enxebre

@@ -8,8 +8,8 @@ import (
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests/ignitionserver"
 	"github.com/openshift/hypershift/support/images"
+	"github.com/openshift/hypershift/support/k8sutil"
 	"github.com/openshift/hypershift/support/upsert"
-	hyperutil "github.com/openshift/hypershift/support/util"
 
 	agentv1 "github.com/openshift/cluster-api-provider-agent/api/v1beta1"
 
@@ -21,7 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
-	capiv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -207,7 +207,7 @@ func reconcileAgentCluster(agentCluster *agentv1.AgentCluster, ignEndpoint, cont
 func (Agent) DeleteCredentials(ctx context.Context, c client.Client,
 	hc *hyperv1.HostedCluster,
 	controlPlaneNamespace string) error {
-	if _, err := hyperutil.DeleteIfNeeded(ctx, c, &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("%s-%s", CredentialsRBACPrefix, controlPlaneNamespace), Namespace: hc.Spec.Platform.Agent.AgentNamespace}}); err != nil {
+	if _, err := k8sutil.DeleteIfNeeded(ctx, c, &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("%s-%s", CredentialsRBACPrefix, controlPlaneNamespace), Namespace: hc.Spec.Platform.Agent.AgentNamespace}}); err != nil {
 		return fmt.Errorf("failed to clean up CAPI provider rolebinding: %w", err)
 	}
 	return nil

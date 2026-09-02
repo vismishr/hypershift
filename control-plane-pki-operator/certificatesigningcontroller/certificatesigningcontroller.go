@@ -96,8 +96,8 @@ func (c *CertificateSigningController) syncCertificateSigningRequest(ctx context
 			syncContext.Recorder().Eventf("CertificateSigningRequestValid", "%q is valid", name)
 		}
 		_, err := c.kubeClient.CertificatesV1().CertificateSigningRequests().ApplyStatus(ctx, cfg, metav1.ApplyOptions{FieldManager: c.fieldManager})
-		if err != nil && validationErr == nil {
-			syncContext.Recorder().Eventf("CertificateSigningRequestFulfilled", "%q in %q is fulfilled", name)
+		if err == nil && validationErr == nil {
+			syncContext.Recorder().Eventf("CertificateSigningRequestFulfilled", "%q is fulfilled", name)
 		}
 		return err
 	}
@@ -107,7 +107,7 @@ func (c *CertificateSigningController) syncCertificateSigningRequest(ctx context
 
 const backdate = 5 * time.Minute
 
-func (c *CertificateSigningController) processCertificateSigningRequest(ctx context.Context, name string, now func() time.Time) (*certificatesv1applyconfigurations.CertificateSigningRequestApplyConfiguration, bool, error, error) {
+func (c *CertificateSigningController) processCertificateSigningRequest(ctx context.Context, name string, now func() time.Time) (*certificatesv1applyconfigurations.CertificateSigningRequestApplyConfiguration, bool, error, error) { //nolint:unparam // result kept for API consistency
 	csr, err := c.getCSR(name)
 	if apierrors.IsNotFound(err) {
 		return nil, false, nil, nil // nothing to be done, CSR is gone
@@ -126,7 +126,7 @@ func (c *CertificateSigningController) processCertificateSigningRequest(ctx cont
 
 	x509cr, err := certificates.ParseCSR(csr.Spec.Request)
 	if err != nil {
-		return nil, false, nil, fmt.Errorf("unable to parse csr %q: %v", csr.Name, err)
+		return nil, false, nil, fmt.Errorf("unable to parse csr %q: %w", csr.Name, err)
 	}
 	if validationErr := c.validator(csr, x509cr); validationErr != nil {
 		cfg := certificatesv1applyconfigurations.CertificateSigningRequest(name)
@@ -158,7 +158,7 @@ func (c *CertificateSigningController) processCertificateSigningRequest(ctx cont
 
 func sign(ca *librarygocrypto.CA, x509cr *x509.CertificateRequest, usages []certificatesv1.KeyUsage, certTTL time.Duration, expirationSeconds *int32, now func() time.Time) ([]byte, error) {
 	if err := x509cr.CheckSignature(); err != nil {
-		return nil, fmt.Errorf("unable to verify certificate request signature: %v", err)
+		return nil, fmt.Errorf("unable to verify certificate request signature: %w", err)
 	}
 
 	notBefore, notAfter, err := boundaries(
@@ -225,7 +225,7 @@ func duration(certTTL time.Duration, expirationSeconds *int32) time.Duration {
 //	Long-lived certificates set NotAfter = Now() + TTL - Backdate.
 //	Short-lived certificates set NotAfter = Now() + TTL.
 //	All certificates truncate NotAfter to the expiration date of the signer.
-func boundaries(now func() time.Time, ttl, backdate, horizon time.Duration, signerNotAfter time.Time) (time.Time, time.Time, error) {
+func boundaries(now func() time.Time, ttl, backdate, horizon time.Duration, signerNotAfter time.Time) (time.Time, time.Time, error) { //nolint:unparam // result kept for API consistency
 	if now == nil {
 		now = time.Now
 	}

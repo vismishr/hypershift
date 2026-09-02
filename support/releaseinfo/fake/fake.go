@@ -6,8 +6,8 @@ import (
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	haproxy "github.com/openshift/hypershift/hypershift-operator/controllers/nodepool/apiserver-haproxy"
+	"github.com/openshift/hypershift/support/podspec"
 	"github.com/openshift/hypershift/support/releaseinfo"
-	"github.com/openshift/hypershift/support/util"
 
 	imagev1 "github.com/openshift/api/image/v1"
 
@@ -16,6 +16,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/coreos/stream-metadata-go/stream"
 )
 
 var _ releaseinfo.ProviderWithRegistryOverrides = &FakeReleaseProvider{}
@@ -59,7 +61,7 @@ func (f *FakeReleaseProvider) Lookup(_ context.Context, image string, _ []byte) 
 						From: &corev1.ObjectReference{Name: ""},
 					},
 					{
-						Name: util.AvailabilityProberImageName,
+						Name: podspec.AvailabilityProberImageName,
 						From: &corev1.ObjectReference{Name: ""},
 					},
 					{
@@ -69,28 +71,28 @@ func (f *FakeReleaseProvider) Lookup(_ context.Context, image string, _ []byte) 
 				},
 			},
 		},
-		StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-			Architectures: map[string]releaseinfo.CoreOSArchitecture{
+		StreamMetadata: &stream.Stream{
+			Architectures: map[string]stream.Arch{
 				"x86_64": {
-					Images: releaseinfo.CoreOSImages{
-						AWS: releaseinfo.CoreOSAWSImages{
-							Regions: map[string]releaseinfo.CoreOSAWSImage{
+					Images: stream.Images{
+						Aws: &stream.AwsImage{
+							Regions: map[string]stream.SingleImage{
 								"us-east-1": {
 									Release: "us-east-1-x86_64-release",
 									Image:   "us-east-1-x86_64-image",
 								},
 							},
 						},
-						GCP: releaseinfo.CoreOSGCPImage{
+						Gcp: &stream.GcpImage{
 							Project: "rhcos-cloud",
 							Name:    "rhcos-x86-64-fake",
 						},
 					},
 				},
 				"aarch64": {
-					Images: releaseinfo.CoreOSImages{
-						AWS: releaseinfo.CoreOSAWSImages{
-							Regions: map[string]releaseinfo.CoreOSAWSImage{
+					Images: stream.Images{
+						Aws: &stream.AwsImage{
+							Regions: map[string]stream.SingleImage{
 								"us-east-1": {
 									Release: "us-east-1-aarch64-release",
 									Image:   "us-east-1-aarch64-image",
@@ -101,7 +103,7 @@ func (f *FakeReleaseProvider) Lookup(_ context.Context, image string, _ []byte) 
 								},
 							},
 						},
-						GCP: releaseinfo.CoreOSGCPImage{
+						Gcp: &stream.GcpImage{
 							Project: "rhcos-cloud",
 							Name:    "rhcos-aarch64-fake",
 						},

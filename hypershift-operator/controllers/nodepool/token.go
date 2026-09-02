@@ -11,6 +11,7 @@ import (
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests/ignitionserver"
 	"github.com/openshift/hypershift/support/backwardcompat"
 	"github.com/openshift/hypershift/support/globalconfig"
+	"github.com/openshift/hypershift/support/k8sutil"
 	karpenterutil "github.com/openshift/hypershift/support/karpenter"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	"github.com/openshift/hypershift/support/upsert"
@@ -35,6 +36,7 @@ import (
 const (
 	TokenSecretTokenGenerationTime       = "hypershift.openshift.io/last-token-generation-time"
 	TokenSecretReleaseKey                = "release"
+	TokenSecretReleaseVersionKey         = "release-version"
 	TokenSecretTokenKey                  = "token"
 	TokenSecretPullSecretHashKey         = "pull-secret-hash"
 	TokenSecretHCConfigurationHashKey    = "hc-configuration-hash"
@@ -304,7 +306,7 @@ func (t *Token) reconcileTokenSecret(tokenSecret *corev1.Secret) error {
 	if karpenterutil.IsKarpenterEnabled(t.hostedCluster.Spec.AutoNode) {
 		npLabels := t.nodePool.GetLabels()
 		if npLabels != nil && npLabels[karpenterutil.ManagedByKarpenterLabel] == "true" {
-			tokenSecret.Annotations[supportutil.HostedClusterAnnotation] = client.ObjectKeyFromObject(t.ConfigGenerator.hostedCluster).String()
+			tokenSecret.Annotations[k8sutil.HostedClusterAnnotation] = client.ObjectKeyFromObject(t.ConfigGenerator.hostedCluster).String()
 			if tokenSecret.Labels == nil {
 				tokenSecret.Labels = make(map[string]string)
 			}
@@ -344,6 +346,7 @@ func (t *Token) reconcileTokenSecret(tokenSecret *corev1.Secret) error {
 		tokenSecret.Annotations[TokenSecretTokenGenerationTime] = time.Now().Format(time.RFC3339Nano)
 		tokenSecret.Data[TokenSecretTokenKey] = []byte(uuid.New().String())
 		tokenSecret.Data[TokenSecretReleaseKey] = []byte(t.nodePool.Spec.Release.Image)
+		tokenSecret.Data[TokenSecretReleaseVersionKey] = []byte(t.releaseImage.Version())
 		tokenSecret.Data[TokenSecretConfigKey] = compressedConfig.Bytes()
 
 		// Hash values that are used by the "token secret controller" / "local ignition provider"  to determine if this input
@@ -401,13 +404,14 @@ func (t *Token) reconcileUserDataSecret(log logr.Logger, userDataSecret *corev1.
 }
 
 func setKarpenterAMILabels(log logr.Logger, userDataSecret *corev1.Secret, region string, releaseImage *releaseinfo.ReleaseImage, platform hyperv1.PlatformType) error {
+	// TODO(CNTRLPLANE-3553): resolve streamName via GetRHELStream once osImageStream API field is available
 	supportedArchitectures, err := karpenterutil.SupportedArchitectures(platform)
 	if err != nil {
 		return fmt.Errorf("failed to get supported architectures: %w", err)
 	}
 	supported := 0
 	for _, arch := range supportedArchitectures {
-		ami, err := defaultNodePoolAMI(region, arch, releaseImage)
+		ami, err := defaultNodePoolAMI(region, arch, "", releaseImage)
 		if err != nil {
 			// skip unavailable architectures gracefully
 			log.Error(err, "failed to get default NodePool AMI for architecture", "architecture", arch)

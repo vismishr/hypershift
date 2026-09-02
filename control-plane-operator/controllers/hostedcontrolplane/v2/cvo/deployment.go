@@ -14,6 +14,7 @@ import (
 	"github.com/openshift/hypershift/support/capabilities"
 	"github.com/openshift/hypershift/support/config"
 	component "github.com/openshift/hypershift/support/controlplane-component"
+	"github.com/openshift/hypershift/support/podspec"
 	"github.com/openshift/hypershift/support/rhobsmonitoring"
 	"github.com/openshift/hypershift/support/util"
 
@@ -21,6 +22,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -52,13 +54,18 @@ func (cvo *clusterVersionOperator) adaptDeployment(cpContext component.WorkloadC
 		featureSet = cpContext.HCP.Spec.Configuration.FeatureGate.FeatureSet
 	}
 
+	if featureSet == "" {
+		// Explicitly set to `Default` as that is how the annotation value is represented in the manifests.
+		featureSet = "Default"
+	}
+
 	// The CVO prepare-payload script needs the ReleaseImage digest for disconnected environments
 	controlPlaneReleaseImage, dataPlaneReleaseImage, err := discoverCVOReleaseImages(cpContext)
 	if err != nil {
 		return fmt.Errorf("failed to discover CVO release images: %w", err)
 	}
 
-	util.UpdateContainer("prepare-payload", deployment.Spec.Template.Spec.InitContainers, func(c *corev1.Container) {
+	podspec.UpdateContainer("prepare-payload", deployment.Spec.Template.Spec.InitContainers, func(c *corev1.Container) {
 		c.Args = []string{
 			"-c",
 			preparePayloadScript(cpContext.HCP.Spec.Platform.Type, util.HCPOAuthEnabled(cpContext.HCP), featureSet),
@@ -89,15 +96,15 @@ func (cvo *clusterVersionOperator) adaptDeployment(cpContext component.WorkloadC
 	if err != nil {
 		return err
 	}
-	util.UpdateContainer("bootstrap", deployment.Spec.Template.Spec.InitContainers, func(c *corev1.Container) {
+	podspec.UpdateContainer("bootstrap", deployment.Spec.Template.Spec.InitContainers, func(c *corev1.Container) {
 		c.Env = append(c.Env, corev1.EnvVar{
 			Name:  "CLUSTER_VERSION_JSON",
 			Value: string(clusterVersionJSON),
 		})
 	})
 
-	util.UpdateContainer(ComponentName, deployment.Spec.Template.Spec.Containers, func(c *corev1.Container) {
-		util.UpsertEnvVar(c, corev1.EnvVar{
+	podspec.UpdateContainer(ComponentName, deployment.Spec.Template.Spec.Containers, func(c *corev1.Container) {
+		podspec.UpsertEnvVar(c, corev1.EnvVar{
 			Name:  "RELEASE_IMAGE",
 			Value: dataPlaneReleaseImage,
 		})
@@ -142,6 +149,7 @@ var (
 		"0000_50_olm_06-psm-operator.deployment.ibm-cloud-managed.yaml",
 		"0000_50_olm_06-psm-operator.service.yaml",
 		"0000_50_olm_06-psm-operator.servicemonitor.yaml",
+		"0000_50_olm_00-packageserver.pdb.yaml",
 		"0000_50_olm_07-olm-operator.deployment.ibm-cloud-managed.yaml",
 		"0000_50_olm_07-olm-operator.deployment.yaml",
 		"0000_50_olm_07-collect-profiles.cronjob.yaml",
@@ -199,46 +207,17 @@ func preparePayloadScript(platformType hyperv1.PlatformType, oauthEnabled bool, 
 		fmt.Sprintf("cp -R /release-manifests %s/", payloadDir),
 	)
 
-	// NOTE: We would need part of the manifest.Include logic (https://github.com/openshift/library-go/blob/0064ad7bd060b9fd52f7840972c1d3e72186d0f0/pkg/manifest/manifest.go#L190-L196)
-	// to properly evaluate which CVO manifests to select based on featureset. In the absence of that logic, use simple filename filtering, which is not ideal
-	// but better than nothing.  Ideally, we filter based on the feature-set annotation in the manifests.
-	switch featureSet {
-	case configv1.Default, "":
-		stmts = append(stmts,
-			fmt.Sprintf("rm -f %s/manifests/*-CustomNoUpgrade*.yaml", payloadDir),
-			fmt.Sprintf("rm -f %s/manifests/*-DevPreviewNoUpgrade*.yaml", payloadDir),
-			fmt.Sprintf("rm -f %s/manifests/*-TechPreviewNoUpgrade*.yaml", payloadDir),
-			fmt.Sprintf("rm -f %s/manifests/*-OKD*.yaml", payloadDir),
-		)
-	case configv1.CustomNoUpgrade:
-		stmts = append(stmts,
-			fmt.Sprintf("rm -f %s/manifests/*-Default*.yaml", payloadDir),
-			fmt.Sprintf("rm -f %s/manifests/*-DevPreviewNoUpgrade*.yaml", payloadDir),
-			fmt.Sprintf("rm -f %s/manifests/*-TechPreviewNoUpgrade*.yaml", payloadDir),
-			fmt.Sprintf("rm -f %s/manifests/*-OKD*.yaml", payloadDir),
-		)
-	case configv1.DevPreviewNoUpgrade:
-		stmts = append(stmts,
-			fmt.Sprintf("rm -f %s/manifests/*-Default*.yaml", payloadDir),
-			fmt.Sprintf("rm -f %s/manifests/*-CustomNoUpgrade*.yaml", payloadDir),
-			fmt.Sprintf("rm -f %s/manifests/*-TechPreviewNoUpgrade*.yaml", payloadDir),
-			fmt.Sprintf("rm -f %s/manifests/*-OKD*.yaml", payloadDir),
-		)
-	case configv1.TechPreviewNoUpgrade:
-		stmts = append(stmts,
-			fmt.Sprintf("rm -f %s/manifests/*-Default*.yaml", payloadDir),
-			fmt.Sprintf("rm -f %s/manifests/*-CustomNoUpgrade*.yaml", payloadDir),
-			fmt.Sprintf("rm -f %s/manifests/*-DevPreviewNoUpgrade*.yaml", payloadDir),
-			fmt.Sprintf("rm -f %s/manifests/*-OKD*.yaml", payloadDir),
-		)
-	case configv1.OKD:
-		stmts = append(stmts,
-			fmt.Sprintf("rm -f %s/manifests/*-Default*.yaml", payloadDir),
-			fmt.Sprintf("rm -f %s/manifests/*-CustomNoUpgrade*.yaml", payloadDir),
-			fmt.Sprintf("rm -f %s/manifests/*-DevPreviewNoUpgrade*.yaml", payloadDir),
-			fmt.Sprintf("rm -f %s/manifests/*-TechPreviewNoUpgrade*.yaml", payloadDir),
-		)
-	}
+	// NOTE: We would need to leverage part of the manifest.Include logic (https://github.com/openshift/library-go/blob/0064ad7bd060b9fd52f7840972c1d3e72186d0f0/pkg/manifest/manifest.go#L190-L196)
+	// to properly evaluate which CVO manifests to select based on featureset.
+	// We only have access to bash, so we must filter based on the feature-set annotation in the manifests manually.
+	// Any file that has a feature-set annotation must have a value that matches the current feature set else it is removed.
+	// Files that do not have a feature-set annotation are included unconditionally.
+	stmts = append(stmts, fmt.Sprintf(`for file in $(find %s/manifests/ -name "*.yaml"); do
+    IFS=',' read -ra feature_sets <<< "$(cat $file | grep "release.openshift.io/feature-set:" | awk '{print $2}')"
+    if [[ "${#feature_sets[@]}" -gt 0 ]] && ! [[ " ${feature_sets[*]} " =~ "%s" ]]; then
+        rm -vf $file
+    fi
+done`, payloadDir, featureSet))
 
 	for _, manifest := range manifestsToOmit {
 		if platformType == hyperv1.IBMCloudPlatform || platformType == hyperv1.PowerVSPlatform {
@@ -289,6 +268,7 @@ func resourcesToRemove(platformType hyperv1.PlatformType) []client.Object {
 	switch platformType {
 	case hyperv1.IBMCloudPlatform, hyperv1.PowerVSPlatform:
 		return []client.Object{
+			&policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "packageserver-pdb", Namespace: "openshift-operator-lifecycle-manager"}},
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "network-operator", Namespace: "openshift-network-operator"}},
 			&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "default-account-cluster-network-operator"}},
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cluster-node-tuning-operator", Namespace: "openshift-cluster-node-tuning-operator"}},
@@ -296,6 +276,7 @@ func resourcesToRemove(platformType hyperv1.PlatformType) []client.Object {
 		}
 	default:
 		return []client.Object{
+			&policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "packageserver-pdb", Namespace: "openshift-operator-lifecycle-manager"}},
 			&apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: "machineconfigs.machineconfiguration.openshift.io"}},
 			&apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: "machineconfigpools.machineconfiguration.openshift.io"}},
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "network-operator", Namespace: "openshift-network-operator"}},
@@ -307,6 +288,8 @@ func resourcesToRemove(platformType hyperv1.PlatformType) []client.Object {
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "aws-ebs-csi-driver-operator", Namespace: "openshift-cluster-csi-drivers"}},
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "aws-ebs-csi-driver-controller", Namespace: "openshift-cluster-csi-drivers"}},
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "csi-snapshot-controller", Namespace: "openshift-cluster-storage-operator"}},
+			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "kube-storage-version-migrator-operator", Namespace: "openshift-kube-storage-version-migrator-operator"}},
+			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "migrator", Namespace: "openshift-kube-storage-version-migrator"}},
 		}
 	}
 }

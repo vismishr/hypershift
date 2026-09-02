@@ -188,6 +188,193 @@ func TestIsAroHCP(t *testing.T) {
 	}
 }
 
+func TestIsAroHCPByHCP(t *testing.T) {
+	tests := []struct {
+		name     string
+		hcp      *hyperv1.HostedControlPlane
+		envVar   string
+		expected bool
+	}{
+		{
+			name: "When AzureAuthenticationConfigType is ManagedIdentities it should return true",
+			hcp: &hyperv1.HostedControlPlane{
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+						Azure: &hyperv1.AzurePlatformSpec{
+							AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{
+								AzureAuthenticationConfigType: hyperv1.AzureAuthenticationTypeManagedIdentities,
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "When AzureAuthenticationConfigType is WorkloadIdentities it should return false",
+			hcp: &hyperv1.HostedControlPlane{
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+						Azure: &hyperv1.AzurePlatformSpec{
+							AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{
+								AzureAuthenticationConfigType: hyperv1.AzureAuthenticationTypeWorkloadIdentities,
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "When platform is not Azure it should return false",
+			hcp: &hyperv1.HostedControlPlane{
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AWSPlatform,
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "When Azure spec is nil it should fall back to env var",
+			hcp: &hyperv1.HostedControlPlane{
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+					},
+				},
+			},
+			envVar:   hyperv1.AroHCP,
+			expected: true,
+		},
+		{
+			name: "When Azure spec is nil and env var is not set it should return false",
+			hcp: &hyperv1.HostedControlPlane{
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "When WorkloadIdentities with ARO HCP env var it should return false because API takes precedence",
+			hcp: &hyperv1.HostedControlPlane{
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+						Azure: &hyperv1.AzurePlatformSpec{
+							AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{
+								AzureAuthenticationConfigType: hyperv1.AzureAuthenticationTypeWorkloadIdentities,
+							},
+						},
+					},
+				},
+			},
+			envVar:   hyperv1.AroHCP,
+			expected: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			if tc.envVar != "" {
+				t.Setenv("MANAGED_SERVICE", tc.envVar)
+			}
+			g.Expect(IsAroHCPByHCP(tc.hcp)).To(Equal(tc.expected))
+		})
+	}
+}
+
+func TestIsAroHCPByHC(t *testing.T) {
+	tests := []struct {
+		name     string
+		hc       *hyperv1.HostedCluster
+		envVar   string
+		expected bool
+	}{
+		{
+			name: "When AzureAuthenticationConfigType is ManagedIdentities it should return true",
+			hc: &hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+						Azure: &hyperv1.AzurePlatformSpec{
+							AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{
+								AzureAuthenticationConfigType: hyperv1.AzureAuthenticationTypeManagedIdentities,
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "When AzureAuthenticationConfigType is WorkloadIdentities it should return false",
+			hc: &hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+						Azure: &hyperv1.AzurePlatformSpec{
+							AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{
+								AzureAuthenticationConfigType: hyperv1.AzureAuthenticationTypeWorkloadIdentities,
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "When platform is not Azure it should return false",
+			hc: &hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AWSPlatform,
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "When Azure spec is nil it should fall back to env var",
+			hc: &hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+					},
+				},
+			},
+			envVar:   hyperv1.AroHCP,
+			expected: true,
+		},
+		{
+			name: "When Azure spec is nil and env var is not set it should return false",
+			hc: &hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+					},
+				},
+			},
+			expected: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			if tc.envVar != "" {
+				t.Setenv("MANAGED_SERVICE", tc.envVar)
+			}
+			g.Expect(IsAroHCPByHC(tc.hc)).To(Equal(tc.expected))
+		})
+	}
+}
+
 func TestIsPrivateKeyVault(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -739,6 +926,72 @@ func isCapabilityDisabled(capabilities *hyperv1.Capabilities, capability hyperv1
 		}
 	}
 	return false
+}
+
+func TestIsSelfManagedAzureWithWorkloadIdentity(t *testing.T) {
+	tests := []struct {
+		name         string
+		platformType hyperv1.PlatformType
+		azure        *hyperv1.AzurePlatformSpec
+		managedSvc   string
+		expected     bool
+	}{
+		{
+			name:         "When Azure platform with workload identities configured it should return true",
+			platformType: hyperv1.AzurePlatform,
+			azure: &hyperv1.AzurePlatformSpec{
+				AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{
+					WorkloadIdentities: &hyperv1.AzureWorkloadIdentities{},
+				},
+			},
+			expected: true,
+		},
+		{
+			name:         "When Azure platform with nil workload identities it should return false",
+			platformType: hyperv1.AzurePlatform,
+			azure: &hyperv1.AzurePlatformSpec{
+				AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{},
+			},
+			expected: false,
+		},
+		{
+			name:         "When Azure platform with nil azure spec it should return false",
+			platformType: hyperv1.AzurePlatform,
+			azure:        nil,
+			expected:     false,
+		},
+		{
+			name:         "When non-Azure platform with workload identities it should return false",
+			platformType: hyperv1.AWSPlatform,
+			azure: &hyperv1.AzurePlatformSpec{
+				AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{
+					WorkloadIdentities: &hyperv1.AzureWorkloadIdentities{},
+				},
+			},
+			expected: false,
+		},
+		{
+			name:         "When ARO-HCP managed service with workload identities it should return false",
+			platformType: hyperv1.AzurePlatform,
+			azure: &hyperv1.AzurePlatformSpec{
+				AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{
+					WorkloadIdentities: &hyperv1.AzureWorkloadIdentities{},
+				},
+			},
+			managedSvc: hyperv1.AroHCP,
+			expected:   false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			if tc.managedSvc != "" {
+				t.Setenv("MANAGED_SERVICE", tc.managedSvc)
+			}
+			g.Expect(IsSelfManagedAzureWithWorkloadIdentity(tc.platformType, tc.azure)).To(Equal(tc.expected))
+		})
+	}
 }
 
 func TestNewARMClientOptions(t *testing.T) {

@@ -345,6 +345,7 @@ var (
 				"Effect": "Allow",
 				"Resource": "*",
 				"Action": [
+					"ec2:DescribeCapacityReservations",
 					"ec2:DescribeImages",
 					"ec2:DescribeInstances",
 					"ec2:DescribeInstanceTypeOfferings",
@@ -675,7 +676,8 @@ func controlPlaneOperatorPolicy(hostedZone string, sharedVPC bool) policyBinding
 						"ec2:RevokeSecurityGroupIngress",
 						"ec2:RevokeSecurityGroupEgress",
 						"ec2:DescribeSecurityGroups",
-						"ec2:DescribeVpcs"
+						"ec2:DescribeVpcs",
+						"ec2:DescribeSubnets"
 					],
 					"Resource": "*"
 				}
@@ -701,7 +703,8 @@ func controlPlaneOperatorPolicy(hostedZone string, sharedVPC bool) policyBinding
 						"ec2:RevokeSecurityGroupIngress",
 						"ec2:RevokeSecurityGroupEgress",
 						"ec2:DescribeSecurityGroups",
-						"ec2:DescribeVpcs"
+						"ec2:DescribeVpcs",
+						"ec2:DescribeSubnets"
 					],
 					"Resource": "*"
 				},
@@ -775,7 +778,8 @@ func sharedVPCEndpointRole(controlPlaneRoleARN string) sharedVPCPolicyBinding {
 						"ec2:RevokeSecurityGroupIngress",
 						"ec2:RevokeSecurityGroupEgress",
 						"ec2:DescribeSecurityGroups",
-						"ec2:DescribeVpcs"
+						"ec2:DescribeVpcs",
+						"ec2:DescribeSubnets"
 					],
 					"Resource": "*"
 				}
@@ -890,7 +894,7 @@ func (o *CreateIAMOptions) CreateOIDCResources(ctx context.Context, iamClient aw
 		// Create a single shared role with all policies
 		sharedRoleARN, err := o.CreateSharedOIDCRole(ctx, iamClient, bindings, providerARN, providerName, logger)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create shared OIDC role: %v", err)
+			return nil, fmt.Errorf("failed to create shared OIDC role: %w", err)
 		}
 		// Set all role ARNs to the shared role ARN
 		for into := range bindings {
@@ -902,7 +906,7 @@ func (o *CreateIAMOptions) CreateOIDCResources(ctx context.Context, iamClient aw
 			trustPolicy := oidcTrustPolicy(providerARN, providerName, binding.serviceAccounts...)
 			arn, err := o.CreateOIDCRole(ctx, iamClient, binding, trustPolicy, logger)
 			if err != nil {
-				return nil, fmt.Errorf("failed to create OIDC Role %q: with trust policy %s and permission policy %s: %v", binding.name, trustPolicy, binding.policy, err)
+				return nil, fmt.Errorf("failed to create OIDC Role %q: with trust policy %s and permission policy %s: %w", binding.name, trustPolicy, binding.policy, err)
 			}
 			*into = arn
 		}
@@ -965,7 +969,7 @@ func (o *CreateIAMOptions) CreateOIDCResources(ctx context.Context, iamClient aw
 					]
 				}`, ingressPolicyStatement, ccmPolicyStatement)),
 			}); err != nil {
-				return nil, fmt.Errorf("failed to create role policy %q: with permission policy %s: %v", ingressRoleName, ingressPolicyStatement, err)
+				return nil, fmt.Errorf("failed to create role policy %q: with permission policy %s: %w", ingressRoleName, ingressPolicyStatement, err)
 			}
 			logger.Info("Added inline shared policy to ROSA Managed Role", "role", ingressRoleName)
 		} else {
@@ -978,7 +982,7 @@ func (o *CreateIAMOptions) CreateOIDCResources(ctx context.Context, iamClient aw
 					"Statement": [%s]
 				}`, ingressPolicyStatement)),
 			}); err != nil {
-				return nil, fmt.Errorf("failed to create role policy %q: with permission policy %s: %v", ingressRoleName, ingressPolicyStatement, err)
+				return nil, fmt.Errorf("failed to create role policy %q: with permission policy %s: %w", ingressRoleName, ingressPolicyStatement, err)
 			}
 			logger.Info("Added inline policy to ROSA Ingress Managed Role", "role", ingressRoleName)
 
@@ -991,7 +995,7 @@ func (o *CreateIAMOptions) CreateOIDCResources(ctx context.Context, iamClient aw
 					"Statement": [%s]
 				}`, ccmPolicyStatement)),
 			}); err != nil {
-				return nil, fmt.Errorf("failed to create role policy %q: with permission policy %s: %v", ccmRoleName, ccmPolicyStatement, err)
+				return nil, fmt.Errorf("failed to create role policy %q: with permission policy %s: %w", ccmRoleName, ccmPolicyStatement, err)
 			}
 			logger.Info("Added inline policy to ROSA Cloud Controller Manager Managed Role", "role", ccmRoleName)
 		}

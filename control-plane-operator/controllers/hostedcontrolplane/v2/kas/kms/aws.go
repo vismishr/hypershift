@@ -10,7 +10,7 @@ import (
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/cloud/aws"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
 	"github.com/openshift/hypershift/support/config"
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/podspec"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -29,8 +29,17 @@ const (
 	kmsAPIVersionV1                = "v1"
 )
 
+// AWSKMSProviderName computes the EncryptionConfiguration KMS provider name for an AWS KMS key ARN.
+func AWSKMSProviderName(arn string) (string, error) {
+	hasher := fnv.New32()
+	if _, err := hasher.Write([]byte(arn)); err != nil {
+		return "", fmt.Errorf("failed to hash AWS KMS ARN: %w", err)
+	}
+	return fmt.Sprintf("%s-%d", awsKeyNamePrefix, hasher.Sum32()), nil
+}
+
 var (
-	awsKMSVolumeMounts = util.PodVolumeMounts{
+	awsKMSVolumeMounts = podspec.VolumeMounts{
 		KasMainContainerName: {
 			kasVolumeKMSSocket().Name: "/var/run",
 		},
@@ -64,14 +73,14 @@ type awsKMSProvider struct {
 	tokenMinterImage string
 }
 
-func NewAWSKMSProvider(kmsSpec *hyperv1.AWSKMSSpec, kmsImage, tokenMinterImage string) (*awsKMSProvider, error) {
-	if kmsSpec == nil {
-		return nil, fmt.Errorf("AWS kms metadata not specified")
+func NewAWSKMSProvider(writeKey hyperv1.AWSKMSKeyEntry, readKey *hyperv1.AWSKMSKeyEntry, region string, kmsImage, tokenMinterImage string) (*awsKMSProvider, error) {
+	if len(writeKey.ARN) == 0 {
+		return nil, fmt.Errorf("AWS KMS write key ARN is empty")
 	}
 	return &awsKMSProvider{
-		activeKey:        kmsSpec.ActiveKey,
-		backupKey:        kmsSpec.BackupKey,
-		awsRegion:        kmsSpec.Region,
+		activeKey:        writeKey,
+		backupKey:        readKey,
+		awsRegion:        region,
 		kmsImage:         kmsImage,
 		tokenMinterImage: tokenMinterImage,
 	}, nil
@@ -82,29 +91,27 @@ func (p *awsKMSProvider) GenerateKMSEncryptionConfig(apiVersion string) (*v1.Enc
 	if len(p.activeKey.ARN) == 0 {
 		return nil, fmt.Errorf("active key metadata is nil")
 	}
-	hasher := fnv.New32()
-	_, err := hasher.Write([]byte(p.activeKey.ARN))
+	activeKeyName, err := AWSKMSProviderName(p.activeKey.ARN)
 	if err != nil {
 		return nil, err
 	}
 	providerConfiguration = append(providerConfiguration, v1.ProviderConfiguration{
 		KMS: &v1.KMSConfiguration{
 			APIVersion: apiVersion,
-			Name:       fmt.Sprintf("%s-%d", awsKeyNamePrefix, hasher.Sum32()),
+			Name:       activeKeyName,
 			Endpoint:   activeAWSKMSUnixSocket,
 			Timeout:    &metav1.Duration{Duration: 35 * time.Second},
 		},
 	})
 	if p.backupKey != nil && len(p.backupKey.ARN) > 0 {
-		hasher = fnv.New32()
-		_, err := hasher.Write([]byte(p.backupKey.ARN))
+		backupKeyName, err := AWSKMSProviderName(p.backupKey.ARN)
 		if err != nil {
 			return nil, err
 		}
 		providerConfiguration = append(providerConfiguration, v1.ProviderConfiguration{
 			KMS: &v1.KMSConfiguration{
 				APIVersion: apiVersion,
-				Name:       fmt.Sprintf("%s-%d", awsKeyNamePrefix, hasher.Sum32()),
+				Name:       backupKeyName,
 				Endpoint:   backupAWSKMSUnixSocket,
 				Timeout:    &metav1.Duration{Duration: 35 * time.Second},
 			},
@@ -141,21 +148,20 @@ func (p *awsKMSProvider) GenerateKMSPodConfig() (*KMSPodConfig, error) {
 	}
 
 	podConfig := &KMSPodConfig{}
-	podConfig.Containers = append(podConfig.Containers, util.BuildContainer(kasContainerAWSKMSTokenMinter(), buildKASContainerAWSKMSTokenMinter(p.tokenMinterImage)))
-	podConfig.Containers = append(podConfig.Containers, util.BuildContainer(kasContainerAWSKMSActive(), buildKASContainerAWSKMS(p.kmsImage, p.activeKey.ARN, p.awsRegion, fmt.Sprintf("%s/%s", awsKMSVolumeMounts.Path(KasMainContainerName, kasVolumeKMSSocket().Name), activeAWSKMSUnixSocketFileName), activeAWSKMSHealthPort)))
+	podConfig.Containers = append(podConfig.Containers, podspec.BuildContainer(kasContainerAWSKMSTokenMinter(), buildKASContainerAWSKMSTokenMinter(p.tokenMinterImage)))
+	podConfig.Containers = append(podConfig.Containers, podspec.BuildContainer(kasContainerAWSKMSActive(), buildKASContainerAWSKMS(p.kmsImage, p.activeKey.ARN, p.awsRegion, fmt.Sprintf("%s/%s", awsKMSVolumeMounts.Path(KasMainContainerName, kasVolumeKMSSocket().Name), activeAWSKMSUnixSocketFileName), activeAWSKMSHealthPort)))
 	if p.backupKey != nil && len(p.backupKey.ARN) > 0 {
-		podConfig.Containers = append(podConfig.Containers, util.BuildContainer(kasContainerAWSKMSBackup(), buildKASContainerAWSKMS(p.kmsImage, p.backupKey.ARN, p.awsRegion, fmt.Sprintf("%s/%s", awsKMSVolumeMounts.Path(KasMainContainerName, kasVolumeKMSSocket().Name), backupAWSKMSUnixSocketFileName), backupAWSKMSHealthPort)))
+		podConfig.Containers = append(podConfig.Containers, podspec.BuildContainer(kasContainerAWSKMSBackup(), buildKASContainerAWSKMS(p.kmsImage, p.backupKey.ARN, p.awsRegion, fmt.Sprintf("%s/%s", awsKMSVolumeMounts.Path(KasMainContainerName, kasVolumeKMSSocket().Name), backupAWSKMSUnixSocketFileName), backupAWSKMSHealthPort)))
 	}
 
 	podConfig.Volumes = append(podConfig.Volumes,
-		util.BuildVolume(kasVolumeAWSKMSCredentials(), buildVolumeAWSKMSCredentials(aws.AWSKMSCredsSecret("").Name)),
-		util.BuildVolume(kasVolumeKMSSocket(), buildVolumeKMSSocket),
-		util.BuildVolume(kasVolumeAWSKMSCloudProviderToken(), buildKASVolumeAWSKMSCloudProviderToken),
+		podspec.BuildVolume(kasVolumeAWSKMSCredentials(), buildVolumeAWSKMSCredentials(aws.AWSKMSCredsSecret("").Name)),
+		podspec.BuildVolume(kasVolumeKMSSocket(), buildVolumeKMSSocket),
+		podspec.BuildVolume(kasVolumeAWSKMSCloudProviderToken(), buildKASVolumeAWSKMSCloudProviderToken),
 	)
 
 	podConfig.KASContainerMutate = func(c *corev1.Container) {
 		c.VolumeMounts = append(c.VolumeMounts, awsKMSVolumeMounts.ContainerMounts(KasMainContainerName)...)
-		c.Args = append(c.Args, "--encryption-provider-config-automatic-reload=false")
 	}
 
 	return podConfig, nil
@@ -253,10 +259,10 @@ func buildKASContainerAWSKMSTokenMinter(image string) func(*corev1.Container) {
 		c.Command = []string{"/usr/bin/control-plane-operator", "token-minter"}
 		c.Args = []string{
 			"--token-audience=openshift",
-			fmt.Sprintf("--service-account-namespace=%s", manifests.KASContainerAWSKMSProviderServiceAccount().Namespace),
-			fmt.Sprintf("--service-account-name=%s", manifests.KASContainerAWSKMSProviderServiceAccount().Name),
+			fmt.Sprintf("--service-account-namespace=%s", manifests.KASContainerKMSProviderServiceAccount().Namespace),
+			fmt.Sprintf("--service-account-name=%s", manifests.KASContainerKMSProviderServiceAccount().Name),
 			fmt.Sprintf("--token-file=%s", path.Join(awsKMSVolumeMounts.Path(c.Name, kasVolumeAWSKMSCloudProviderToken().Name), "token")),
-			fmt.Sprintf("--kubeconfig=%s", path.Join(awsKMSVolumeMounts.Path(c.Name, kasVolumeLocalhostKubeconfig), util.KubeconfigKey)),
+			fmt.Sprintf("--kubeconfig=%s", path.Join(awsKMSVolumeMounts.Path(c.Name, kasVolumeLocalhostKubeconfig), podspec.KubeconfigKey)),
 		}
 		c.Resources.Requests = corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("10m"),

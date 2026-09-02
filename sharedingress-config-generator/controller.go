@@ -12,7 +12,7 @@ import (
 	"time"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/netutil"
 
 	routev1 "github.com/openshift/api/route/v1"
 
@@ -69,7 +69,7 @@ func (r *SharedIngressConfigReconciler) SetupWithManager(mgr ctrl.Manager) error
 		Watches(
 			&routev1.Route{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
-				if _, hasHCPLabel := obj.GetLabels()[util.HCPRouteLabel]; !hasHCPLabel {
+				if _, hasHCPLabel := obj.GetLabels()[netutil.HCPRouteLabel]; !hasHCPLabel {
 					return nil
 				}
 				return []ctrl.Request{{NamespacedName: client.ObjectKey{
@@ -169,7 +169,7 @@ func (r *SharedIngressConfigReconciler) Reconcile(ctx context.Context, _ ctrl.Re
 		}
 
 		logger.Info("Reloading HAProxy configuration")
-		if err := sendHAProxyReloadCommand(r.haProxyClient, r.haProxyRuntimeSocketPath); err != nil {
+		if err := sendHAProxyReloadCommand(ctx, r.haProxyClient, r.haProxyRuntimeSocketPath); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to reload HAProxy: %w", err)
 		}
 
@@ -203,8 +203,8 @@ func (r *SharedIngressConfigReconciler) currentConfigHash() ([]byte, error) {
 
 // sendHAProxyReloadCommand connects to the specified Unix socket and sends a reload command.
 // It inspects the returned response and return an appropriate error if the reload operation failed.
-func sendHAProxyReloadCommand(client haProxyClient, socketPath string) error {
-	response, err := client.sendCommand(socketPath, "reload")
+func sendHAProxyReloadCommand(ctx context.Context, client haProxyClient, socketPath string) error {
+	response, err := client.sendCommand(ctx, socketPath, "reload")
 	if err != nil {
 		return err
 	}

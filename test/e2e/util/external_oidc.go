@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,6 +105,12 @@ func (config *ExtOIDCConfig) GetAuthenticationConfig() *configv1.AuthenticationS
 				},
 				OIDCClients: []configv1.OIDCClientConfig{
 					{
+						ClientID:           config.CliClientID,
+						ComponentName:      "cli",
+						ComponentNamespace: "openshift-console",
+						ExtraScopes:        []string{"email"},
+					},
+					{
 						ClientID: config.ConsoleClientID,
 						ClientSecret: configv1.SecretNameReference{
 							Name: config.ConsoleClientSecretName,
@@ -153,7 +160,7 @@ func (config *ExtOIDCConfig) GetAuthenticationConfig() *configv1.AuthenticationS
 }
 
 // ValidateAuthenticationSpec validates the external OIDC configuration and the expected HostedCluster authentication configuration before running the test
-func ValidateAuthenticationSpec(t *testing.T, ctx context.Context, client crclient.Client, hostedCluster *hyperv1.HostedCluster, config *ExtOIDCConfig) {
+func ValidateAuthenticationSpec(t testing.TB, ctx context.Context, client crclient.Client, hostedCluster *hyperv1.HostedCluster, config *ExtOIDCConfig) {
 	g := NewWithT(t)
 
 	// check auth config
@@ -200,7 +207,7 @@ func ValidateAuthenticationSpec(t *testing.T, ctx context.Context, client crclie
 }
 
 // IsExternalOIDCCluster checks if the cluster is using external OIDC.
-func IsExternalOIDCCluster(t *testing.T, ctx context.Context, clientCfg *rest.Config) (bool, error) {
+func IsExternalOIDCCluster(t testing.TB, ctx context.Context, clientCfg *rest.Config) (bool, error) {
 	configv1Client, err := configv1typedclient.NewForConfig(clientCfg)
 	if err != nil {
 		return false, err
@@ -214,7 +221,7 @@ func IsExternalOIDCCluster(t *testing.T, ctx context.Context, clientCfg *rest.Co
 }
 
 // ChangeClientForKeycloakExtOIDC changes the guest client using a keycloak user config
-func ChangeClientForKeycloakExtOIDC(t *testing.T, ctx context.Context, clientCfg *rest.Config, authConfig *ExtOIDCConfig) crclient.Client {
+func ChangeClientForKeycloakExtOIDC(t testing.TB, ctx context.Context, clientCfg *rest.Config, authConfig *ExtOIDCConfig) crclient.Client {
 	g := NewWithT(t)
 	newConfig := ChangeUserForKeycloakExtOIDC(t, ctx, clientCfg, authConfig)
 	client, err := crclient.New(newConfig, crclient.Options{Scheme: scheme})
@@ -223,7 +230,7 @@ func ChangeClientForKeycloakExtOIDC(t *testing.T, ctx context.Context, clientCfg
 }
 
 // ChangeUserForKeycloakExtOIDC changes the user of current CLI session for a Keycloak external OIDC cluster
-func ChangeUserForKeycloakExtOIDC(t *testing.T, ctx context.Context, clientCfg *rest.Config, authConfig *ExtOIDCConfig) *rest.Config {
+func ChangeUserForKeycloakExtOIDC(t testing.TB, ctx context.Context, clientCfg *rest.Config, authConfig *ExtOIDCConfig) *rest.Config {
 	g := NewWithT(t)
 	g.Expect(authConfig).NotTo(BeNil())
 	g.Expect(authConfig.ExternalOIDCProvider).Should(Equal(ProviderKeycloak))
@@ -264,7 +271,10 @@ func ChangeUserForKeycloakExtOIDC(t *testing.T, ctx context.Context, clientCfg *
 		"username":   []string{username},
 	}
 
-	response, err := httpClient.PostForm(requestURL, formData)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, strings.NewReader(formData.Encode()))
+	g.Expect(err).NotTo(HaveOccurred())
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response, err := httpClient.Do(req)
 	g.Expect(err).NotTo(HaveOccurred())
 	defer response.Body.Close()
 	g.Expect(response.StatusCode).To(Equal(http.StatusOK))

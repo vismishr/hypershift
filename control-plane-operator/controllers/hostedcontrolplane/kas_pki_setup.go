@@ -21,7 +21,7 @@ func (r *HostedControlPlaneReconciler) setupKASClientSigners(
 	hcp *hyperv1.HostedControlPlane,
 	p *pki.PKIParams,
 	createOrUpdate upsert.CreateOrUpdateFN,
-	rootCASecret *corev1.Secret,
+	_ *corev1.Secret,
 	additionalClientCAs ...*corev1.ConfigMap,
 ) error {
 	reconcileSigner := func(s *corev1.Secret, reconciler signerReconciler) (*corev1.Secret, error) {
@@ -30,18 +30,18 @@ func (r *HostedControlPlaneReconciler) setupKASClientSigners(
 		}
 
 		if _, err := createOrUpdate(ctx, r, s, applyFunc); err != nil {
-			return nil, fmt.Errorf("failed to reconcile secret '%s/%s': %v", s.Namespace, s.Name, err)
+			return nil, fmt.Errorf("failed to reconcile secret '%s/%s': %w", s.Namespace, s.Name, err)
 		}
 		return s, nil
 	}
 
-	reconcileSub := func(target, ca *corev1.Secret, reconciler subReconciler) (*corev1.Secret, error) {
+	reconcileSub := func(target, ca *corev1.Secret, reconciler subReconciler) (*corev1.Secret, error) { //nolint:unparam // result kept for symmetry with reconcileSigner
 		applyFunc := func() error {
 			return reconciler(target, ca, p.OwnerRef)
 		}
 
 		if _, err := createOrUpdate(ctx, r, target, applyFunc); err != nil {
-			return nil, fmt.Errorf("failed to reconcile secret '%s/%s': %v", target.Namespace, target.Name, err)
+			return nil, fmt.Errorf("failed to reconcile secret '%s/%s': %w", target.Namespace, target.Name, err)
 		}
 		return target, nil
 	}
@@ -179,6 +179,29 @@ func (r *HostedControlPlaneReconciler) setupKASClientSigners(
 		manifests.HCCOClientCertSecret(hcp.Namespace),
 		hccoKubeconfigSigner,
 		pki.ReconcileHCCOClientCertSecret,
+	); err != nil {
+		return err
+	}
+
+	// ----------
+	//	KAS bootstrap container signer
+	// ----------
+
+	kasBootstrapContainerSigner, err := reconcileSigner(
+		manifests.KASBootstrapContainerSigner(hcp.Namespace),
+		pki.ReconcileKASBootstrapContainerSigner,
+	)
+
+	if err != nil {
+		return err
+	}
+	totalClientCABundle = append(totalClientCABundle, kasBootstrapContainerSigner)
+
+	// system:kas-bootstrap-container client cert
+	if _, err := reconcileSub(
+		manifests.KASBootstrapContainerClientCertSecret(hcp.Namespace),
+		kasBootstrapContainerSigner,
+		pki.ReconcileKASBootstrapContainerClientCertSecret,
 	); err != nil {
 		return err
 	}

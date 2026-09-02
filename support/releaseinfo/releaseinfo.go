@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/blang/semver"
+	"github.com/coreos/stream-metadata-go/stream"
 )
 
 // Provider knows how to find the release image metadata for an image referred
@@ -34,124 +35,51 @@ type ProviderWithOpenShiftImageRegistryOverrides interface {
 	GetMirroredReleaseImage() string
 }
 
+const (
+	StreamRHEL9  = "rhel-9"
+	StreamRHEL10 = "rhel-10"
+)
+
 // ReleaseImage wraps an ImageStream with some utilities that help the user
 // discover constituent component image information.
 type ReleaseImage struct {
 	*imageapi.ImageStream `json:",inline"`
-	StreamMetadata        *CoreOSStreamMetadata `json:"streamMetadata"`
+	StreamMetadata        *stream.Stream `json:"streamMetadata"`
+	// OSStreams holds per-stream metadata parsed from the ConfigMap "streams" key.
+	// Nil for single-stream payloads (OCP < 5.0).
+	OSStreams map[string]*stream.Stream `json:"-"`
 }
 
-type CoreOSStreamMetadata struct {
-	Stream        string                        `json:"stream"`
-	Architectures map[string]CoreOSArchitecture `json:"architectures"`
-}
-
-type CoreOSArchitecture struct {
-	// Artifacts is a map of platform name to Artifacts
-	Artifacts map[string]CoreOSArtifact `json:"artifacts"`
-	Images    CoreOSImages              `json:"images"`
-	RHCOS     CoreRHCOSImage            `json:"rhel-coreos-extensions"`
-}
-
-type CoreOSArtifact struct {
-	Release string                             `json:"release"`
-	Formats map[string]map[string]CoreOSFormat `json:"formats"`
-}
-
-type CoreOSFormat struct {
-	Location           string `json:"location"`
-	Signature          string `json:"signature"`
-	SHA256             string `json:"sha256"`
-	UncompressedSHA256 string `json:"uncompressed-sha256"`
-}
-
-type CoreOSImages struct {
-	AWS      CoreOSAWSImages      `json:"aws"`
-	GCP      CoreOSGCPImage       `json:"gcp"`
-	PowerVS  CoreOSPowerVSImages  `json:"powervs"`
-	Kubevirt CoreOSKubevirtImages `json:"kubevirt"`
-}
-
-// CoreOSGCPImage contains GCP image information from stream metadata.
-// GCP images are global (not regional like AWS), so there's a single image reference.
-// The image path is constructed as projects/{Project}/global/images/{Name}.
-type CoreOSGCPImage struct {
-	// Project is the GCP project hosting the image (e.g., rhcos-cloud)
-	Project string `json:"project"`
-	// Name is the image name within the project
-	Name string `json:"name"`
-	// Family is the image family (optional, used for latest image lookups)
-	Family string `json:"family"`
-}
-
-type CoreRHCOSImage struct {
-	AzureDisk   CoreAzureDisk   `json:"azure-disk"`
-	Marketplace CoreMarketplace `json:"marketplace"`
-	AWSWinLi    CoreAWSWinLi    `json:"aws-winli"`
-}
-
-type CoreAzureDisk struct {
-	Release string `json:"release"`
-	URL     string `json:"url"`
-}
-
-// CoreMarketplace represents marketplace information for different cloud providers
-type CoreMarketplace struct {
-	Azure CoreAzureMarketplace `json:"azure"`
-}
-
-// CoreAzureMarketplace contains Azure marketplace image information
-type CoreAzureMarketplace struct {
-	NoPurchasePlan CoreAzureMarketplaceNoPurchasePlan `json:"no-purchase-plan"`
-}
-
-// CoreAzureMarketplaceNoPurchasePlan contains marketplace images that don't require a purchase plan
-type CoreAzureMarketplaceNoPurchasePlan struct {
-	HyperVGen1 *CoreAzureMarketplaceImage `json:"hyperVGen1,omitempty"`
-	HyperVGen2 *CoreAzureMarketplaceImage `json:"hyperVGen2,omitempty"`
-}
-
-// CoreAzureMarketplaceImage represents an Azure marketplace image specification
-type CoreAzureMarketplaceImage struct {
-	Publisher string `json:"publisher"`
-	Offer     string `json:"offer"`
-	SKU       string `json:"sku"`
-	Version   string `json:"version"`
-}
-
-type CoreAWSWinLi struct {
-	Regions map[string]CoreAWSWinLiRegion `json:"regions"`
-}
-
-type CoreAWSWinLiRegion struct {
-	Release string `json:"release"`
-	Image   string `json:"image"`
-}
-
-type CoreOSAWSImages struct {
-	Regions map[string]CoreOSAWSImage `json:"regions"`
-}
-
-type CoreOSAWSImage struct {
-	Release string `json:"release"`
-	Image   string `json:"image"`
-}
-
-type CoreOSKubevirtImages struct {
-	Release   string `json:"release"`
-	Image     string `json:"image"`
-	DigestRef string `json:"digest-ref"`
-}
-
-type CoreOSPowerVSImages struct {
-	Regions map[string]CoreOSPowerVSImage `json:"regions"`
-}
-
-type CoreOSPowerVSImage struct {
-	Release string `json:"release"`
-	Object  string `json:"object"`
-	Bucket  string `json:"bucket"`
-	URL     string `json:"url"`
+// StreamForName returns stream metadata by name. If name is empty, returns
+// the default stream (StreamMetadata). If name is non-empty, looks up
+// OSStreams and returns an error if the named stream is not found.
+func (i *ReleaseImage) StreamForName(name string) (*stream.Stream, error) {
+	if name == "" {
+		if i.StreamMetadata == nil {
+			return nil, fmt.Errorf("no default stream metadata available")
+		}
+		return i.StreamMetadata, nil
+	}
+	if i.OSStreams != nil {
+		meta, ok := i.OSStreams[name]
+		if !ok || meta == nil {
+			available := make([]string, 0, len(i.OSStreams))
+			for k, v := range i.OSStreams {
+				if v != nil {
+					available = append(available, k)
+				}
+			}
+			sort.Strings(available)
+			return nil, fmt.Errorf("stream %q not found; available streams: %v", name, available)
+		}
+		return meta, nil
+	}
+	// Fallback to legacy StreamMetadata for single-stream payloads (OCP < 5.0)
+	// where OSStreams is nil but StreamMetadata carries the data.
+	if i.StreamMetadata != nil {
+		return i.StreamMetadata, nil
+	}
+	return nil, fmt.Errorf("stream %q not found and no default stream metadata available", name)
 }
 
 func (i *ReleaseImage) Version() string {
@@ -206,7 +134,7 @@ func readComponentVersions(is *imageapi.ImageStream) (ComponentVersions, []error
 		}
 		all, err := parseComponentVersionsLabel(versions, tag.Annotations[annotationBuildVersionsDisplayNames])
 		if err != nil {
-			errs = append(errs, fmt.Errorf("the referenced image %s had an invalid version annotation: %v", tag.Name, err))
+			errs = append(errs, fmt.Errorf("the referenced image %s had an invalid version annotation: %w", tag.Name, err))
 		}
 		for k, v := range all {
 			if k == "kubectl" {
@@ -239,7 +167,8 @@ func readComponentVersions(is *imageapi.ImageStream) (ComponentVersions, []error
 	sort.Strings(keys)
 	for _, k := range keys {
 		v := combined[k]
-		if v.Len() > 1 {
+		// we allow multiple machine-os versions due to dual stream efforts
+		if v.Len() > 1 && k != "machine-os" {
 			multiples = multiples.Insert(k)
 		}
 		if _, ok := out[k]; ok {
@@ -258,7 +187,8 @@ func readComponentVersions(is *imageapi.ImageStream) (ComponentVersions, []error
 		if !ok {
 			continue
 		}
-		if v.Len() > 1 {
+		// we allow multiple machine-os versions due to dual stream efforts
+		if v.Len() > 1 && k != "machine-os" {
 			multiples = multiples.Insert(k)
 		}
 		version, ok := out[k]
@@ -324,7 +254,7 @@ func parseComponentVersionsLabel(label, displayNames string) (ComponentVersions,
 		}
 		v, err := semver.Parse(parts[1])
 		if err != nil {
-			return nil, fmt.Errorf("the version pair %q must have a valid semantic version: %v", pair, err)
+			return nil, fmt.Errorf("the version pair %q must have a valid semantic version: %w", pair, err)
 		}
 		v.Build = nil
 		labels[parts[0]] = ComponentVersion{

@@ -7,9 +7,11 @@ import (
 	. "github.com/onsi/gomega"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/imageprovider"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 
@@ -285,28 +287,366 @@ func generateResources() (map[string]*corev1.Secret, map[string]*corev1.ConfigMa
 	return secrets, configMaps
 }
 
+func TestApplyRequestsOverrides(t *testing.T) {
+	tests := []struct {
+		name                   string
+		annotations            map[string]string
+		containers             []corev1.Container
+		initContainers         []corev1.Container
+		expectedContainers     []corev1.Container
+		expectedInitContainers []corev1.Container
+	}{
+		{
+			name: "When overriding cpu and memory it should only update requests",
+			annotations: map[string]string{
+				"resource-request-override.hypershift.openshift.io/router.router": "cpu=500m,memory=1Gi",
+			},
+			containers: []corev1.Container{
+				{
+					Name: "router",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("100m"),
+							corev1.ResourceMemory: resource.MustParse("256Mi"),
+						},
+					},
+				},
+			},
+			expectedContainers: []corev1.Container{
+				{
+					Name: "router",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("500m"),
+							corev1.ResourceMemory: resource.MustParse("1Gi"),
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "When overriding aro.openshift.io/swift-nic it should set both requests and limits",
+			annotations: map[string]string{
+				"resource-request-override.hypershift.openshift.io/router.router": "aro.openshift.io/swift-nic=1",
+			},
+			containers: []corev1.Container{
+				{
+					Name: "router",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{},
+					},
+				},
+			},
+			expectedContainers: []corev1.Container{
+				{
+					Name: "router",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							aroSwiftNICResource: resource.MustParse("1"),
+						},
+						Limits: corev1.ResourceList{
+							aroSwiftNICResource: resource.MustParse("1"),
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "When overriding mixed resources it should set limits only for swift-nic",
+			annotations: map[string]string{
+				"resource-request-override.hypershift.openshift.io/router.router": "cpu=500m,aro.openshift.io/swift-nic=1",
+			},
+			containers: []corev1.Container{
+				{
+					Name: "router",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("100m"),
+						},
+					},
+				},
+			},
+			expectedContainers: []corev1.Container{
+				{
+					Name: "router",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:  resource.MustParse("500m"),
+							aroSwiftNICResource: resource.MustParse("1"),
+						},
+						Limits: corev1.ResourceList{
+							aroSwiftNICResource: resource.MustParse("1"),
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "When overriding an init container with swift-nic it should set both requests and limits",
+			annotations: map[string]string{
+				"resource-request-override.hypershift.openshift.io/router.init-router": "aro.openshift.io/swift-nic=2",
+			},
+			initContainers: []corev1.Container{
+				{
+					Name: "init-router",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{},
+					},
+				},
+			},
+			expectedInitContainers: []corev1.Container{
+				{
+					Name: "init-router",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							aroSwiftNICResource: resource.MustParse("2"),
+						},
+						Limits: corev1.ResourceList{
+							aroSwiftNICResource: resource.MustParse("2"),
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "When annotation targets a different deployment it should not apply overrides",
+			annotations: map[string]string{
+				"resource-request-override.hypershift.openshift.io/kube-apiserver.kube-apiserver": "cpu=500m",
+			},
+			containers: []corev1.Container{
+				{
+					Name: "router",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("100m"),
+						},
+					},
+				},
+			},
+			expectedContainers: []corev1.Container{
+				{
+					Name: "router",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("100m"),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+
+			workload := &controlPlaneWorkload[*appsv1.Deployment]{
+				name:             "router",
+				workloadProvider: &deploymentProvider{},
+				ComponentOptions: &testComponent{},
+			}
+			hcp := &hyperv1.HostedControlPlane{}
+			hcp.Annotations = test.annotations
+
+			podTemplate := &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers:     test.containers,
+					InitContainers: test.initContainers,
+				},
+			}
+
+			workload.applyRequestsOverrides(podTemplate, hcp)
+
+			if test.expectedContainers != nil {
+				g.Expect(podTemplate.Spec.Containers).To(Equal(test.expectedContainers))
+			}
+			if test.expectedInitContainers != nil {
+				g.Expect(podTemplate.Spec.InitContainers).To(Equal(test.expectedInitContainers))
+			}
+		})
+	}
+}
+
+func TestApplyNonOvercommitableResourceLimits(t *testing.T) {
+	tests := []struct {
+		name           string
+		overrides      corev1.ResourceList
+		existingLimits corev1.ResourceList
+		expectedLimits corev1.ResourceList
+	}{
+		{
+			name: "When overriding aro.openshift.io/swift-nic it should set the limit to the same value",
+			overrides: corev1.ResourceList{
+				aroSwiftNICResource: resource.MustParse("1"),
+			},
+			expectedLimits: corev1.ResourceList{
+				aroSwiftNICResource: resource.MustParse("1"),
+			},
+		},
+		{
+			name: "When overriding standard resources it should not set limits",
+			overrides: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("500m"),
+				corev1.ResourceMemory: resource.MustParse("1Gi"),
+			},
+			expectedLimits: nil,
+		},
+		{
+			name: "When overriding a mix of standard and swift-nic resources it should only set limits for swift-nic",
+			overrides: corev1.ResourceList{
+				corev1.ResourceCPU:  resource.MustParse("500m"),
+				aroSwiftNICResource: resource.MustParse("2"),
+			},
+			existingLimits: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("2Gi"),
+			},
+			expectedLimits: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("2Gi"),
+				aroSwiftNICResource:   resource.MustParse("2"),
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			container := &corev1.Container{
+				Resources: corev1.ResourceRequirements{
+					Limits: test.existingLimits,
+				},
+			}
+			applyNonOvercommitableResourceLimits(container, test.overrides)
+			g.Expect(container.Resources.Limits).To(Equal(test.expectedLimits))
+		})
+	}
+}
+
 func TestSetDefaultOptions(t *testing.T) {
-	g := NewGomegaWithT(t)
 	scheme := runtime.NewScheme()
 	_ = hyperv1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	_ = appsv1.AddToScheme(scheme)
 
-	// Test case for etcd SecurityContext.
-	controlPlaneWorkload := &controlPlaneWorkload[*appsv1.StatefulSet]{
-		name:             "etcd",
-		workloadProvider: &statefulSetProvider{},
-		ComponentOptions: &testComponent{},
-	}
-	workloadObject := &appsv1.StatefulSet{}
+	t.Run("When SetDefaultSecurityContext is true it should set RunAsUser and FSGroup", func(t *testing.T) {
+		t.Parallel()
+		g := NewGomegaWithT(t)
 
-	err := controlPlaneWorkload.setDefaultOptions(ControlPlaneContext{
-		HCP:                       &hyperv1.HostedControlPlane{},
-		SetDefaultSecurityContext: true,
-		DefaultSecurityContextUID: int64(1002),
-		Client:                    fake.NewClientBuilder().WithScheme(scheme).Build(),
-	}, workloadObject, nil)
-	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(workloadObject.Spec.Template.Spec.SecurityContext.RunAsUser).To(Equal(ptr.To(int64(1002))))
-	g.Expect(workloadObject.Spec.Template.Spec.SecurityContext.FSGroup).To(Equal(ptr.To(int64(1002))))
+		workload := &controlPlaneWorkload[*appsv1.StatefulSet]{
+			name:             "etcd",
+			workloadProvider: &statefulSetProvider{},
+			ComponentOptions: &testComponent{},
+		}
+		workloadObject := &appsv1.StatefulSet{}
+
+		err := workload.setDefaultOptions(ControlPlaneContext{
+			HCP:                       &hyperv1.HostedControlPlane{},
+			SetDefaultSecurityContext: true,
+			DefaultSecurityContextUID: int64(1002),
+			Client:                    fake.NewClientBuilder().WithScheme(scheme).Build(),
+		}, workloadObject, nil)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(workloadObject.Spec.Template.Spec.SecurityContext.RunAsUser).To(Equal(ptr.To(int64(1002))))
+		g.Expect(workloadObject.Spec.Template.Spec.SecurityContext.FSGroup).To(Equal(ptr.To(int64(1002))))
+	})
+
+	releaseProvider := imageprovider.NewFromImages(map[string]string{
+		"hyperkube": "quay.io/test/hyperkube:latest",
+	})
+
+	resourceTests := []struct {
+		name               string
+		annotations        map[string]string
+		containerResources corev1.ResourceRequirements
+		existingResources  map[string]corev1.ResourceRequirements
+		expectedResources  corev1.ResourceRequirements
+	}{
+		{
+			name: "When existing resources have both requests and limits it should fully preserve them",
+			containerResources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("100m"),
+					corev1.ResourceMemory: resource.MustParse("256Mi"),
+				},
+			},
+			existingResources: map[string]corev1.ResourceRequirements{
+				"kube-apiserver": {
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("200m"),
+						corev1.ResourceMemory: resource.MustParse("1700Mi"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("2"),
+						corev1.ResourceMemory: resource.MustParse("4Gi"),
+					},
+				},
+			},
+			expectedResources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("200m"),
+					corev1.ResourceMemory: resource.MustParse("1700Mi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("2"),
+					corev1.ResourceMemory: resource.MustParse("4Gi"),
+				},
+			},
+		},
+		{
+			name: "When no existing resources are set it should keep the manifest defaults",
+			containerResources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("100m"),
+					corev1.ResourceMemory: resource.MustParse("256Mi"),
+				},
+			},
+			existingResources: nil,
+			expectedResources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("100m"),
+					corev1.ResourceMemory: resource.MustParse("256Mi"),
+				},
+			},
+		},
+	}
+
+	for _, test := range resourceTests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			g := NewGomegaWithT(t)
+
+			workload := &controlPlaneWorkload[*appsv1.Deployment]{
+				name:             "kube-apiserver",
+				workloadProvider: &deploymentProvider{},
+				ComponentOptions: &testComponent{},
+			}
+
+			deployment := &appsv1.Deployment{
+				Spec: appsv1.DeploymentSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:      "kube-apiserver",
+									Image:     "hyperkube",
+									Resources: test.containerResources,
+								},
+							},
+						},
+					},
+				},
+			}
+
+			hcp := &hyperv1.HostedControlPlane{}
+			hcp.Annotations = test.annotations
+
+			err := workload.setDefaultOptions(ControlPlaneContext{
+				HCP:                  hcp,
+				Client:               fake.NewClientBuilder().WithScheme(scheme).Build(),
+				ReleaseImageProvider: releaseProvider,
+			}, deployment, test.existingResources)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			g.Expect(deployment.Spec.Template.Spec.Containers[0].Resources).To(Equal(test.expectedResources))
+		})
+	}
 }

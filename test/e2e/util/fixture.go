@@ -21,10 +21,10 @@ import (
 	"github.com/openshift/hypershift/cmd/util"
 	"github.com/openshift/hypershift/test/e2e/util/dump"
 
-	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	"github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi"
 	resourcegroupstaggingapitypes "github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi/types"
-	"github.com/aws/aws-sdk-go/aws/arn"
 
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -41,7 +41,7 @@ import (
 // know or care about in advance.
 //
 // TODO: Mutates the input, instead should use a copy of the input options
-func createClusterOpts(ctx context.Context, client crclient.Client, hc *hyperv1.HostedCluster, opts *PlatformAgnosticOptions) (*PlatformAgnosticOptions, error) {
+func createClusterOpts(_ context.Context, _ crclient.Client, hc *hyperv1.HostedCluster, opts *PlatformAgnosticOptions) (*PlatformAgnosticOptions, error) { //nolint:unparam // error return kept for API consistency
 	opts.Namespace = hc.Namespace
 	opts.Name = hc.Name
 
@@ -146,7 +146,7 @@ func createCluster(ctx context.Context, hc *hyperv1.HostedCluster, opts *Platfor
 		}
 		validOpts := completer.(*azure.ValidatedCreateOptions)
 
-		infraOpts, err := azure.CreateInfraOptions(ctx, validOpts, coreOpts)
+		infraOpts, err := azure.CreateInfraOptions(validOpts, coreOpts)
 		if err != nil {
 			return fmt.Errorf("failed to create infra options: %w", err)
 		}
@@ -186,7 +186,7 @@ func createCluster(ctx context.Context, hc *hyperv1.HostedCluster, opts *Platfor
 func renderCreate(ctx context.Context, opts *core.RawCreateOptions, platformOpts core.PlatformValidator, outputFile string, renderLogFile string, createLogFile string) error {
 	renderLog, err := os.Create(renderLogFile)
 	if err != nil {
-		return fmt.Errorf("failed to render render log: %w", err)
+		return fmt.Errorf("failed to render log: %w", err)
 	}
 	renderLogger := zap.New(zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), zapcore.Lock(renderLog), zap.DebugLevel))
 	defer func() {
@@ -204,7 +204,7 @@ func renderCreate(ctx context.Context, opts *core.RawCreateOptions, platformOpts
 
 	createLog, err := os.Create(createLogFile)
 	if err != nil {
-		return fmt.Errorf("failed to create create log: %w", err)
+		return fmt.Errorf("failed to create log: %w", err)
 	}
 	createLogger := zap.New(zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), zapcore.Lock(createLog), zap.DebugLevel))
 	defer func() {
@@ -225,7 +225,7 @@ func destroyCluster(ctx context.Context, t *testing.T, hc *hyperv1.HostedCluster
 	destroyLogFile := filepath.Join(outputDir, "destroy.log")
 	destroyLog, err := os.Create(destroyLogFile)
 	if err != nil {
-		return fmt.Errorf("failed to destroy destroy log: %w", err)
+		return fmt.Errorf("failed to destroy log: %w", err)
 	}
 	destroyLogger := zap.New(zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), zapcore.Lock(destroyLog), zap.DebugLevel))
 	defer func() {
@@ -292,8 +292,8 @@ func validateAWSGuestResourcesDeletedFunc(ctx context.Context, t *testing.T, inf
 	}
 
 	return func() {
-		awsSession := awsutil.NewSessionV2(ctx, "cleanup-validation", awsCreds, "", "", awsRegion)
-		awsConfig := awsutil.NewConfigV2()
+		awsSession := awsutil.NewSession(ctx, "cleanup-validation", awsCreds, "", "", awsRegion)
+		awsConfig := awsutil.NewConfig()
 		taggingClient := resourcegroupstaggingapi.NewFromConfig(*awsSession, func(o *resourcegroupstaggingapi.Options) {
 			o.Retryer = awsConfig()
 		})
@@ -310,7 +310,7 @@ func validateAWSGuestResourcesDeletedFunc(ctx context.Context, t *testing.T, inf
 				},
 				TagFilters: []resourcegroupstaggingapitypes.TagFilter{
 					{
-						Key:    awsv2.String(clusterTag(infraID)),
+						Key:    awssdk.String(clusterTag(infraID)),
 						Values: []string{"owned"},
 					},
 				},
@@ -339,13 +339,13 @@ func validateAWSGuestResourcesDeletedFunc(ctx context.Context, t *testing.T, inf
 			} else if hasGuestResources(t, lastOutput.ResourceTagMappingList) {
 				t.Logf("Failed to clean up %d remaining resources for guest cluster", len(lastOutput.ResourceTagMappingList))
 				for i := 0; i < len(lastOutput.ResourceTagMappingList); i++ {
-					resourceARN, err := arn.Parse(awsv2.ToString(lastOutput.ResourceTagMappingList[i].ResourceARN))
+					resourceARN, err := arn.Parse(awssdk.ToString(lastOutput.ResourceTagMappingList[i].ResourceARN))
 					if err != nil {
 						// We are only decoding for additional information, proceed on error
 						continue
 					}
 					t.Logf("Resource: %s, tags: %s, service: %s",
-						awsv2.ToString(lastOutput.ResourceTagMappingList[i].ResourceARN), resourceTags(lastOutput.ResourceTagMappingList[i].Tags), resourceARN.Service)
+						awssdk.ToString(lastOutput.ResourceTagMappingList[i].ResourceARN), resourceTags(lastOutput.ResourceTagMappingList[i].Tags), resourceARN.Service)
 				}
 			}
 		}
@@ -355,21 +355,21 @@ func validateAWSGuestResourcesDeletedFunc(ctx context.Context, t *testing.T, inf
 func resourceTags(tags []resourcegroupstaggingapitypes.Tag) string {
 	tagStrings := make([]string, len(tags))
 	for i, tag := range tags {
-		tagStrings[i] = fmt.Sprintf("%s=%s", awsv2.ToString(tag.Key), awsv2.ToString(tag.Value))
+		tagStrings[i] = fmt.Sprintf("%s=%s", awssdk.ToString(tag.Key), awssdk.ToString(tag.Value))
 	}
 	return strings.Join(tagStrings, ",")
 }
 
 func hasGuestResources(t *testing.T, resourceTagMappings []resourcegroupstaggingapitypes.ResourceTagMapping) bool {
 	for _, mapping := range resourceTagMappings {
-		resourceARN, err := arn.Parse(awsv2.ToString(mapping.ResourceARN))
+		resourceARN, err := arn.Parse(awssdk.ToString(mapping.ResourceARN))
 		if err != nil {
-			t.Logf("WARNING: failed to parse ARN %s", awsv2.ToString(mapping.ResourceARN))
+			t.Logf("WARNING: failed to parse ARN %s", awssdk.ToString(mapping.ResourceARN))
 			continue
 		}
 		if resourceARN.Service == "ec2" { // Resource is a volume, check whether it's a PV volume by looking at tags
 			for _, tag := range mapping.Tags {
-				if awsv2.ToString(tag.Key) == "kubernetes.io/created-for/pv/name" {
+				if awssdk.ToString(tag.Key) == "kubernetes.io/created-for/pv/name" {
 					return true
 				}
 			}

@@ -3,8 +3,22 @@ run:
   allow-parallel-runners: true
 linters:
   enable:
+    - dupword
+    - durationcheck
+    - errorlint
+    - fatcontext
+    - gocyclo
     - misspell
+    - nilerr
+    - noctx
+    - unparam
+    - usestdlibvars
   settings:
+    gocyclo:
+      min-complexity: 30
+    govet:
+      enable:
+        - nilness
     misspell:
       # The use of US spelling over other English spellings, like UK, is inline with the OpenShift conventions:
       # https://github.com/openshift/enhancements/blob/master/CONVENTIONS.md#terminology-grammar-and-spelling
@@ -22,6 +36,12 @@ linters:
       - legacy
       - std-error-handling
     rules:
+      - linters:
+          - unparam
+        path: '_test\.go$'
+      - linters:
+          - unparam
+        path: 'support/thirdparty/'
       - linters:
           - staticcheck
         text: 'SA1019: hcp.Status.Version is deprecated: Use versionStatus.desired.version instead.'
@@ -43,6 +63,10 @@ linters:
         source: 'github.com/onsi/gomega'
       - linters:
           - staticcheck
+        text: 'ST1001: should not use dot imports'
+        source: 'github.com/onsi/ginkgo'
+      - linters:
+          - staticcheck
         text: 'ST1005: error strings should not be capitalized'
         source: 'Konnectivity'
       - linters:
@@ -58,6 +82,10 @@ linters:
       - linters:
           - staticcheck
         text: 'SA1019: "github.com/aws/aws-sdk-go'
+      # cluster-api v1beta1 is deprecated but migration to v1beta2 is a separate effort
+      - linters:
+          - staticcheck
+        text: 'SA1019: "sigs.k8s.io/cluster-api/(.*)" is deprecated: This package is deprecated and is going to be removed when support for v1beta1 will be dropped.'
     paths:
       - third_party$
       - builtin$

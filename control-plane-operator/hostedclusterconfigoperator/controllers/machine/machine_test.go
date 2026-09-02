@@ -17,7 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
-	capiv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -383,6 +383,45 @@ func TestReconcileDefaultIngressEndpoints(t *testing.T) {
 	_ = kubevirtv1.AddToScheme(scheme.Scheme)
 	_ = discoveryv1.AddToScheme(scheme.Scheme)
 	_ = corev1.AddToScheme(scheme.Scheme)
+	machinesWithLinkLocalAddresses := []capiv1.Machine{
+		{
+			TypeMeta:   machineTypeMeta,
+			ObjectMeta: worker1Meta,
+			Spec: capiv1.MachineSpec{
+				InfrastructureRef: corev1.ObjectReference{
+					Name: vmWorker1Meta.Name,
+				},
+			},
+			Status: capiv1.MachineStatus{
+				Phase: string(capiv1.MachinePhaseRunning),
+				Addresses: []capiv1.MachineAddress{
+					{Type: capiv1.MachineInternalIP, Address: "192.168.1.3"},
+					{Type: capiv1.MachineInternalIP, Address: "169.254.0.2"},
+					{Type: capiv1.MachineInternalIP, Address: "2001:db8:a0b:12f0::3"},
+					{Type: capiv1.MachineInternalIP, Address: "fe80::1"},
+				},
+			},
+		},
+		{
+			TypeMeta:   machineTypeMeta,
+			ObjectMeta: worker2Meta,
+			Spec: capiv1.MachineSpec{
+				InfrastructureRef: corev1.ObjectReference{
+					Name: vmWorker2Meta.Name,
+				},
+			},
+			Status: capiv1.MachineStatus{
+				Phase: string(capiv1.MachinePhaseRunning),
+				Addresses: []capiv1.MachineAddress{
+					{Type: capiv1.MachineInternalIP, Address: "192.168.1.4"},
+					{Type: capiv1.MachineInternalIP, Address: "169.254.169.254"},
+					{Type: capiv1.MachineInternalIP, Address: "2001:db8:a0b:12f0::4"},
+					{Type: capiv1.MachineInternalIP, Address: "fe80::dead:beef"},
+				},
+			},
+		},
+	}
+
 	testCases := []struct {
 		name                          string
 		machines                      []capiv1.Machine
@@ -435,6 +474,24 @@ func TestReconcileDefaultIngressEndpoints(t *testing.T) {
 				defaultIngressEndpointSliceIPv4(pairOfDualStackRunningMachines[1], pairOfVirtualMachines[1], readyAndServing(false, false)),
 				defaultIngressEndpointSliceIPv6(pairOfDualStackRunningMachines[0], pairOfVirtualMachines[0], readyAndServing(true, true)),
 				defaultIngressEndpointSliceIPv6(pairOfDualStackRunningMachines[1], pairOfVirtualMachines[1], readyAndServing(false, false)),
+			},
+			hcp: kubevirtHCP,
+		},
+		{
+			name:             "When machines have link-local addresses it should filter them from EndpointSlice endpoints",
+			machines:         machinesWithLinkLocalAddresses,
+			virtualMachines:  pairOfVirtualMachines,
+			services:         []corev1.Service{defaultIngressService, kccmService},
+			expectedServices: []corev1.Service{defaultIngressService, kccmService},
+			expectedIngressEndpointSlices: []discoveryv1.EndpointSlice{
+				defaultIngressEndpointSliceIPv4(machinesWithLinkLocalAddresses[0], pairOfVirtualMachines[0]),
+				defaultIngressEndpointSliceIPv4(machinesWithLinkLocalAddresses[1], pairOfVirtualMachines[1]),
+				defaultIngressEndpointSliceIPv6(machinesWithLinkLocalAddresses[0], pairOfVirtualMachines[0]),
+				defaultIngressEndpointSliceIPv6(machinesWithLinkLocalAddresses[1], pairOfVirtualMachines[1]),
+				kccmEndpointSliceIPv4(machinesWithLinkLocalAddresses[0], pairOfVirtualMachines[0]),
+				kccmEndpointSliceIPv4(machinesWithLinkLocalAddresses[1], pairOfVirtualMachines[1]),
+				kccmEndpointSliceIPv6(machinesWithLinkLocalAddresses[0], pairOfVirtualMachines[0]),
+				kccmEndpointSliceIPv6(machinesWithLinkLocalAddresses[1], pairOfVirtualMachines[1]),
 			},
 			hcp: kubevirtHCP,
 		},

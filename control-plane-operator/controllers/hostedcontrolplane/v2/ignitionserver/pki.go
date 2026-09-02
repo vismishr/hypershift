@@ -8,7 +8,7 @@ import (
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests/ignitionserver"
 	"github.com/openshift/hypershift/support/certs"
 	component "github.com/openshift/hypershift/support/controlplane-component"
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/netutil"
 
 	routev1 "github.com/openshift/api/route/v1"
 
@@ -45,10 +45,10 @@ func adaptServingCertSecret(cpContext component.WorkloadContext, secret *corev1.
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
-		return fmt.Errorf("failed to get ignition ca-cert secret: %v", err)
+		return fmt.Errorf("failed to get ignition ca-cert secret: %w", err)
 	}
 
-	serviceStrategy := util.ServicePublishingStrategyByTypeForHCP(cpContext.HCP, hyperv1.Ignition)
+	serviceStrategy := netutil.ServicePublishingStrategyByTypeForHCP(cpContext.HCP, hyperv1.Ignition)
 	if serviceStrategy == nil {
 		return fmt.Errorf("ignition service strategy not specified")
 	}
@@ -67,7 +67,7 @@ func adaptServingCertSecret(cpContext component.WorkloadContext, secret *corev1.
 			if apierrors.IsNotFound(err) {
 				return nil
 			}
-			return fmt.Errorf("failed to get ignition route: %v", err)
+			return fmt.Errorf("failed to get ignition route: %w", err)
 		}
 		// The route must be admitted and assigned a host before we can generate certs
 		if len(ignitionServerRoute.Status.Ingress) == 0 || len(ignitionServerRoute.Status.Ingress[0].Host) == 0 {
