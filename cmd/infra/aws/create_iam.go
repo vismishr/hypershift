@@ -11,6 +11,7 @@ import (
 	awsutil "github.com/openshift/hypershift/cmd/infra/aws/util"
 	"github.com/openshift/hypershift/cmd/log"
 	"github.com/openshift/hypershift/cmd/util"
+	supportawsutil "github.com/openshift/hypershift/support/awsutil"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -115,6 +116,7 @@ func NewCreateIAMCommand() *cobra.Command {
 			logger.Error(err, "failed to create client")
 			return err
 		}
+		opts.AdditionalTags = append(opts.AdditionalTags, supportawsutil.HypershiftSourceTagKey+"=cli")
 		if err := opts.Run(cmd.Context(), client, logger); err != nil {
 			logger.Error(err, "Failed to create infrastructure")
 			return err
@@ -168,6 +170,12 @@ func (o *CreateIAMOptions) CreateIAM(ctx context.Context, client crclient.Client
 	if err = o.ParseAdditionalTags(); err != nil {
 		return nil, err
 	}
+	if len(o.InfraID) > 0 {
+		o.additionalIAMTags = append(o.additionalIAMTags, iamtypes.Tag{
+			Key:   aws.String(supportawsutil.HypershiftInfraIDTagKey),
+			Value: aws.String(o.InfraID),
+		})
+	}
 	if o.OIDCStorageProviderS3BucketName == "" || o.OIDCStorageProviderS3Region == "" {
 		cm := &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "kube-public", Name: "oidc-storage-provider-s3-config"},
@@ -191,7 +199,7 @@ func (o *CreateIAMOptions) CreateIAM(ctx context.Context, client crclient.Client
 		return nil, err
 	}
 
-	awsSession, err := o.AWSCredentialsOpts.GetSessionV2(ctx, "cli-create-iam", o.CredentialsSecretData, o.Region)
+	awsSession, err := o.AWSCredentialsOpts.GetSession(ctx, "cli-create-iam", o.CredentialsSecretData, o.Region)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +209,7 @@ func (o *CreateIAMOptions) CreateIAM(ctx context.Context, client crclient.Client
 		sharedVPC = true
 	}
 
-	awsConfig := awsutil.NewConfigV2()
+	awsConfig := awsutil.NewConfig()
 	iamClient := iam.NewFromConfig(*awsSession, func(o *iam.Options) {
 		o.Retryer = awsConfig()
 	})
@@ -212,7 +220,7 @@ func (o *CreateIAMOptions) CreateIAM(ctx context.Context, client crclient.Client
 	}
 
 	if sharedVPC {
-		vpcOwnerAWSSession, err := o.VPCOwnerCredentialsOpts.GetSessionV2(ctx, "cli-create-iam", nil, o.Region)
+		vpcOwnerAWSSession, err := o.VPCOwnerCredentialsOpts.GetSession(ctx, "cli-create-iam", nil, o.Region)
 		if err != nil {
 			return nil, err
 		}

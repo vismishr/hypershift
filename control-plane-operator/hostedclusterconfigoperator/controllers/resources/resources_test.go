@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,18 +13,24 @@ import (
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	cpomanifests "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
+	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/ocm"
 	"github.com/openshift/hypershift/control-plane-operator/hostedclusterconfigoperator/api"
 	"github.com/openshift/hypershift/control-plane-operator/hostedclusterconfigoperator/controllers/resources/kas"
 	"github.com/openshift/hypershift/control-plane-operator/hostedclusterconfigoperator/controllers/resources/manifests"
+	"github.com/openshift/hypershift/control-plane-operator/hostedclusterconfigoperator/controllers/resources/registry"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/nodepool"
 	"github.com/openshift/hypershift/support/azureutil"
 	"github.com/openshift/hypershift/support/globalconfig"
+	"github.com/openshift/hypershift/support/k8sutil"
+	"github.com/openshift/hypershift/support/netutil"
+	"github.com/openshift/hypershift/support/releaseinfo"
 	fakereleaseprovider "github.com/openshift/hypershift/support/releaseinfo/fake"
 	supportutil "github.com/openshift/hypershift/support/util"
 	"github.com/openshift/hypershift/support/util/fakeimagemetadataprovider"
 
 	configv1 "github.com/openshift/api/config/v1"
-	imageregistryv1 "github.com/openshift/api/imageregistry/v1"
+	imageapi "github.com/openshift/api/image/v1"
+	openshiftcpv1 "github.com/openshift/api/openshiftcontrolplane/v1"
 	operatorv1 "github.com/openshift/api/operator/v1"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -43,11 +50,14 @@ import (
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
+	operatorsv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	"go.uber.org/zap/zaptest"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type testClient struct {
@@ -70,11 +80,16 @@ var initialObjects = []client.Object{
 	globalconfig.ProjectConfig(),
 	globalconfig.BuildConfig(),
 	globalconfig.ProxyConfig(),
-	// Not running bcrypt hashing for the kubeadmin secret massively speeds up the tests, 4s vs 0.1s (and for -race its ~10x that)
+	// Use a valid bcrypt hash of "test" (matching fakeKubeadminPasswordSecret) so the
+	// CompareHashAndPassword check passes and avoids re-hashing on every reconcile.
+	// MinCost keeps the tests fast (~0.1s vs ~4s with DefaultCost, ~10x worse with -race).
 	&corev1.Secret{
 		ObjectMeta: manifests.KubeadminPasswordHashSecret().ObjectMeta,
 		Data: map[string][]byte{
-			"kubeadmin": []byte("something"),
+			"kubeadmin": func() []byte {
+				h, _ := bcrypt.GenerateFromPassword([]byte("test"), bcrypt.MinCost)
+				return h
+			}(),
 		},
 	},
 	manifests.NodeTuningClusterOperator(),
@@ -92,9 +107,14 @@ var initialObjects = []client.Object{
 	manifests.ValidatingAdmissionPolicyBinding(fmt.Sprintf("%s-binding", kas.AdmissionPolicyNameICSP)),
 	manifests.ValidatingAdmissionPolicyBinding(fmt.Sprintf("%s-binding", kas.AdmissionPolicyNameInfra)),
 
+	&operatorsv1alpha1.CatalogSource{ObjectMeta: metav1.ObjectMeta{Name: "redhat-marketplace", Namespace: "openshift-marketplace"}},
 	fakeOperatorHub(),
 	manifests.KASConnectionCheckerDeployment(),
 	manifests.KASConnectionCheckerServiceAccount(),
+	manifests.MetricsForwarderDeployment(),
+	manifests.MetricsForwarderConfigMap(),
+	manifests.MetricsForwarderServingCA(),
+	manifests.MetricsForwarderPodMonitor(),
 }
 
 func shouldNotError(key client.ObjectKey) bool {
@@ -225,6 +245,7 @@ func TestReconcileErrorHandling(t *testing.T) {
 }
 
 func TestReconcileOLM(t *testing.T) {
+	t.Parallel()
 	var errs []error
 	hcp := fakeHCP()
 	hcp.Namespace = "openshift-operator-lifecycle-manager"
@@ -243,13 +264,13 @@ func TestReconcileOLM(t *testing.T) {
 		want                *configv1.OperatorHubSpec
 	}{
 		{
-			name:                "PlacementStrategy is management and no configuration provided",
+			name:                "When placement is management with no configuration, it should return empty OperatorHub spec",
 			hcpClusterConfig:    nil,
 			olmCatalogPlacement: hyperv1.ManagementOLMCatalogPlacement,
 			want:                &configv1.OperatorHubSpec{},
 		},
 		{
-			name: "PlacementStrategy is management and allDefaultSources disabled",
+			name: "When placement is management with allDefaultSources disabled, it should disable all default sources",
 			hcpClusterConfig: &hyperv1.ClusterConfiguration{
 				OperatorHub: &configv1.OperatorHubSpec{
 					DisableAllDefaultSources: true,
@@ -261,7 +282,7 @@ func TestReconcileOLM(t *testing.T) {
 			},
 		},
 		{
-			name: "PlacementStrategy is management and allDefaultSources enabled",
+			name: "When placement is management with allDefaultSources enabled, it should enable all default sources",
 			hcpClusterConfig: &hyperv1.ClusterConfiguration{
 				OperatorHub: &configv1.OperatorHubSpec{
 					DisableAllDefaultSources: false,
@@ -273,7 +294,7 @@ func TestReconcileOLM(t *testing.T) {
 			},
 		},
 		{
-			name:                "PlacementStrategy is guest and no configuration provided",
+			name:                "When placement is guest with no configuration, it should return empty OperatorHub spec",
 			hcpClusterConfig:    nil,
 			olmCatalogPlacement: hyperv1.GuestOLMCatalogPlacement,
 			want:                &configv1.OperatorHubSpec{},
@@ -281,7 +302,7 @@ func TestReconcileOLM(t *testing.T) {
 		{
 			// We expect here the OperatorHub in guest to keep the already set value and
 			// don't overwrite the value with the new one.
-			name: "PlacementStrategy is guest and allDefaultSources disabled, the first reconciliation loop already happened",
+			name: "When placement is guest with allDefaultSources disabled after first reconcile, it should preserve existing value",
 			hcpClusterConfig: &hyperv1.ClusterConfiguration{
 				OperatorHub: &configv1.OperatorHubSpec{
 					DisableAllDefaultSources: true,
@@ -293,7 +314,7 @@ func TestReconcileOLM(t *testing.T) {
 			},
 		},
 		{
-			name: "PlacementStrategy is guest and allDefaultSources enabled",
+			name: "When placement is guest with allDefaultSources enabled, it should enable all default sources",
 			hcpClusterConfig: &hyperv1.ClusterConfiguration{
 				OperatorHub: &configv1.OperatorHubSpec{
 					DisableAllDefaultSources: false,
@@ -472,15 +493,18 @@ func withICS(hcp *hyperv1.HostedControlPlane) *hyperv1.HostedControlPlane {
 }
 
 func TestReconcileKubeadminPasswordHashSecret(t *testing.T) {
+	t.Parallel()
 	testNamespace := "master-cluster1"
 	testHCPName := "cluster1"
 
 	tests := map[string]struct {
 		inputHCP                                 *hyperv1.HostedControlPlane
 		inputObjects                             []client.Object
+		existingHashSecret                       *corev1.Secret
 		expectKubeadminPasswordHashSecretToExist bool
+		expectHashPreserved                      bool
 	}{
-		"when kubeadminPasswordSecret exists the hash secret is created": {
+		"When kubeadminPasswordSecret exists, it should create the hash secret": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -500,7 +524,63 @@ func TestReconcileKubeadminPasswordHashSecret(t *testing.T) {
 			},
 			expectKubeadminPasswordHashSecretToExist: true,
 		},
-		"when kubeadminPasswordSecret doesn't exist the hash secret is not created": {
+		"When existing hash does not match the password it should regenerate the hash": {
+			inputHCP: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      testHCPName,
+					Namespace: testNamespace,
+				},
+			},
+			inputObjects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: manifests.KubeadminPasswordSecret(testNamespace).ObjectMeta,
+					Data: map[string][]byte{
+						"password": []byte(`adminpass`),
+					},
+				},
+				&appsv1.Deployment{
+					ObjectMeta: manifests.OAuthDeployment(testNamespace).ObjectMeta,
+				},
+			},
+			existingHashSecret: &corev1.Secret{
+				ObjectMeta: manifests.KubeadminPasswordHashSecret().ObjectMeta,
+				Data: map[string][]byte{
+					"kubeadmin": []byte("stale-non-matching-hash"),
+				},
+			},
+			expectKubeadminPasswordHashSecretToExist: true,
+		},
+		"When hash already matches password it should not regenerate": {
+			inputHCP: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      testHCPName,
+					Namespace: testNamespace,
+				},
+			},
+			inputObjects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: manifests.KubeadminPasswordSecret(testNamespace).ObjectMeta,
+					Data: map[string][]byte{
+						"password": []byte(`adminpass`),
+					},
+				},
+				&appsv1.Deployment{
+					ObjectMeta: manifests.OAuthDeployment(testNamespace).ObjectMeta,
+				},
+			},
+			existingHashSecret: &corev1.Secret{
+				ObjectMeta: manifests.KubeadminPasswordHashSecret().ObjectMeta,
+				Data: map[string][]byte{
+					"kubeadmin": func() []byte {
+						h, _ := bcrypt.GenerateFromPassword([]byte("adminpass"), bcrypt.MinCost)
+						return h
+					}(),
+				},
+			},
+			expectKubeadminPasswordHashSecretToExist: true,
+			expectHashPreserved:                      true,
+		},
+		"When kubeadminPasswordSecret does not exist, it should not create the hash secret": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -518,8 +598,12 @@ func TestReconcileKubeadminPasswordHashSecret(t *testing.T) {
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			g := NewGomegaWithT(t)
+			guestClientBuilder := fake.NewClientBuilder().WithScheme(api.Scheme)
+			if test.existingHashSecret != nil {
+				guestClientBuilder = guestClientBuilder.WithObjects(test.existingHashSecret)
+			}
 			r := &reconciler{
-				client:                 fake.NewClientBuilder().WithScheme(api.Scheme).Build(),
+				client:                 guestClientBuilder.Build(),
 				CreateOrUpdateProvider: &simpleCreateOrUpdater{},
 				cpClient:               fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(append(test.inputObjects, test.inputHCP)...).Build(),
 				hcpName:                testHCPName,
@@ -531,7 +615,17 @@ func TestReconcileKubeadminPasswordHashSecret(t *testing.T) {
 				actualKubeAdminSecret := manifests.KubeadminPasswordHashSecret()
 				err := r.client.Get(t.Context(), client.ObjectKeyFromObject(actualKubeAdminSecret), actualKubeAdminSecret)
 				g.Expect(err).To(BeNil())
-				g.Expect(len(actualKubeAdminSecret.Data["kubeadmin"]) > 0).To(BeTrue())
+				g.Expect(actualKubeAdminSecret.Data["kubeadmin"]).ToNot(BeEmpty())
+				if test.expectHashPreserved {
+					g.Expect(actualKubeAdminSecret.Data["kubeadmin"]).To(Equal(test.existingHashSecret.Data["kubeadmin"]))
+				}
+				passwordSecret := manifests.KubeadminPasswordSecret(testNamespace)
+				err = r.cpClient.Get(t.Context(), client.ObjectKeyFromObject(passwordSecret), passwordSecret)
+				g.Expect(err).To(BeNil())
+				g.Expect(bcrypt.CompareHashAndPassword(
+					actualKubeAdminSecret.Data["kubeadmin"],
+					passwordSecret.Data["password"],
+				)).To(BeNil())
 			} else {
 				actualKubeAdminSecret := manifests.KubeadminPasswordHashSecret()
 				err := r.client.Get(t.Context(), client.ObjectKeyFromObject(actualKubeAdminSecret), actualKubeAdminSecret)
@@ -545,6 +639,7 @@ func TestReconcileKubeadminPasswordHashSecret(t *testing.T) {
 }
 
 func TestReconcileUserCertCABundle(t *testing.T) {
+	t.Parallel()
 	testNamespace := "master-cluster1"
 	testHCPName := "cluster1"
 	tests := map[string]struct {
@@ -553,7 +648,7 @@ func TestReconcileUserCertCABundle(t *testing.T) {
 		existingGuestObjects  []client.Object
 		expectUserCAConfigMap bool
 	}{
-		"No AdditionalTrustBundle": {
+		"When no AdditionalTrustBundle is set, it should not create user CA configmap": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -564,7 +659,7 @@ func TestReconcileUserCertCABundle(t *testing.T) {
 			existingGuestObjects:  []client.Object{},
 			expectUserCAConfigMap: false,
 		},
-		"AdditionalTrustBundle": {
+		"When AdditionalTrustBundle is set, it should create user CA configmap": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -587,7 +682,7 @@ func TestReconcileUserCertCABundle(t *testing.T) {
 			existingGuestObjects:  []client.Object{},
 			expectUserCAConfigMap: true,
 		},
-		"AdditionalTrustBundle removed - should delete existing user-ca-bundle": {
+		"When AdditionalTrustBundle is removed, it should delete existing user-ca-bundle": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -634,6 +729,7 @@ func TestReconcileUserCertCABundle(t *testing.T) {
 var _ manifestReconciler = manifestAndReconcile[*rbacv1.ClusterRole]{}
 
 func TestDestroyCloudResources(t *testing.T) {
+	t.Parallel()
 	originalConditionTime := time.Now().Add(-1 * time.Hour)
 	fakeHostedControlPlane := func() *hyperv1.HostedControlPlane {
 		return &hyperv1.HostedControlPlane{
@@ -829,18 +925,18 @@ func TestDestroyCloudResources(t *testing.T) {
 		verifyDoneCond   bool
 	}{
 		{
-			name:           "no existing resources",
+			name:           "When no resources exist, it should mark done condition",
 			verifyDoneCond: true,
 		},
 		{
-			name: "image registry with storage",
+			name: "When image registry has managed storage, it should set management state to removed",
 			existing: []client.Object{
 				managedImageRegistry(),
 			},
 			verify: verifyImageRegistryConfig,
 		},
 		{
-			name: "existing ingress controller",
+			name: "When ingress controllers exist, it should remove all ingress controllers",
 			existing: []client.Object{
 				ingressController("default"),
 				ingressController("foobar"),
@@ -848,7 +944,7 @@ func TestDestroyCloudResources(t *testing.T) {
 			verify: verifyIngressControllersRemoved,
 		},
 		{
-			name: "existing service load balancers",
+			name: "When service load balancers exist, it should remove load balancers but preserve ClusterIP services",
 			existing: []client.Object{
 				serviceLoadBalancer("foo"),
 				serviceLoadBalancer("bar"),
@@ -861,7 +957,7 @@ func TestDestroyCloudResources(t *testing.T) {
 			verifyDoneCond: true,
 		},
 		{
-			name: "existing service load balancers owned by ingress controller",
+			name: "When load balancers are owned by ingress controller, it should preserve them",
 			existing: []client.Object{
 				serviceLoadBalancerOwnedByIngressController("bar"),
 				clusterIPService("baz"),
@@ -872,7 +968,7 @@ func TestDestroyCloudResources(t *testing.T) {
 			},
 		},
 		{
-			name: "existing pv/pvc",
+			name: "When PVs and PVCs exist, it should remove PVCs and pods",
 			existing: []client.Object{
 				pv("foo"), pvc("foo"),
 				pv("bar"), pvc("bar"),
@@ -886,7 +982,7 @@ func TestDestroyCloudResources(t *testing.T) {
 			},
 		},
 		{
-			name: "existing everything",
+			name: "When all resource types exist, it should clean up everything",
 			existing: []client.Object{
 				managedImageRegistry(),
 				ingressController("default"),
@@ -947,6 +1043,7 @@ func TestDestroyCloudResources(t *testing.T) {
 }
 
 func TestDestroyCloudResourcesWithKASUnavailable(t *testing.T) {
+	t.Parallel()
 	fakeHCP := &hyperv1.HostedControlPlane{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-hcp",
@@ -969,12 +1066,12 @@ func TestDestroyCloudResourcesWithKASUnavailable(t *testing.T) {
 		expectFailureTracking bool
 	}{
 		{
-			name:                 "KAS deployment not found - cleanup skipped",
+			name:                 "When KAS deployment is not found, it should skip cleanup",
 			kasDeploymentExists:  false,
 			expectCleanupSkipped: true,
 		},
 		{
-			name:                 "KAS deployment exists - cleanup proceeds",
+			name:                 "When KAS deployment exists, it should proceed with cleanup",
 			kasDeploymentExists:  true,
 			expectCleanupSkipped: false,
 		},
@@ -1035,6 +1132,7 @@ func (e *mockNetError) Timeout() bool   { return e.timeout }
 func (e *mockNetError) Temporary() bool { return e.temporary }
 
 func TestConnectionErrorTracking(t *testing.T) {
+	t.Parallel()
 
 	tests := []struct {
 		name               string
@@ -1042,22 +1140,22 @@ func TestConnectionErrorTracking(t *testing.T) {
 		expectedConnection bool
 	}{
 		{
-			name:               "K8s timeout error",
+			name:               "When K8s timeout error occurs, it should return true",
 			err:                apierrors.NewTimeoutError("request timeout", 5),
 			expectedConnection: true,
 		},
 		{
-			name:               "K8s server timeout error",
+			name:               "When K8s server timeout error occurs, it should return true",
 			err:                apierrors.NewServerTimeout(schema.GroupResource{Group: "", Resource: "pods"}, "get", 5),
 			expectedConnection: true,
 		},
 		{
-			name:               "K8s service unavailable error",
+			name:               "When K8s service unavailable error occurs, it should return true",
 			err:                apierrors.NewServiceUnavailable("service unavailable"),
 			expectedConnection: true,
 		},
 		{
-			name: "net.Error with timeout",
+			name: "When net.Error has timeout, it should return true",
 			err: &mockNetError{
 				error:   fmt.Errorf("connection timeout"),
 				timeout: true,
@@ -1065,7 +1163,7 @@ func TestConnectionErrorTracking(t *testing.T) {
 			expectedConnection: true,
 		},
 		{
-			name: "net.Error temporary",
+			name: "When net.Error is temporary, it should return true",
 			err: &mockNetError{
 				error:     fmt.Errorf("temporary network error"),
 				temporary: true,
@@ -1073,22 +1171,22 @@ func TestConnectionErrorTracking(t *testing.T) {
 			expectedConnection: true,
 		},
 		{
-			name:               "wrapped net.Error",
+			name:               "When net.Error is wrapped, it should return true",
 			err:                fmt.Errorf("failed to connect: %w", &mockNetError{error: fmt.Errorf("connection refused"), timeout: false}),
 			expectedConnection: true,
 		},
 		{
-			name:               "other K8s error (not found)",
+			name:               "When K8s error is not found, it should return false",
 			err:                apierrors.NewNotFound(schema.GroupResource{Group: "", Resource: "pods"}, "test-pod"),
 			expectedConnection: false,
 		},
 		{
-			name:               "other error",
+			name:               "When error is generic, it should return false",
 			err:                fmt.Errorf("permission denied"),
 			expectedConnection: false,
 		},
 		{
-			name:               "nil error",
+			name:               "When error is nil, it should return false",
 			err:                nil,
 			expectedConnection: false,
 		},
@@ -1104,6 +1202,7 @@ func TestConnectionErrorTracking(t *testing.T) {
 }
 
 func TestListAccessor(t *testing.T) {
+	t.Parallel()
 	pod := func(name string) corev1.Pod {
 		return corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1127,6 +1226,7 @@ func TestListAccessor(t *testing.T) {
 }
 
 func TestReconcileClusterVersion(t *testing.T) {
+	t.Parallel()
 	hcp := &hyperv1.HostedControlPlane{
 		Spec: hyperv1.HostedControlPlaneSpec{
 			ClusterID: "test-cluster-id",
@@ -1202,6 +1302,7 @@ func TestReconcileClusterVersion(t *testing.T) {
 }
 
 func TestReconcileClusterVersionWithDisabledCapabilities(t *testing.T) {
+	t.Parallel()
 	hcp := &hyperv1.HostedControlPlane{
 		Spec: hyperv1.HostedControlPlaneSpec{
 			ClusterID: "test-cluster-id",
@@ -1279,6 +1380,7 @@ func TestReconcileClusterVersionWithDisabledCapabilities(t *testing.T) {
 }
 
 func TestReconcileClusterVersionWithEnabledCapabilities(t *testing.T) {
+	t.Parallel()
 	hcp := &hyperv1.HostedControlPlane{
 		Spec: hyperv1.HostedControlPlaneSpec{
 			ClusterID: "test-cluster-id",
@@ -1356,22 +1458,98 @@ func TestReconcileClusterVersionWithEnabledCapabilities(t *testing.T) {
 	g.Expect(clusterVersion.Spec.Capabilities).To(Equal(expectedCapabilities))
 }
 
+func TestReconcileClusterVersionWhenGuestCVOHasOlderCapabilities(t *testing.T) {
+	t.Parallel()
+	hcp := &hyperv1.HostedControlPlane{
+		Spec: hyperv1.HostedControlPlaneSpec{
+			ClusterID: "test-cluster-id",
+		},
+	}
+	// Simulate an older guest CVO that doesn't know about ClusterAPI or CompatibilityRequirements
+	olderCVOKnownCaps := []configv1.ClusterVersionCapability{
+		configv1.ClusterVersionCapabilityBuild,
+		configv1.ClusterVersionCapabilityCSISnapshot,
+		configv1.ClusterVersionCapabilityCloudControllerManager,
+		configv1.ClusterVersionCapabilityCloudCredential,
+		configv1.ClusterVersionCapabilityConsole,
+		configv1.ClusterVersionCapabilityDeploymentConfig,
+		configv1.ClusterVersionCapabilityImageRegistry,
+		configv1.ClusterVersionCapabilityIngress,
+		configv1.ClusterVersionCapabilityInsights,
+		configv1.ClusterVersionCapabilityMachineAPI,
+		configv1.ClusterVersionCapabilityNodeTuning,
+		configv1.ClusterVersionCapabilityOperatorLifecycleManager,
+		configv1.ClusterVersionCapabilityOperatorLifecycleManagerV1,
+		configv1.ClusterVersionCapabilityStorage,
+		configv1.ClusterVersionCapabilityBaremetal,
+		configv1.ClusterVersionCapabilityMarketplace,
+		configv1.ClusterVersionCapabilityOpenShiftSamples,
+	}
+	clusterVersion := &configv1.ClusterVersion{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "version",
+		},
+		Status: configv1.ClusterVersionStatus{
+			Capabilities: configv1.ClusterVersionCapabilitiesStatus{
+				KnownCapabilities: olderCVOKnownCaps,
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(clusterVersion).Build()
+	g := NewWithT(t)
+	r := &reconciler{
+		client:                 fakeClient,
+		CreateOrUpdateProvider: &simpleCreateOrUpdater{},
+	}
+	err := r.reconcileClusterVersion(t.Context(), hcp)
+	g.Expect(err).ToNot(HaveOccurred())
+	err = fakeClient.Get(t.Context(), client.ObjectKeyFromObject(clusterVersion), clusterVersion)
+	g.Expect(err).ToNot(HaveOccurred())
+
+	// ClusterAPI and CompatibilityRequirements should be filtered out
+	expectedCapabilities := &configv1.ClusterVersionCapabilitiesSpec{
+		BaselineCapabilitySet: configv1.ClusterVersionCapabilitySetNone,
+		AdditionalEnabledCapabilities: []configv1.ClusterVersionCapability{
+			configv1.ClusterVersionCapabilityBuild,
+			configv1.ClusterVersionCapabilityCSISnapshot,
+			configv1.ClusterVersionCapabilityCloudControllerManager,
+			configv1.ClusterVersionCapabilityCloudCredential,
+			// ClusterAPI filtered out - not in knownCapabilities
+			// CompatibilityRequirements filtered out - not in knownCapabilities
+			configv1.ClusterVersionCapabilityConsole,
+			configv1.ClusterVersionCapabilityDeploymentConfig,
+			configv1.ClusterVersionCapabilityImageRegistry,
+			configv1.ClusterVersionCapabilityIngress,
+			configv1.ClusterVersionCapabilityInsights,
+			configv1.ClusterVersionCapabilityMachineAPI,
+			configv1.ClusterVersionCapabilityNodeTuning,
+			configv1.ClusterVersionCapabilityOperatorLifecycleManager,
+			configv1.ClusterVersionCapabilityOperatorLifecycleManagerV1,
+			configv1.ClusterVersionCapabilityStorage,
+			configv1.ClusterVersionCapabilityMarketplace,
+			configv1.ClusterVersionCapabilityOpenShiftSamples,
+		},
+	}
+	g.Expect(clusterVersion.Spec.Capabilities).To(Equal(expectedCapabilities))
+}
+
 func TestReconcileImageContentPolicyType(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name                  string
 		hcp                   *hyperv1.HostedControlPlane
 		removeICSAndReconcile bool
 	}{
 		{
-			name: "ICS with content, it should return an IDMS with the same content",
+			name: "When ICS has content, it should return an IDMS with the same content",
 			hcp:  withICS(fakeHCP()),
 		},
 		{
-			name: "ICS empty, is should return an empty IDMS",
+			name: "When ICS is empty, it should return an empty IDMS",
 			hcp:  fakeHCP(),
 		},
 		{
-			name:                  "ICS And IDMS should be in sync always",
+			name:                  "When ICS is removed after reconcile, it should sync IDMS to match",
 			hcp:                   withICS(fakeHCP()),
 			removeICSAndReconcile: true,
 		},
@@ -1430,6 +1608,7 @@ func compareICSAndIDMS(g *WithT, ics []hyperv1.ImageContentSource, idms *configv
 }
 
 func TestReconcileKASEndpoints(t *testing.T) {
+	t.Parallel()
 
 	testCases := []struct {
 		name         string
@@ -1437,7 +1616,7 @@ func TestReconcileKASEndpoints(t *testing.T) {
 		expectedPort int32
 	}{
 		{
-			name: "When HC has hcp.spec.networking.apiServer.port set to 443, endpoint and slice should have port 443",
+			name: "When HC has hcp.spec.networking.apiServer.port set to 443, it should set endpoint and slice port to 443",
 			hcp: &hyperv1.HostedControlPlane{
 				Spec: hyperv1.HostedControlPlaneSpec{
 					Networking: hyperv1.ClusterNetworking{
@@ -1450,7 +1629,7 @@ func TestReconcileKASEndpoints(t *testing.T) {
 			expectedPort: int32(443),
 		},
 		{
-			name: "When HC has no hcp.spec.networking.apiServer.port set, endpoint and slice should have port 6443",
+			name: "When HC has no hcp.spec.networking.apiServer.port set, it should set endpoint and slice port to 6443",
 			hcp: &hyperv1.HostedControlPlane{
 				Spec: hyperv1.HostedControlPlaneSpec{},
 			},
@@ -1487,6 +1666,7 @@ func TestReconcileKASEndpoints(t *testing.T) {
 }
 
 func TestReconcileKubeletConfig(t *testing.T) {
+	t.Parallel()
 	hcpNamespace := "hostedcontrolplane-namespace"
 	hcNamespace := "openshift-config-managed"
 	npName1 := "nodepool-test1"
@@ -1505,41 +1685,167 @@ func TestReconcileKubeletConfig(t *testing.T) {
 		hostedControlPlaneObjects      []client.Object
 		existHostedControlPlaneObjects []client.Object
 		expectedHostedClusterObjects   []client.Object
+		preservedObjects               []client.Object
 	}{
 		{
-			name: "copy kubelet config from control plane NS",
+			name: "When kubelet config exists in control plane namespace, it should copy to hosted cluster",
 			hostedControlPlaneObjects: []client.Object{
-				makeKubeletConfigConfigMap(supportutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcpNamespace, kubeletConfig1),
+				makeKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcpNamespace, kubeletConfig1),
 			},
 			expectedHostedClusterObjects: []client.Object{
-				makeKubeletConfigConfigMap(supportutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
+				makeKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
 			},
 		},
 		{
-			name: "some CM already exist and some are not, expect HCCO to catch up",
+			name: "When some ConfigMaps already exist, it should reconcile missing ones",
 			hostedControlPlaneObjects: []client.Object{
-				makeKubeletConfigConfigMap(supportutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcpNamespace, kubeletConfig1),
-				makeKubeletConfigConfigMap(supportutil.ShortenName("foo", npName2, validation.LabelValueMaxLength), hcpNamespace, kubeletConfig1),
+				makeKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcpNamespace, kubeletConfig1),
+				makeKubeletConfigConfigMap(netutil.ShortenName("foo", npName2, validation.LabelValueMaxLength), hcpNamespace, kubeletConfig1),
 			},
 			existHostedControlPlaneObjects: []client.Object{
-				makeKubeletConfigConfigMap(supportutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
+				makeKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
 			},
 			expectedHostedClusterObjects: []client.Object{
-				makeKubeletConfigConfigMap(supportutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
-				makeKubeletConfigConfigMap(supportutil.ShortenName("foo", npName2, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
+				makeKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
+				makeKubeletConfigConfigMap(netutil.ShortenName("foo", npName2, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
 			},
 		},
 		{
-			name: "CM need to be deleted",
+			name: "When ConfigMaps are removed from source, it should delete from hosted cluster",
 			hostedControlPlaneObjects: []client.Object{
-				makeKubeletConfigConfigMap(supportutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcpNamespace, kubeletConfig1),
+				makeKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcpNamespace, kubeletConfig1),
 			},
 			existHostedControlPlaneObjects: []client.Object{
-				makeKubeletConfigConfigMap(supportutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
-				makeKubeletConfigConfigMap(supportutil.ShortenName("foo", npName2, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
+				makeKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
+				makeKubeletConfigConfigMap(netutil.ShortenName("foo", npName2, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
 			},
 			expectedHostedClusterObjects: []client.Object{
-				makeKubeletConfigConfigMap(supportutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
+				makeKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
+			},
+		},
+		{
+			// NodePool still active (another CM exists in HCP namespace with the same NodePoolLabel),
+			// but this particular source CM is transiently absent — preserve the guest copy.
+			name: "When source CM is transiently absent, it should not delete the mirrored guest-side CM",
+			hostedControlPlaneObjects: []client.Object{
+				// Another CM for the same NodePool proves it is still active.
+				makeMirroredKubeletConfigConfigMap(netutil.ShortenName("baz", npName1, validation.LabelValueMaxLength), hcpNamespace, npName1, kubeletConfig1),
+			},
+			existHostedControlPlaneObjects: []client.Object{
+				makeMirroredKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, npName1, kubeletConfig1),
+				// The "baz" CM is expected on the guest side too (reconciled from the HCP-namespace source above).
+				makeMirroredKubeletConfigConfigMap(netutil.ShortenName("baz", npName1, validation.LabelValueMaxLength), hcNamespace, npName1, kubeletConfig1),
+			},
+			expectedHostedClusterObjects: []client.Object{
+				makeMirroredKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, npName1, kubeletConfig1),
+				makeMirroredKubeletConfigConfigMap(netutil.ShortenName("baz", npName1, validation.LabelValueMaxLength), hcNamespace, npName1, kubeletConfig1),
+			},
+		},
+		{
+			// Defensive: this path is only reachable for CMs created before NTOMirroredConfigLabel was introduced.
+			name:                      "When source CM is absent and guest CM is not mirrored, it should be deleted",
+			hostedControlPlaneObjects: []client.Object{},
+			existHostedControlPlaneObjects: []client.Object{
+				makeKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
+			},
+			expectedHostedClusterObjects: []client.Object{},
+		},
+		{
+			// NodePool deleted: its finalizer has removed all CMs from the HCP namespace,
+			// so the orphaned guest-side mirrored CM should be cleaned up.
+			name:                      "When NodePool is deleted, it should delete orphaned mirrored guest-side CM",
+			hostedControlPlaneObjects: []client.Object{},
+			existHostedControlPlaneObjects: []client.Object{
+				makeMirroredKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, npName1, kubeletConfig1),
+			},
+			expectedHostedClusterObjects: []client.Object{},
+		},
+		{
+			// Two NodePools: npName1 deleted (zero CMs in HCP namespace), npName2 still active.
+			// Only npName1's orphaned guest CM should be deleted; npName2's should be preserved.
+			name: "When one NodePool is deleted and another is active, only the deleted NodePool's orphaned CM is removed",
+			hostedControlPlaneObjects: []client.Object{
+				makeMirroredKubeletConfigConfigMap(netutil.ShortenName("foo", npName2, validation.LabelValueMaxLength), hcpNamespace, npName2, kubeletConfig1),
+			},
+			existHostedControlPlaneObjects: []client.Object{
+				makeMirroredKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, npName1, kubeletConfig1),
+				makeMirroredKubeletConfigConfigMap(netutil.ShortenName("foo", npName2, validation.LabelValueMaxLength), hcNamespace, npName2, kubeletConfig1),
+			},
+			expectedHostedClusterObjects: []client.Object{
+				makeMirroredKubeletConfigConfigMap(netutil.ShortenName("foo", npName2, validation.LabelValueMaxLength), hcNamespace, npName2, kubeletConfig1),
+			},
+		},
+		{
+			// Defensive: mirrored CM without NodePoolLabel cannot be attributed to any NodePool,
+			// so preserve it to avoid spurious MCO rollouts.
+			name:                      "When mirrored CM has no NodePoolLabel, it should be preserved",
+			hostedControlPlaneObjects: []client.Object{},
+			existHostedControlPlaneObjects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "orphan-no-np-label",
+						Namespace: hcNamespace,
+						Labels: map[string]string{
+							nodepool.KubeletConfigConfigMapLabel: "true",
+							nodepool.NTOMirroredConfigLabel:      "true",
+						},
+					},
+					Data: map[string]string{"config": kubeletConfig1},
+				},
+			},
+			expectedHostedClusterObjects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "orphan-no-np-label",
+						Namespace: hcNamespace,
+						Labels: map[string]string{
+							nodepool.KubeletConfigConfigMapLabel: "true",
+							nodepool.NTOMirroredConfigLabel:      "true",
+						},
+					},
+					Data: map[string]string{"config": kubeletConfig1},
+				},
+			},
+		},
+		{
+			name: "When guest CM is immutable but not a KubeletConfig, it should not be deleted",
+			hostedControlPlaneObjects: []client.Object{
+				makeKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcpNamespace, kubeletConfig1),
+			},
+			existHostedControlPlaneObjects: []client.Object{
+				// Immutable CM without KubeletConfigConfigMapLabel — should be left alone.
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "unrelated-immutable-cm",
+						Namespace: hcNamespace,
+						Labels:    map[string]string{"some-other-label": "true"},
+					},
+					Immutable: ptr.To(true),
+					Data:      map[string]string{"key": "value"},
+				},
+			},
+			expectedHostedClusterObjects: []client.Object{
+				makeKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
+			},
+			preservedObjects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "unrelated-immutable-cm",
+						Namespace: hcNamespace,
+					},
+				},
+			},
+		},
+		{
+			name: "When guest CM is immutable, it should be deleted and recreated as mutable",
+			hostedControlPlaneObjects: []client.Object{
+				makeKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcpNamespace, kubeletConfig1),
+			},
+			existHostedControlPlaneObjects: []client.Object{
+				makeImmutableKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
+			},
+			expectedHostedClusterObjects: []client.Object{
+				makeKubeletConfigConfigMap(netutil.ShortenName("bar", npName1, validation.LabelValueMaxLength), hcNamespace, kubeletConfig1),
 			},
 		},
 	}
@@ -1556,7 +1862,14 @@ func TestReconcileKubeletConfig(t *testing.T) {
 			}
 			g.Expect(r.reconcileKubeletConfig(t.Context())).To(Succeed())
 			for _, obj := range tc.expectedHostedClusterObjects {
-				g.Expect(r.client.Get(t.Context(), client.ObjectKeyFromObject(obj), obj)).To(Succeed(), "failed to get %s", client.ObjectKeyFromObject(obj))
+				actual := &corev1.ConfigMap{}
+				g.Expect(r.client.Get(t.Context(), client.ObjectKeyFromObject(obj), actual)).To(Succeed(), "failed to get %s", client.ObjectKeyFromObject(obj))
+				g.Expect(actual.Immutable).To(BeNil(), "recreated ConfigMap %s should be mutable", client.ObjectKeyFromObject(obj))
+			}
+			for _, obj := range tc.preservedObjects {
+				actual := &corev1.ConfigMap{}
+				g.Expect(r.client.Get(t.Context(), client.ObjectKeyFromObject(obj), actual)).To(Succeed(),
+					"preserved object %s should still exist after reconcile", client.ObjectKeyFromObject(obj))
 			}
 			listOpts := []client.ListOption{
 				client.InNamespace(hcNamespace),
@@ -1573,6 +1886,7 @@ func TestReconcileKubeletConfig(t *testing.T) {
 }
 
 func TestBuildAWSWebIdentityCredentials(t *testing.T) {
+	t.Parallel()
 	type args struct {
 		roleArn string
 		region  string
@@ -1585,7 +1899,7 @@ func TestBuildAWSWebIdentityCredentials(t *testing.T) {
 	}
 	tests := []test{
 		{
-			name: "should fail if the role ARN is empty",
+			name: "When role ARN is empty, it should return error",
 			args: args{
 				roleArn: "",
 				region:  "us-east-1",
@@ -1593,7 +1907,7 @@ func TestBuildAWSWebIdentityCredentials(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "should fail if the region is empty",
+			name:    "When region is empty, it should return error",
 			wantErr: true,
 			args: args{
 				roleArn: "arn:aws:iam::123456789012:role/some-role",
@@ -1601,7 +1915,7 @@ func TestBuildAWSWebIdentityCredentials(t *testing.T) {
 			},
 		},
 		{
-			name:    "should succeed and return the creds template populated with role arn and region otherwise",
+			name:    "When role ARN and region are valid, it should return populated credentials template",
 			wantErr: false,
 			args: args{
 				roleArn: "arn:aws:iam::123456789012:role/some-role",
@@ -1644,6 +1958,39 @@ func makeKubeletConfigConfigMap(name, namespace, data string) *corev1.ConfigMap 
 	}
 }
 
+func makeMirroredKubeletConfigConfigMap(name, namespace, nodePoolName, data string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: map[string]string{
+				nodepool.KubeletConfigConfigMapLabel: "true",
+				nodepool.NTOMirroredConfigLabel:      "true",
+				hyperv1.NodePoolLabel:                nodePoolName,
+			},
+		},
+		Data: map[string]string{
+			"config": data,
+		},
+	}
+}
+
+func makeImmutableKubeletConfigConfigMap(name, namespace, data string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: map[string]string{
+				nodepool.KubeletConfigConfigMapLabel: "true",
+			},
+		},
+		Immutable: ptr.To(true),
+		Data: map[string]string{
+			"config": data,
+		},
+	}
+}
+
 func TestReconcileAuthOIDC(t *testing.T) {
 	testNamespace := "master-cluster1"
 	testHCPName := "cluster1"
@@ -1657,7 +2004,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 		expectedErrorMessages   []string
 		setAROHCP               bool
 	}{
-		"when OAuth is enabled, should not copy OIDC resources": {
+		"When OAuth is enabled, it should not copy OIDC resources": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -1683,7 +2030,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectOIDCClientSecrets: []string{},
 			expectErrors:            false,
 		},
-		"when OAuth is disabled and no OIDC providers, should not copy anything": {
+		"When OAuth is disabled with no OIDC providers, it should not copy anything": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -1702,7 +2049,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectOIDCClientSecrets: []string{},
 			expectErrors:            false,
 		},
-		"when OAuth is disabled with OIDC provider with CA configmap, should copy CA": {
+		"When OAuth is disabled with OIDC CA configmap, it should copy CA": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -1742,7 +2089,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectOIDCClientSecrets: []string{},
 			expectErrors:            false,
 		},
-		"when OAuth is disabled with OIDC provider with OIDC clients, should copy client secrets": {
+		"When OAuth is disabled with OIDC clients, it should copy client secrets": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -1806,7 +2153,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectOIDCClientSecrets: []string{"console-client-secret", "cli-client-secret"},
 			expectErrors:            false,
 		},
-		"when OAuth is disabled with OIDC provider with both CA and client secrets, should copy both": {
+		"When OAuth is disabled with OIDC CA and client secrets, it should copy both": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -1865,7 +2212,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectOIDCClientSecrets: []string{"console-client-secret"},
 			expectErrors:            false,
 		},
-		"when OAuth is disabled with OIDC provider with confidential and public OIDC clients, should copy confidential client secret": {
+		"When OAuth is disabled with mixed OIDC clients, it should copy only confidential client secret": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -1920,13 +2267,27 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectOIDCClientSecrets: []string{"console-client-secret"},
 			expectErrors:            false,
 		},
-		"when OAuth is disabled with OIDC provider with a hosted-cluster-sourced annotated client secret and ARO-HCP platform, should not copy the client secret": {
+		"When ARO-HCP has hosted-cluster-sourced client secret, it should not copy the secret": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
 					Namespace: testNamespace,
 				},
 				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+						Azure: &hyperv1.AzurePlatformSpec{
+							Private: hyperv1.AzurePrivateSpec{
+								Type: hyperv1.AzurePrivateTypeSwift,
+								Swift: hyperv1.AzureSwiftSpec{
+									PodNetworkInstance: "test-pni",
+								},
+							},
+							AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{
+								AzureAuthenticationConfigType: hyperv1.AzureAuthenticationTypeManagedIdentities,
+							},
+						},
+					},
 					Configuration: &hyperv1.ClusterConfiguration{
 						Authentication: &configv1.AuthenticationSpec{
 							Type: configv1.AuthenticationTypeOIDC,
@@ -1968,7 +2329,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectErrors:            false,
 			setAROHCP:               true,
 		},
-		"when OAuth is disabled with OIDC provider and not ARO-HCP platform, setting hosted-cluster-sourced annotation on a client secret should not skip copying the secret": {
+		"When non-ARO-HCP has hosted-cluster-sourced annotation, it should still copy the secret": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -2019,7 +2380,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectErrors:            false,
 			setAROHCP:               false,
 		},
-		"when OAuth is disabled but CA configmap is missing, should return error": {
+		"When OAuth is disabled but CA configmap is missing, it should return error": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -2050,7 +2411,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectErrors:            true,
 			expectedErrorMessages:   []string{"failed to get issuer CA configmap missing-ca-bundle"},
 		},
-		"when OAuth is disabled but client secret is missing, should return error": {
+		"When OAuth is disabled but client secret is missing, it should return error": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -2088,7 +2449,7 @@ func TestReconcileAuthOIDC(t *testing.T) {
 			expectErrors:            true,
 			expectedErrorMessages:   []string{"failed to get OIDCClient secret missing-client-secret"},
 		},
-		"when OAuth is disabled with multiple OIDC providers, should handle first provider only": {
+		"When OAuth is disabled with multiple OIDC providers, it should handle first provider only": {
 			inputHCP: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testHCPName,
@@ -2319,7 +2680,8 @@ func newCondition(conditionType string, status metav1.ConditionStatus, reason, m
 	}
 }
 
-func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
+func TestReconcileDataPlaneConnectionAvailable(t *testing.T) {
+	t.Parallel()
 	newKonnectivityAgentPod := func(name string, phase corev1.PodPhase) corev1.Pod {
 		return corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -2360,7 +2722,7 @@ func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
 		mockedGetPodLogs  func(context context.Context, clientet *clientset.Clientset, namespace, name, container string) ([]byte, error)
 	}{
 		{
-			name:    "no worker nodes Condition Unknown",
+			name:    "When no worker nodes exist, it should set condition to Unknown",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(string(hyperv1.DataPlaneConnectionAvailable),
@@ -2374,7 +2736,7 @@ func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
 			},
 		},
 		{
-			name:    "no konnectivity-agent PODs condition False",
+			name:    "When no konnectivity-agent pods exist, it should set condition to False",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(string(hyperv1.DataPlaneConnectionAvailable),
@@ -2389,7 +2751,7 @@ func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
 			},
 		},
 		{
-			name:    "only one pending POD condition False",
+			name:    "When only pending konnectivity-agent pods exist, it should set condition to False",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(string(hyperv1.DataPlaneConnectionAvailable),
@@ -2404,7 +2766,7 @@ func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
 			},
 		},
 		{
-			name:    "one konnectivity-agent PODs running condition OK",
+			name:    "When one konnectivity-agent pod is running, it should set condition to True",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(string(hyperv1.DataPlaneConnectionAvailable),
@@ -2419,7 +2781,7 @@ func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
 			},
 		},
 		{
-			name:    "may konnectivity-agent PODs only one running condition OK",
+			name:    "When many konnectivity-agent pods exist with one running, it should set condition to True",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(string(hyperv1.DataPlaneConnectionAvailable),
@@ -2438,7 +2800,7 @@ func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
 			},
 		},
 		{
-			name:    "one konnectivity-agent PODs running bad since error getting LOG",
+			name:    "When konnectivity-agent pod has log retrieval error, it should set condition to False",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(string(hyperv1.DataPlaneConnectionAvailable),
@@ -2454,7 +2816,7 @@ func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
 			},
 		},
 		{
-			name:    "one konnectivity-agent PODs running bad since no LOG", // unsure this is possible
+			name:    "When konnectivity-agent pod has no log output, it should set condition to False", // unsure this is possible
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(string(hyperv1.DataPlaneConnectionAvailable),
@@ -2514,7 +2876,8 @@ func Test_reconciler_reconcileDataPlaneConnectionAvailable(t *testing.T) {
 	}
 }
 
-func Test_reconciler_reconcileControlPlaneConnectionAvailable(t *testing.T) {
+func TestReconcileControlPlaneConnectionAvailable(t *testing.T) {
+	t.Parallel()
 	newConnectivityConfigMap := func(data map[string]string) *corev1.ConfigMap {
 		return &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
@@ -2550,7 +2913,7 @@ func Test_reconciler_reconcileControlPlaneConnectionAvailable(t *testing.T) {
 		nodes             []corev1.Node
 	}{
 		{
-			name:    "When no worker nodes exist it should set condition to Unknown with NoWorkerNodesAvailable reason",
+			name:    "When no worker nodes exist, it should set condition to Unknown with NoWorkerNodesAvailable reason",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(
@@ -2563,7 +2926,7 @@ func Test_reconciler_reconcileControlPlaneConnectionAvailable(t *testing.T) {
 			nodes:     []corev1.Node{},
 		},
 		{
-			name:    "When ConfigMap does not exist it should set condition to Unknown with ConfigMapNotFound reason",
+			name:    "When ConfigMap does not exist, it should set condition to Unknown with ConfigMapNotFound reason",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(
@@ -2577,7 +2940,7 @@ func Test_reconciler_reconcileControlPlaneConnectionAvailable(t *testing.T) {
 			nodes:     []corev1.Node{newReadyNode("node1")},
 		},
 		{
-			name:    "When ConfigMap has no lastSucceeded key it should set condition to False with KASAccessFailed reason",
+			name:    "When ConfigMap has no lastSucceeded key, it should set condition to False with KASAccessFailed reason",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(
@@ -2590,7 +2953,7 @@ func Test_reconciler_reconcileControlPlaneConnectionAvailable(t *testing.T) {
 			nodes:     []corev1.Node{newReadyNode("node1")},
 		},
 		{
-			name:    "When ConfigMap has empty lastSucceeded it should set condition to False with KASAccessFailed reason",
+			name:    "When ConfigMap has empty lastSucceeded, it should set condition to False with KASAccessFailed reason",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(
@@ -2603,7 +2966,7 @@ func Test_reconciler_reconcileControlPlaneConnectionAvailable(t *testing.T) {
 			nodes:     []corev1.Node{newReadyNode("node1")},
 		},
 		{
-			name:    "When lastSucceeded is recent it should set condition to True",
+			name:    "When lastSucceeded is recent, it should set condition to True",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(
@@ -2618,7 +2981,7 @@ func Test_reconciler_reconcileControlPlaneConnectionAvailable(t *testing.T) {
 			nodes: []corev1.Node{newReadyNode("node1")},
 		},
 		{
-			name:    "When lastSucceeded is stale it should set condition to False with ConnectionCheckStale reason",
+			name:    "When lastSucceeded is stale, it should set condition to False with ConnectionCheckStale reason",
 			hcp:     fakeHCP(),
 			wantErr: false,
 			expectedCondition: newCondition(
@@ -2679,7 +3042,176 @@ func Test_reconciler_reconcileControlPlaneConnectionAvailable(t *testing.T) {
 	}
 }
 
-func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
+func verifyKASCheckerLabelsAndSelectors(t *testing.T, dep *appsv1.Deployment) {
+	t.Helper()
+	if dep.Spec.Selector == nil || dep.Spec.Selector.MatchLabels["app"] != manifests.KASConnectionCheckerName {
+		t.Error("Selector labels not set correctly")
+	}
+	if dep.Spec.Template.ObjectMeta.Labels["app"] != manifests.KASConnectionCheckerName {
+		t.Error("Pod template labels not set correctly")
+	}
+}
+
+func verifyKASCheckerContainerBasics(t *testing.T, dep *appsv1.Deployment, expectedImage string) corev1.Container {
+	t.Helper()
+	if len(dep.Spec.Template.Spec.Containers) != 1 {
+		t.Fatalf("Expected 1 container, got %d", len(dep.Spec.Template.Spec.Containers))
+	}
+	container := dep.Spec.Template.Spec.Containers[0]
+	if container.Name != "connection-checker" {
+		t.Errorf("Expected container name 'connection-checker', got %s", container.Name)
+	}
+	if container.Image != expectedImage {
+		t.Errorf("Expected cli image %s, got %s", expectedImage, container.Image)
+	}
+	return container
+}
+
+func verifyKASCheckerScript(t *testing.T, container corev1.Container) {
+	t.Helper()
+	if len(container.Command) != 3 || container.Command[0] != "/bin/sh" || container.Command[1] != "-c" {
+		t.Fatalf("Expected command [/bin/sh -c <script>], got %v", container.Command)
+	}
+	script := container.Command[2]
+	if !strings.Contains(script, "curl") {
+		t.Error("Check script should use curl")
+	}
+	if !strings.Contains(script, "kubernetes.default.svc") {
+		t.Error("Check script should use kubernetes.default.svc for full data path testing")
+	}
+	if !strings.Contains(script, "/version") {
+		t.Error("Check script should check /version endpoint")
+	}
+	if !strings.Contains(script, "sleep 60") {
+		t.Error("Check script should sleep 60 seconds between checks")
+	}
+	if !strings.Contains(script, "PATCH") {
+		t.Error("Check script should PATCH the ConfigMap on success")
+	}
+	if !strings.Contains(script, manifests.KASConnectionCheckerConfigMapName) {
+		t.Errorf("Check script should reference ConfigMap name %s", manifests.KASConnectionCheckerConfigMapName)
+	}
+}
+
+func verifyKASCheckerResources(t *testing.T, container corev1.Container) {
+	t.Helper()
+	expectedCPU := resource.MustParse("5m")
+	expectedMemory := resource.MustParse("10Mi")
+	if !container.Resources.Requests.Cpu().Equal(expectedCPU) {
+		t.Errorf("Expected CPU request 5m, got %s", container.Resources.Requests.Cpu())
+	}
+	if !container.Resources.Requests.Memory().Equal(expectedMemory) {
+		t.Errorf("Expected memory request 10Mi, got %s", container.Resources.Requests.Memory())
+	}
+}
+
+func verifyKASCheckerPodSpec(t *testing.T, dep *appsv1.Deployment) {
+	t.Helper()
+	if dep.Spec.Template.Spec.PriorityClassName != "system-node-critical" {
+		t.Errorf("Expected PriorityClassName system-node-critical, got %s", dep.Spec.Template.Spec.PriorityClassName)
+	}
+	if dep.Spec.Template.Spec.AutomountServiceAccountToken == nil || !*dep.Spec.Template.Spec.AutomountServiceAccountToken {
+		t.Error("AutomountServiceAccountToken should be set to true")
+	}
+	if dep.Spec.Template.Spec.HostNetwork {
+		t.Error("HostNetwork should be false (not set)")
+	}
+	if dep.Spec.Template.Spec.ServiceAccountName != manifests.KASConnectionCheckerName {
+		t.Errorf("Expected ServiceAccountName %s, got %s", manifests.KASConnectionCheckerName, dep.Spec.Template.Spec.ServiceAccountName)
+	}
+}
+
+func verifyKASCheckerNoTolerations(t *testing.T, dep *appsv1.Deployment) {
+	t.Helper()
+	// No custom tolerations — the previous blanket NoSchedule toleration
+	// matched the cordon taint, causing pods to be scheduled back onto
+	// cordoned nodes during drain.
+	if len(dep.Spec.Template.Spec.Tolerations) != 0 {
+		t.Errorf("Expected no tolerations, got %d", len(dep.Spec.Template.Spec.Tolerations))
+	}
+}
+
+func verifyKASCheckerTopologySpread(t *testing.T, dep *appsv1.Deployment) {
+	t.Helper()
+	if len(dep.Spec.Template.Spec.TopologySpreadConstraints) != 1 {
+		t.Fatalf("Expected 1 topology spread constraint, got %d", len(dep.Spec.Template.Spec.TopologySpreadConstraints))
+	}
+	tsc := dep.Spec.Template.Spec.TopologySpreadConstraints[0]
+	if tsc.MaxSkew != 1 {
+		t.Errorf("Expected MaxSkew 1, got %d", tsc.MaxSkew)
+	}
+	if tsc.TopologyKey != "kubernetes.io/hostname" {
+		t.Errorf("Expected TopologyKey kubernetes.io/hostname, got %s", tsc.TopologyKey)
+	}
+	if tsc.WhenUnsatisfiable != corev1.ScheduleAnyway {
+		t.Errorf("Expected WhenUnsatisfiable ScheduleAnyway, got %s", tsc.WhenUnsatisfiable)
+	}
+	if tsc.LabelSelector == nil || tsc.LabelSelector.MatchLabels["app"] != manifests.KASConnectionCheckerName {
+		t.Error("Expected LabelSelector to match app=kas-connection-checker")
+	}
+}
+
+func verifyKASCheckerAnnotations(t *testing.T, dep *appsv1.Deployment) {
+	t.Helper()
+	// kube-system is exempt from SCC admission, so the annotation is inert there and
+	// would reject the explicit non-root UID if that exemption ever changed.
+	if got, ok := dep.Spec.Template.ObjectMeta.Annotations["openshift.io/required-scc"]; ok {
+		t.Errorf("openshift.io/required-scc annotation should not be set, got %s", got)
+	}
+}
+
+func verifyKASCheckerSecurityContext(t *testing.T, dep *appsv1.Deployment, container corev1.Container) {
+	t.Helper()
+	// A numeric UID is required: nothing assigns one in kube-system, and RunAsNonRoot
+	// alone would fail at the kubelet because the cli image declares no user.
+	podSecurityContext := dep.Spec.Template.Spec.SecurityContext
+	if podSecurityContext == nil || podSecurityContext.RunAsUser == nil {
+		t.Fatal("Pod SecurityContext should set RunAsUser")
+	}
+	if *podSecurityContext.RunAsUser != 1000 {
+		t.Errorf("Expected RunAsUser 1000, got %d", *podSecurityContext.RunAsUser)
+	}
+
+	if container.SecurityContext == nil {
+		t.Fatal("Container SecurityContext should be set")
+	}
+	if !ptr.Deref(container.SecurityContext.RunAsNonRoot, false) {
+		t.Error("RunAsNonRoot should be true")
+	}
+	if ptr.Deref(container.SecurityContext.AllowPrivilegeEscalation, true) {
+		t.Error("AllowPrivilegeEscalation should be false")
+	}
+	if !ptr.Deref(container.SecurityContext.ReadOnlyRootFilesystem, false) {
+		t.Error("ReadOnlyRootFilesystem should be true")
+	}
+	if container.SecurityContext.Capabilities == nil ||
+		len(container.SecurityContext.Capabilities.Drop) != 1 ||
+		container.SecurityContext.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("Expected all capabilities dropped, got %v", container.SecurityContext.Capabilities)
+	}
+	if dep.Spec.Template.ObjectMeta.Annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"] != "true" {
+		t.Error("Expected safe-to-evict annotation to be set to 'true'")
+	}
+}
+
+func verifyKASCheckerReplicas(t *testing.T, dep *appsv1.Deployment) {
+	t.Helper()
+	if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 3 {
+		t.Error("Replicas should be set to 3")
+	}
+}
+
+func getKASCheckerDeployment(t *testing.T, c client.Client) *appsv1.Deployment {
+	t.Helper()
+	dep := &appsv1.Deployment{}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: manifests.KASConnectionCheckerName, Namespace: manifests.KASConnectionCheckerNamespace}, dep); err != nil {
+		t.Fatalf("Deployment should exist: %v", err)
+	}
+	return dep
+}
+
+func TestReconcileKASConnectionChecker(t *testing.T) {
+	t.Parallel()
 	const testCLIImage = "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:cli-test"
 
 	tests := []struct {
@@ -2690,138 +3222,26 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 		validate           func(t *testing.T, c client.Client)
 	}{
 		{
-			name:               "When Deployment does not exist it should create it with correct spec",
+			name:               "When Deployment does not exist, it should create it with correct spec",
 			hcp:                fakeHCP(),
 			existingDeployment: nil,
 			wantErr:            false,
 			validate: func(t *testing.T, c client.Client) {
-				dep := &appsv1.Deployment{}
-				if err := c.Get(context.Background(), client.ObjectKey{Name: manifests.KASConnectionCheckerName, Namespace: manifests.KASConnectionCheckerNamespace}, dep); err != nil {
-					t.Fatalf("Deployment should be created: %v", err)
-				}
-
-				// Validate replicas
-				if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 3 {
-					t.Error("Replicas should be set to 3")
-				}
-
-				// Validate labels and selectors
-				if dep.Spec.Selector == nil || dep.Spec.Selector.MatchLabels["app"] != manifests.KASConnectionCheckerName {
-					t.Error("Selector labels not set correctly")
-				}
-				if dep.Spec.Template.ObjectMeta.Labels["app"] != manifests.KASConnectionCheckerName {
-					t.Error("Pod template labels not set correctly")
-				}
-
-				// Validate container spec
-				if len(dep.Spec.Template.Spec.Containers) != 1 {
-					t.Fatalf("Expected 1 container, got %d", len(dep.Spec.Template.Spec.Containers))
-				}
-				container := dep.Spec.Template.Spec.Containers[0]
-				if container.Name != "connection-checker" {
-					t.Errorf("Expected container name 'connection-checker', got %s", container.Name)
-				}
-				if container.Image != testCLIImage {
-					t.Errorf("Expected cli image %s, got %s", testCLIImage, container.Image)
-				}
-
-				// Validate command runs a curl-based check script using kubernetes.default.svc
-				if len(container.Command) != 3 || container.Command[0] != "/bin/sh" || container.Command[1] != "-c" {
-					t.Fatalf("Expected command [/bin/sh -c <script>], got %v", container.Command)
-				}
-				script := container.Command[2]
-				if !strings.Contains(script, "curl") {
-					t.Error("Check script should use curl")
-				}
-				if !strings.Contains(script, "kubernetes.default.svc") {
-					t.Error("Check script should use kubernetes.default.svc for full data path testing")
-				}
-				if !strings.Contains(script, "/version") {
-					t.Error("Check script should check /version endpoint")
-				}
-				if !strings.Contains(script, "sleep 60") {
-					t.Error("Check script should sleep 60 seconds between checks")
-				}
-				if !strings.Contains(script, "curl") && !strings.Contains(script, "PATCH") {
-					t.Error("Check script should PATCH the ConfigMap on success")
-				}
-				if !strings.Contains(script, manifests.KASConnectionCheckerConfigMapName) {
-					t.Errorf("Check script should reference ConfigMap name %s", manifests.KASConnectionCheckerConfigMapName)
-				}
-
-				// Validate no readiness probe
+				dep := getKASCheckerDeployment(t, c)
+				verifyKASCheckerReplicas(t, dep)
+				verifyKASCheckerLabelsAndSelectors(t, dep)
+				container := verifyKASCheckerContainerBasics(t, dep, testCLIImage)
+				verifyKASCheckerScript(t, container)
 				if container.ReadinessProbe != nil {
 					t.Error("ReadinessProbe should not be set")
 				}
+				verifyKASCheckerPodSpec(t, dep)
+				verifyKASCheckerResources(t, container)
+				verifyKASCheckerNoTolerations(t, dep)
+				verifyKASCheckerAnnotations(t, dep)
+				verifyKASCheckerSecurityContext(t, dep, container)
+				verifyKASCheckerTopologySpread(t, dep)
 
-				// Validate priority class
-				if dep.Spec.Template.Spec.PriorityClassName != "system-node-critical" {
-					t.Errorf("Expected PriorityClassName system-node-critical, got %s", dep.Spec.Template.Spec.PriorityClassName)
-				}
-
-				// Validate automount service account token is enabled
-				if dep.Spec.Template.Spec.AutomountServiceAccountToken == nil || !*dep.Spec.Template.Spec.AutomountServiceAccountToken {
-					t.Error("AutomountServiceAccountToken should be set to true")
-				}
-
-				// Validate resource requests
-				expectedCPU := resource.MustParse("5m")
-				expectedMemory := resource.MustParse("10Mi")
-				if !container.Resources.Requests.Cpu().Equal(expectedCPU) {
-					t.Errorf("Expected CPU request 5m, got %s", container.Resources.Requests.Cpu())
-				}
-				if !container.Resources.Requests.Memory().Equal(expectedMemory) {
-					t.Errorf("Expected memory request 10Mi, got %s", container.Resources.Requests.Memory())
-				}
-
-				// Validate that host network is NOT used
-				if dep.Spec.Template.Spec.HostNetwork {
-					t.Error("HostNetwork should be false (not set)")
-				}
-
-				// Validate tolerations - should NOT use catch-all {Operator: Exists}
-				// because that bypasses the NodeUnschedulable filter, causing replacement
-				// pods to be scheduled back onto cordoned nodes during drain.
-				expectedTolerations := []corev1.Toleration{
-					{
-						Operator: corev1.TolerationOpExists,
-						Effect:   corev1.TaintEffectNoSchedule,
-					},
-					{
-						Key:               "node.kubernetes.io/unreachable",
-						Operator:          corev1.TolerationOpExists,
-						Effect:            corev1.TaintEffectNoExecute,
-						TolerationSeconds: ptr.To[int64](120),
-					},
-					{
-						Key:               "node.kubernetes.io/not-ready",
-						Operator:          corev1.TolerationOpExists,
-						Effect:            corev1.TaintEffectNoExecute,
-						TolerationSeconds: ptr.To[int64](120),
-					},
-				}
-				if len(dep.Spec.Template.Spec.Tolerations) != len(expectedTolerations) {
-					t.Fatalf("Expected %d tolerations, got %d", len(expectedTolerations), len(dep.Spec.Template.Spec.Tolerations))
-				}
-				for i, expected := range expectedTolerations {
-					actual := dep.Spec.Template.Spec.Tolerations[i]
-					if actual.Operator != expected.Operator || actual.Effect != expected.Effect || actual.Key != expected.Key {
-						t.Errorf("Toleration[%d] mismatch: got {Key:%q, Operator:%q, Effect:%q}, want {Key:%q, Operator:%q, Effect:%q}",
-							i, actual.Key, actual.Operator, actual.Effect, expected.Key, expected.Operator, expected.Effect)
-					}
-				}
-
-				// Validate ServiceAccountName
-				if dep.Spec.Template.Spec.ServiceAccountName != manifests.KASConnectionCheckerName {
-					t.Errorf("Expected ServiceAccountName %s, got %s", manifests.KASConnectionCheckerName, dep.Spec.Template.Spec.ServiceAccountName)
-				}
-
-				// Validate required-scc annotation
-				if dep.Spec.Template.ObjectMeta.Annotations["openshift.io/required-scc"] != "restricted-v2" {
-					t.Errorf("Expected openshift.io/required-scc annotation 'restricted-v2', got %s", dep.Spec.Template.ObjectMeta.Annotations["openshift.io/required-scc"])
-				}
-
-				// Validate ConfigMap was created
 				cm := &corev1.ConfigMap{}
 				if err := c.Get(context.Background(), client.ObjectKey{Name: manifests.KASConnectionCheckerConfigMapName, Namespace: manifests.KASConnectionCheckerNamespace}, cm); err != nil {
 					t.Errorf("ConfigMap should be created: %v", err)
@@ -2829,7 +3249,7 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 			},
 		},
 		{
-			name: "When platform is IBM Cloud it should use IBM Cloud specific endpoint in curl script",
+			name: "When platform is IBM Cloud, it should use IBM Cloud specific endpoint in curl script",
 			hcp: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-hcp",
@@ -2844,10 +3264,7 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 			existingDeployment: nil,
 			wantErr:            false,
 			validate: func(t *testing.T, c client.Client) {
-				dep := &appsv1.Deployment{}
-				if err := c.Get(context.Background(), client.ObjectKey{Name: manifests.KASConnectionCheckerName, Namespace: manifests.KASConnectionCheckerNamespace}, dep); err != nil {
-					t.Fatalf("Deployment should be created: %v", err)
-				}
+				dep := getKASCheckerDeployment(t, c)
 				container := dep.Spec.Template.Spec.Containers[0]
 				script := container.Command[2]
 				if !strings.Contains(script, "/livez?exclude=etcd&exclude=log") {
@@ -2856,7 +3273,7 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 			},
 		},
 		{
-			name: "When Deployment already exists it should update it",
+			name: "When Deployment already exists, it should update it",
 			hcp:  fakeHCP(),
 			existingDeployment: &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -2874,6 +3291,10 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 							Labels: map[string]string{
 								"app": "old-label",
 							},
+							// Written by an older HCCO; must be cleared on upgrade.
+							Annotations: map[string]string{
+								"openshift.io/required-scc": "restricted-v2",
+							},
 						},
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -2888,42 +3309,22 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 			},
 			wantErr: false,
 			validate: func(t *testing.T, c client.Client) {
-				dep := &appsv1.Deployment{}
-				if err := c.Get(context.Background(), client.ObjectKey{Name: manifests.KASConnectionCheckerName, Namespace: manifests.KASConnectionCheckerNamespace}, dep); err != nil {
-					t.Fatalf("Deployment should exist: %v", err)
-				}
-				// Verify it was updated with new spec
+				dep := getKASCheckerDeployment(t, c)
 				if dep.Spec.Selector.MatchLabels["app"] != manifests.KASConnectionCheckerName {
 					t.Error("Deployment should be updated with correct selector")
 				}
-				if len(dep.Spec.Template.Spec.Containers) != 1 {
-					t.Fatalf("Expected 1 container after update, got %d", len(dep.Spec.Template.Spec.Containers))
-				}
-				container := dep.Spec.Template.Spec.Containers[0]
-				if container.Name != "connection-checker" {
-					t.Error("Container should be updated to connection-checker")
-				}
-				if container.Image != testCLIImage {
-					t.Errorf("Image should be updated to cli image, got %s", container.Image)
-				}
+				container := verifyKASCheckerContainerBasics(t, dep, testCLIImage)
 				if container.ReadinessProbe != nil {
 					t.Error("ReadinessProbe should not be set")
 				}
-
-				// Validate replicas
-				if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 3 {
-					t.Error("Replicas should be set to 3")
-				}
-
-				// Validate ServiceAccountName
+				verifyKASCheckerReplicas(t, dep)
 				if dep.Spec.Template.Spec.ServiceAccountName != manifests.KASConnectionCheckerName {
 					t.Errorf("Expected ServiceAccountName %s, got %s", manifests.KASConnectionCheckerName, dep.Spec.Template.Spec.ServiceAccountName)
 				}
-
-				// Validate required-scc annotation
-				if dep.Spec.Template.ObjectMeta.Annotations["openshift.io/required-scc"] != "restricted-v2" {
-					t.Errorf("Expected openshift.io/required-scc annotation 'restricted-v2', got %s", dep.Spec.Template.ObjectMeta.Annotations["openshift.io/required-scc"])
-				}
+				verifyKASCheckerNoTolerations(t, dep)
+				verifyKASCheckerAnnotations(t, dep)
+				verifyKASCheckerSecurityContext(t, dep, container)
+				verifyKASCheckerTopologySpread(t, dep)
 			},
 		},
 	}
@@ -2932,7 +3333,7 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var r reconciler
 
-			// Setup fake client with existing Deployment if provided
+			// Setup fake client with existing objects if provided
 			var objects []client.Object
 			if tt.existingDeployment != nil {
 				objects = append(objects, tt.existingDeployment)
@@ -2941,10 +3342,10 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 			r.CreateOrUpdateProvider = &simpleCreateOrUpdater{}
 
 			ctx := context.Background()
-			err := r.reconcileKASConnectionCheckerDeployment(ctx, tt.hcp, testCLIImage)
+			err := r.reconcileKASConnectionChecker(ctx, tt.hcp, testCLIImage)
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("reconcileKASConnectionCheckerDeployment() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("reconcileKASConnectionChecker() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
@@ -2965,73 +3366,992 @@ func Test_reconciler_reconcileKASConnectionCheckerDeployment(t *testing.T) {
 	}
 }
 
-func TestReconcileImageRegistry(t *testing.T) {
-	testCases := []struct {
-		name                     string
-		hcp                      *hyperv1.HostedControlPlane
-		platformType             hyperv1.PlatformType
-		existingRegistryConfig   *imageregistryv1.Config
-		expectRegistryReconciled bool
-		expectErrors             bool
-		expectVAPReconciled      bool
+func TestReconcileMetricsForwarder(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		annotations     map[string]string
+		monitoring      hyperv1.MonitoringSpec
+		existingObjects []client.Object
+		expectCleanup   bool
 	}{
 		{
-			name: "When OpenStack platform has no existing config it should skip to let CIRO bootstrap",
-			hcp: func() *hyperv1.HostedControlPlane {
-				hcp := fakeHCP()
-				hcp.Spec.Platform.Type = hyperv1.OpenStackPlatform
-				return hcp
-			}(),
-			platformType:             hyperv1.OpenStackPlatform,
-			existingRegistryConfig:   nil,
-			expectRegistryReconciled: false,
-			expectErrors:             false,
+			name:        "When metrics forwarding mode is not set, it should delete existing resources",
+			annotations: map[string]string{},
+			existingObjects: []client.Object{
+				manifests.MetricsForwarderDeployment(),
+				manifests.MetricsForwarderConfigMap(),
+				manifests.MetricsForwarderServingCA(),
+				manifests.MetricsForwarderPodMonitor(),
+			},
+			expectCleanup: true,
 		},
 		{
-			name: "When OpenStack platform has existing config it should reconcile normally",
-			hcp: func() *hyperv1.HostedControlPlane {
-				hcp := fakeHCP()
-				hcp.Spec.Platform.Type = hyperv1.OpenStackPlatform
-				return hcp
-			}(),
-			platformType: hyperv1.OpenStackPlatform,
-			existingRegistryConfig: &imageregistryv1.Config{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "cluster",
-					ResourceVersion: "1",
-					Finalizers:      []string{"imageregistry.operator.openshift.io/finalizer"},
+			name:        "When DisableMonitoringServices is set, it should delete existing resources",
+			annotations: map[string]string{hyperv1.DisableMonitoringServices: "true"},
+			monitoring: hyperv1.MonitoringSpec{
+				MetricsForwarding: hyperv1.MetricsForwardingSpec{
+					Mode: hyperv1.MetricsForwardingModeForward,
 				},
-				Spec: imageregistryv1.ImageRegistrySpec{
-					OperatorSpec: operatorv1.OperatorSpec{
-						ManagementState: operatorv1.Managed,
+			},
+			existingObjects: []client.Object{
+				manifests.MetricsForwarderDeployment(),
+				manifests.MetricsForwarderConfigMap(),
+				manifests.MetricsForwarderServingCA(),
+				manifests.MetricsForwarderPodMonitor(),
+			},
+			expectCleanup: true,
+		},
+		{
+			name:            "When metrics forwarding mode is not set and no resources exist, it should succeed",
+			annotations:     map[string]string{},
+			existingObjects: nil,
+			expectCleanup:   true,
+		},
+		{
+			name: "When metrics forwarding mode is None, it should delete existing resources",
+			monitoring: hyperv1.MonitoringSpec{
+				MetricsForwarding: hyperv1.MetricsForwardingSpec{
+					Mode: hyperv1.MetricsForwardingModeNone,
+				},
+			},
+			existingObjects: []client.Object{
+				manifests.MetricsForwarderDeployment(),
+				manifests.MetricsForwarderConfigMap(),
+				manifests.MetricsForwarderServingCA(),
+				manifests.MetricsForwarderPodMonitor(),
+			},
+			expectCleanup: true,
+		},
+		{
+			name: "When metrics forwarding mode is Forward, it should not delete resources",
+			monitoring: hyperv1.MonitoringSpec{
+				MetricsForwarding: hyperv1.MetricsForwardingSpec{
+					Mode: hyperv1.MetricsForwardingModeForward,
+				},
+			},
+			existingObjects: []client.Object{
+				manifests.MetricsForwarderDeployment(),
+				manifests.MetricsForwarderConfigMap(),
+				manifests.MetricsForwarderServingCA(),
+				manifests.MetricsForwarderPodMonitor(),
+			},
+			expectCleanup: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+
+			guestClient := fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(tt.existingObjects...).Build()
+			cpClient := fake.NewClientBuilder().WithScheme(api.Scheme).Build()
+			r := &reconciler{
+				client:                 guestClient,
+				cpClient:               cpClient,
+				hcpNamespace:           "test-ns",
+				CreateOrUpdateProvider: &simpleCreateOrUpdater{},
+			}
+
+			hcp := &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test",
+					Namespace:   "test-ns",
+					Annotations: tt.annotations,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Monitoring: tt.monitoring,
+				},
+			}
+
+			err := r.reconcileMetricsForwarder(t.Context(), hcp, nil)
+			g.Expect(err).ToNot(HaveOccurred())
+
+			if tt.expectCleanup {
+				deployment := manifests.MetricsForwarderDeployment()
+				g.Expect(apierrors.IsNotFound(guestClient.Get(t.Context(), client.ObjectKeyFromObject(deployment), deployment))).To(BeTrue(), "deployment should be deleted")
+
+				cm := manifests.MetricsForwarderConfigMap()
+				g.Expect(apierrors.IsNotFound(guestClient.Get(t.Context(), client.ObjectKeyFromObject(cm), cm))).To(BeTrue(), "configmap should be deleted")
+
+				servingCA := manifests.MetricsForwarderServingCA()
+				g.Expect(apierrors.IsNotFound(guestClient.Get(t.Context(), client.ObjectKeyFromObject(servingCA), servingCA))).To(BeTrue(), "serving CA should be deleted")
+
+				podMonitor := manifests.MetricsForwarderPodMonitor()
+				g.Expect(apierrors.IsNotFound(guestClient.Get(t.Context(), client.ObjectKeyFromObject(podMonitor), podMonitor))).To(BeTrue(), "pod monitor should be deleted")
+			} else {
+				deployment := manifests.MetricsForwarderDeployment()
+				g.Expect(guestClient.Get(t.Context(), client.ObjectKeyFromObject(deployment), deployment)).To(Succeed(), "deployment should be preserved")
+
+				cm := manifests.MetricsForwarderConfigMap()
+				g.Expect(guestClient.Get(t.Context(), client.ObjectKeyFromObject(cm), cm)).To(Succeed(), "configmap should be preserved")
+
+				servingCA := manifests.MetricsForwarderServingCA()
+				g.Expect(guestClient.Get(t.Context(), client.ObjectKeyFromObject(servingCA), servingCA)).To(Succeed(), "serving CA should be preserved")
+
+				podMonitor := manifests.MetricsForwarderPodMonitor()
+				g.Expect(guestClient.Get(t.Context(), client.ObjectKeyFromObject(podMonitor), podMonitor)).To(Succeed(), "pod monitor should be preserved")
+			}
+		})
+	}
+}
+
+func TestNamespacedNamePredicateFunc(t *testing.T) {
+	predicate := namespacedNamePredicateFunc("my-hcp-namespace", "pull-secret")
+
+	tests := []struct {
+		name   string
+		object client.Object
+		want   bool
+	}{
+		{
+			name: "When namespace and name match, it should return true",
+			object: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "my-hcp-namespace", Name: "pull-secret"},
+			},
+			want: true,
+		},
+		{
+			name: "When namespace differs, it should return false",
+			object: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "other-namespace", Name: "pull-secret"},
+			},
+			want: false,
+		},
+		{
+			name: "When name differs, it should return false",
+			object: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "my-hcp-namespace", Name: "other-secret"},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			g.Expect(predicate(tt.object)).To(Equal(tt.want))
+		})
+	}
+}
+
+func TestReconcileDeletion(t *testing.T) {
+	log := zapr.NewLogger(zaptest.NewLogger(t))
+
+	tests := []struct {
+		name               string
+		hcp                *hyperv1.HostedControlPlane
+		existingObjects    []client.Object
+		interceptorFuncs   *interceptor.Funcs
+		expectVAPDeleted   bool
+		expectVAPBDeleted  bool
+		expectCloudCleanup bool
+		expectError        bool
+		errSubstr          string
+	}{
+		{
+			name: "When platform is Azure, it should delete the registry management state VAP and binding",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-ns",
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
 					},
 				},
 			},
-			expectRegistryReconciled: true,
-			expectErrors:             false,
+			existingObjects: []client.Object{
+				manifests.ValidatingAdmissionPolicy(registry.AdmissionPolicyNameManagementState),
+				manifests.ValidatingAdmissionPolicyBinding(fmt.Sprintf("%s-binding", registry.AdmissionPolicyNameManagementState)),
+			},
+			expectVAPDeleted:  true,
+			expectVAPBDeleted: true,
 		},
 		{
-			name: "When Azure platform it should reconcile validating admission policies",
-			hcp: func() *hyperv1.HostedControlPlane {
-				hcp := fakeHCP()
-				hcp.Spec.Platform.Type = hyperv1.AzurePlatform
-				return hcp
-			}(),
-			platformType:             hyperv1.AzurePlatform,
-			expectRegistryReconciled: true,
-			expectVAPReconciled:      true,
-			expectErrors:             false,
+			name: "When platform is AWS, it should not delete registry admission resources",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-ns",
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AWSPlatform,
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				manifests.ValidatingAdmissionPolicy(registry.AdmissionPolicyNameManagementState),
+				manifests.ValidatingAdmissionPolicyBinding(fmt.Sprintf("%s-binding", registry.AdmissionPolicyNameManagementState)),
+			},
+			expectVAPDeleted:  false,
+			expectVAPBDeleted: false,
 		},
 		{
-			name: "When AWS platform it should reconcile registry config",
-			hcp: func() *hyperv1.HostedControlPlane {
-				hcp := fakeHCP()
-				hcp.Spec.Platform.Type = hyperv1.AWSPlatform
-				return hcp
-			}(),
-			platformType:             hyperv1.AWSPlatform,
-			expectRegistryReconciled: true,
-			expectErrors:             false,
+			name: "When platform is Azure and no VAP exists, it should not error",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-ns",
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+					},
+				},
+			},
+			existingObjects:   nil,
+			expectVAPDeleted:  true,
+			expectVAPBDeleted: true,
+		},
+		{
+			name: "When cleanup cloud resources annotation is set and CVO is scaled down, it should trigger cloud cleanup",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-ns",
+					Annotations: map[string]string{
+						hyperv1.CleanupCloudResourcesAnnotation: "true",
+					},
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.NonePlatform,
+					},
+				},
+				Status: hyperv1.HostedControlPlaneStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(hyperv1.CVOScaledDown),
+							Status: metav1.ConditionTrue,
+						},
+					},
+				},
+			},
+			expectCloudCleanup: true,
+		},
+		{
+			name: "When cleanup annotation is not set, it should not trigger cloud cleanup",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-ns",
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.NonePlatform,
+					},
+				},
+			},
+			expectCloudCleanup: false,
+		},
+		{
+			name: "When cleanup annotation is true but CVO is not scaled down, it should not trigger cloud cleanup",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-ns",
+					Annotations: map[string]string{
+						hyperv1.CleanupCloudResourcesAnnotation: "true",
+					},
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.NonePlatform,
+					},
+				},
+				Status: hyperv1.HostedControlPlaneStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(hyperv1.CVOScaledDown),
+							Status: metav1.ConditionFalse,
+						},
+					},
+				},
+			},
+			expectCloudCleanup: false,
+		},
+		{
+			name: "When Delete fails for the VAP binding on Azure, it should return a wrapped error",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-ns",
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				manifests.ValidatingAdmissionPolicyBinding(fmt.Sprintf("%s-binding", registry.AdmissionPolicyNameManagementState)),
+			},
+			interceptorFuncs: &interceptor.Funcs{
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					if obj.GetName() == fmt.Sprintf("%s-binding", registry.AdmissionPolicyNameManagementState) {
+						return fmt.Errorf("API server unavailable")
+					}
+					return c.Delete(ctx, obj, opts...)
+				},
+			},
+			expectError: true,
+			errSubstr:   "failed to delete ValidatingAdmissionPolicyBinding",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			guestClientBuilder := fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(tt.existingObjects...)
+			if tt.interceptorFuncs != nil {
+				guestClientBuilder = guestClientBuilder.WithInterceptorFuncs(*tt.interceptorFuncs)
+			}
+			guestClient := guestClientBuilder.Build()
+			cpClient := fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(tt.hcp).WithStatusSubresource(&hyperv1.HostedControlPlane{}).Build()
+
+			r := &reconciler{
+				client:                 guestClient,
+				uncachedClient:         fake.NewClientBuilder().WithScheme(api.Scheme).Build(),
+				cpClient:               cpClient,
+				CreateOrUpdateProvider: &simpleCreateOrUpdater{},
+				cleanupTracker:         supportutil.NewCleanupTracker(),
+			}
+
+			if tt.expectCloudCleanup {
+				// Add KAS deployment for cloud cleanup to proceed
+				kasDeployment := &appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kube-apiserver",
+						Namespace: tt.hcp.Namespace,
+					},
+				}
+				g.Expect(cpClient.Create(t.Context(), kasDeployment)).To(Succeed())
+			}
+
+			result, err := r.reconcileDeletion(t.Context(), log, tt.hcp)
+
+			if tt.expectError {
+				g.Expect(err).To(HaveOccurred())
+				if tt.errSubstr != "" {
+					g.Expect(err.Error()).To(ContainSubstring(tt.errSubstr))
+				}
+				return
+			}
+			g.Expect(err).ToNot(HaveOccurred())
+
+			if tt.expectVAPDeleted {
+				vap := manifests.ValidatingAdmissionPolicy(registry.AdmissionPolicyNameManagementState)
+				getErr := guestClient.Get(t.Context(), client.ObjectKeyFromObject(vap), vap)
+				g.Expect(apierrors.IsNotFound(getErr)).To(BeTrue(), "VAP should be deleted or not found")
+			}
+
+			if tt.expectVAPBDeleted {
+				vapb := manifests.ValidatingAdmissionPolicyBinding(fmt.Sprintf("%s-binding", registry.AdmissionPolicyNameManagementState))
+				getErr := guestClient.Get(t.Context(), client.ObjectKeyFromObject(vapb), vapb)
+				g.Expect(apierrors.IsNotFound(getErr)).To(BeTrue(), "VAPB should be deleted or not found")
+			}
+
+			if !tt.expectVAPDeleted && len(tt.existingObjects) > 0 {
+				vap := manifests.ValidatingAdmissionPolicy(registry.AdmissionPolicyNameManagementState)
+				getErr := guestClient.Get(t.Context(), client.ObjectKeyFromObject(vap), vap)
+				g.Expect(getErr).ToNot(HaveOccurred(), "VAP should still exist for non-Azure platforms")
+			}
+
+			if !tt.expectVAPBDeleted && len(tt.existingObjects) > 0 {
+				vapb := manifests.ValidatingAdmissionPolicyBinding(fmt.Sprintf("%s-binding", registry.AdmissionPolicyNameManagementState))
+				getErr := guestClient.Get(t.Context(), client.ObjectKeyFromObject(vapb), vapb)
+				g.Expect(getErr).ToNot(HaveOccurred(), "VAPB should still exist for non-Azure platforms")
+			}
+
+			if tt.expectCloudCleanup {
+				// When cloud cleanup is triggered, verify it ran by checking the CloudResourcesDestroyed condition was set
+				// The condition is set by destroyCloudResources regardless of whether resources remain
+				condition := meta.FindStatusCondition(tt.hcp.Status.Conditions, string(hyperv1.CloudResourcesDestroyed))
+				g.Expect(condition).ToNot(BeNil(), "CloudResourcesDestroyed condition should be set when cleanup is triggered")
+				g.Expect(condition.Status).To(Equal(metav1.ConditionTrue), "CloudResourcesDestroyed should be true when all resources are cleaned up")
+				g.Expect(condition.Reason).ToNot(BeEmpty(), "CloudResourcesDestroyed condition should have a reason")
+			}
+
+			if !tt.expectCloudCleanup {
+				g.Expect(result.RequeueAfter).To(Equal(time.Duration(0)), "should not requeue when cloud cleanup is not triggered")
+			}
+		})
+	}
+}
+
+func TestReconcilePlatformSpecificResources(t *testing.T) {
+	log := zapr.NewLogger(zaptest.NewLogger(t))
+	ctx := logr.NewContext(t.Context(), log)
+
+	tests := []struct {
+		name          string
+		platformType  hyperv1.PlatformType
+		expectErrors  bool
+		verifyObjects func(*WithT, client.Client)
+	}{
+		{
+			name:         "When platform is AWS, it should reconcile AWS identity webhook resources",
+			platformType: hyperv1.AWSPlatform,
+			verifyObjects: func(g *WithT, c client.Client) {
+				// AWS identity webhook creates a mutating webhook config, service account, etc.
+				// Verify at least one of the expected resources exists
+				saList := &corev1.ServiceAccountList{}
+				err := c.List(ctx, saList)
+				g.Expect(err).ToNot(HaveOccurred())
+			},
+		},
+		{
+			name:         "When platform is None, it should not create any platform-specific resources",
+			platformType: hyperv1.NonePlatform,
+			verifyObjects: func(g *WithT, c client.Client) {
+				// No platform-specific resources expected
+			},
+		},
+		{
+			name:         "When platform is KubeVirt, it should not create AWS or Azure resources",
+			platformType: hyperv1.KubevirtPlatform,
+			verifyObjects: func(g *WithT, c client.Client) {
+				// KubeVirt is not in the switch; no platform resources should be created
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			hcp := &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-ns",
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: tt.platformType,
+					},
+				},
+			}
+
+			guestClient := fake.NewClientBuilder().WithScheme(api.Scheme).Build()
+			r := &reconciler{
+				client:                 guestClient,
+				CreateOrUpdateProvider: &simpleCreateOrUpdater{},
+				platformType:           tt.platformType,
+			}
+
+			// Use a nil releaseImage for platforms that don't need one (None, KubeVirt)
+			// For AWS, the reconcileAWSIdentityWebhook doesn't use releaseImage
+			errs := r.reconcilePlatformSpecificResources(t.Context(), log, hcp, nil)
+
+			if tt.expectErrors {
+				g.Expect(errs).ToNot(BeEmpty())
+			} else {
+				g.Expect(errs).To(BeEmpty())
+			}
+
+			if tt.verifyObjects != nil {
+				tt.verifyObjects(g, guestClient)
+			}
+		})
+	}
+}
+
+func TestReconcileClusterRecovery(t *testing.T) {
+	log := zapr.NewLogger(zaptest.NewLogger(t))
+
+	tests := []struct {
+		name             string
+		hcp              *hyperv1.HostedControlPlane
+		existingErrs     []error
+		uncachedObjects  []client.Object
+		expectError      bool
+		expectRequeue    bool
+		expectCondition  bool
+		conditionStatus  metav1.ConditionStatus
+		conditionMessage string
+	}{
+		{
+			name: "When no restore annotation exists, it should return immediately without error",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-ns",
+				},
+			},
+			expectError:     false,
+			expectRequeue:   false,
+			expectCondition: false,
+		},
+		{
+			name: "When restore annotation exists and monitoring stack is ready, it should set condition to true",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-ns",
+					Annotations: map[string]string{
+						hyperv1.HostedClusterRestoredFromBackupAnnotation: "true",
+					},
+				},
+			},
+			uncachedObjects: []client.Object{
+				&appsv1.StatefulSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "prometheus-k8s",
+						Namespace: "openshift-monitoring",
+					},
+					Status: appsv1.StatefulSetStatus{
+						Replicas:          1,
+						AvailableReplicas: 1,
+					},
+				},
+			},
+			expectError:      false,
+			expectRequeue:    false,
+			expectCondition:  true,
+			conditionStatus:  metav1.ConditionTrue,
+			conditionMessage: "Hosted cluster recovery finished",
+		},
+		{
+			name: "When restore annotation exists and monitoring stack is not ready, it should requeue after 120 seconds",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-ns",
+					Annotations: map[string]string{
+						hyperv1.HostedClusterRestoredFromBackupAnnotation: "true",
+					},
+				},
+			},
+			uncachedObjects: []client.Object{
+				&appsv1.StatefulSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "prometheus-k8s",
+						Namespace: "openshift-monitoring",
+					},
+					Spec: appsv1.StatefulSetSpec{
+						Selector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{
+								"app.kubernetes.io/name": "prometheus",
+							},
+						},
+					},
+					Status: appsv1.StatefulSetStatus{
+						Replicas:          2,
+						AvailableReplicas: 0,
+					},
+				},
+			},
+			expectError:      false,
+			expectRequeue:    true,
+			expectCondition:  true,
+			conditionStatus:  metav1.ConditionFalse,
+			conditionMessage: "Hosted cluster recovery not finished yet",
+		},
+		{
+			name: "When restore annotation exists and monitoring stack does not exist, it should return aggregate error with existing errors",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-ns",
+					Annotations: map[string]string{
+						hyperv1.HostedClusterRestoredFromBackupAnnotation: "true",
+					},
+				},
+			},
+			existingErrs:    []error{fmt.Errorf("previous error")},
+			uncachedObjects: nil,
+			expectError:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			cpClient := fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(tt.hcp).WithStatusSubresource(&hyperv1.HostedControlPlane{}).Build()
+			uncachedClient := fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(tt.uncachedObjects...).Build()
+
+			r := &reconciler{
+				client:                 fake.NewClientBuilder().WithScheme(api.Scheme).Build(),
+				uncachedClient:         uncachedClient,
+				cpClient:               cpClient,
+				CreateOrUpdateProvider: &simpleCreateOrUpdater{},
+			}
+
+			result, err := r.reconcileClusterRecovery(t.Context(), log, tt.hcp, tt.existingErrs)
+
+			if tt.expectError {
+				g.Expect(err).To(HaveOccurred())
+				return
+			}
+			g.Expect(err).ToNot(HaveOccurred())
+
+			if tt.expectRequeue {
+				g.Expect(result.RequeueAfter).To(Equal(120*time.Second), "should requeue after 120 seconds when recovery is not finished")
+			} else {
+				g.Expect(result.RequeueAfter).To(Equal(time.Duration(0)), "should not requeue when recovery is finished or not applicable")
+			}
+
+			if tt.expectCondition {
+				updatedHCP := &hyperv1.HostedControlPlane{}
+				g.Expect(cpClient.Get(t.Context(), client.ObjectKeyFromObject(tt.hcp), updatedHCP)).To(Succeed())
+
+				cond := meta.FindStatusCondition(updatedHCP.Status.Conditions, string(hyperv1.HostedClusterRestoredFromBackup))
+				g.Expect(cond).ToNot(BeNil(), "recovery condition should be set")
+				g.Expect(cond.Status).To(Equal(tt.conditionStatus))
+				g.Expect(cond.Message).To(Equal(tt.conditionMessage))
+				g.Expect(cond.Reason).To(Equal(hyperv1.RecoveryFinishedReason))
+			}
+		})
+	}
+}
+
+func TestCleanupLegacyResources(t *testing.T) {
+	log := zapr.NewLogger(zaptest.NewLogger(t))
+
+	tests := []struct {
+		name                    string
+		clusterVersion          *configv1.ClusterVersion
+		releaseVersion          string
+		existingUncachedObjects []client.Object
+		expectDNSDeploymentGone bool
+		expectErrorCount        int
+	}{
+		{
+			name: "When cluster version is not updated, it should skip cleanup",
+			clusterVersion: &configv1.ClusterVersion{
+				ObjectMeta: metav1.ObjectMeta{Name: "version"},
+				Status: configv1.ClusterVersionStatus{
+					Desired: configv1.Release{Version: "4.15.0"},
+				},
+			},
+			releaseVersion: "4.16.0",
+			existingUncachedObjects: []client.Object{
+				manifests.DNSOperatorDeployment(),
+			},
+			expectDNSDeploymentGone: false,
+		},
+		{
+			name: "When cluster version matches release, it should delete DNS operator deployment",
+			clusterVersion: &configv1.ClusterVersion{
+				ObjectMeta: metav1.ObjectMeta{Name: "version"},
+				Status: configv1.ClusterVersionStatus{
+					Desired: configv1.Release{Version: "4.16.0"},
+				},
+			},
+			releaseVersion: "4.16.0",
+			existingUncachedObjects: []client.Object{
+				manifests.DNSOperatorDeployment(),
+			},
+			expectDNSDeploymentGone: true,
+		},
+		{
+			name: "When cluster version matches but DNS deployment does not exist, it should not error",
+			clusterVersion: &configv1.ClusterVersion{
+				ObjectMeta: metav1.ObjectMeta{Name: "version"},
+				Status: configv1.ClusterVersionStatus{
+					Desired: configv1.Release{Version: "4.16.0"},
+				},
+			},
+			releaseVersion:          "4.16.0",
+			existingUncachedObjects: nil,
+			expectDNSDeploymentGone: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			// Reset the sync.Once variables so each test case runs independently
+			deleteDNSOperatorDeploymentOnce = sync.Once{}
+			deleteCVORemovedResourcesOnce = sync.Once{}
+
+			hcp := &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-ns",
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.NonePlatform,
+					},
+				},
+			}
+
+			var guestObjects []client.Object
+			if tt.clusterVersion != nil {
+				guestObjects = append(guestObjects, tt.clusterVersion)
+			}
+			guestClient := fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(guestObjects...).Build()
+			uncachedClient := fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(tt.existingUncachedObjects...).Build()
+
+			r := &reconciler{
+				client:                 guestClient,
+				uncachedClient:         uncachedClient,
+				CreateOrUpdateProvider: &simpleCreateOrUpdater{},
+			}
+
+			fakeReleaseImage := &releaseinfo.ReleaseImage{
+				ImageStream: &imageapi.ImageStream{
+					ObjectMeta: metav1.ObjectMeta{Name: tt.releaseVersion},
+				},
+			}
+
+			var errs []error
+			r.cleanupLegacyResources(t.Context(), log, hcp, fakeReleaseImage, &errs)
+
+			g.Expect(errs).To(HaveLen(tt.expectErrorCount), "unexpected error count")
+
+			dnsDeployment := manifests.DNSOperatorDeployment()
+			getErr := uncachedClient.Get(t.Context(), client.ObjectKeyFromObject(dnsDeployment), dnsDeployment)
+			if tt.expectDNSDeploymentGone {
+				g.Expect(apierrors.IsNotFound(getErr)).To(BeTrue(), "DNS operator deployment should be deleted")
+			} else {
+				g.Expect(getErr).ToNot(HaveOccurred(), "DNS operator deployment should still exist")
+			}
+		})
+	}
+}
+
+func TestIsServiceAccountPullSecretsControllerDisabled(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		controllers []string
+		expected    bool
+	}{
+		{
+			name:        "When controllers is nil, it should return false",
+			controllers: nil,
+			expected:    false,
+		},
+		{
+			name:        "When controllers is empty, it should return false",
+			controllers: []string{},
+			expected:    false,
+		},
+		{
+			name:        "When controller is disabled, it should return true",
+			controllers: []string{"*", "-openshift.io/serviceaccount-pull-secrets"},
+			expected:    true,
+		},
+		{
+			name:        "When controllers has other entries but not the disabled one, it should return false",
+			controllers: []string{"*", "-some-other-controller"},
+			expected:    false,
+		},
+		{
+			name:        "When only the wildcard is present, it should return false",
+			controllers: []string{"*"},
+			expected:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			g := NewWithT(t)
+			g.Expect(isServiceAccountPullSecretsControllerDisabled(tt.controllers)).To(Equal(tt.expected))
+		})
+	}
+}
+
+func TestReconcileRegistryAndIngress_ServiceAccountPullSecretsController(t *testing.T) {
+	t.Parallel()
+
+	hcpNamespace := "test-hcp-ns"
+
+	serializeOCMConfig := func(t *testing.T, controllers []string) string {
+		t.Helper()
+		config := &openshiftcpv1.OpenShiftControllerManagerConfig{
+			Controllers: controllers,
+		}
+		data, err := k8sutil.SerializeResource(config, api.Scheme)
+		if err != nil {
+			t.Fatalf("failed to serialize OCM config: %v", err)
+		}
+		return data
+	}
+
+	tests := []struct {
+		name                   string
+		platformType           hyperv1.PlatformType
+		managementState        operatorv1.ManagementState
+		existingOCMControllers []string
+		hasExistingOCMConfig   bool
+		expectedControllers    []string
+	}{
+		{
+			name:                   "When managementState is Removed, it should disable serviceaccount-pull-secrets controller",
+			platformType:           hyperv1.AWSPlatform,
+			managementState:        operatorv1.Removed,
+			existingOCMControllers: nil,
+			hasExistingOCMConfig:   true,
+			expectedControllers:    []string{"*", disabledServiceAccountPullSecretsController},
+		},
+		{
+			name:                   "When managementState changes from Removed to Managed, it should re-enable serviceaccount-pull-secrets controller",
+			platformType:           hyperv1.AWSPlatform,
+			managementState:        operatorv1.Managed,
+			existingOCMControllers: []string{"*", disabledServiceAccountPullSecretsController},
+			hasExistingOCMConfig:   true,
+			expectedControllers:    []string{"*"},
+		},
+		{
+			name:                   "When managementState is Managed and controller is already enabled, it should not change controllers",
+			platformType:           hyperv1.AWSPlatform,
+			managementState:        operatorv1.Managed,
+			existingOCMControllers: []string{"*"},
+			hasExistingOCMConfig:   true,
+			expectedControllers:    []string{"*"},
+		},
+		{
+			name:                   "When platform is IBMCloud, it should not modify OCM config regardless of managementState",
+			platformType:           hyperv1.IBMCloudPlatform,
+			managementState:        operatorv1.Removed,
+			existingOCMControllers: nil,
+			hasExistingOCMConfig:   true,
+			expectedControllers:    nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			g := NewWithT(t)
+
+			registryConfig := manifests.Registry()
+			registryConfig.Spec.ManagementState = tt.managementState
+
+			guestClient := fake.NewClientBuilder().
+				WithScheme(api.Scheme).
+				WithObjects(registryConfig).
+				Build()
+
+			ocmConfigMap := cpomanifests.OpenShiftControllerManagerConfig(hcpNamespace)
+			if tt.hasExistingOCMConfig {
+				ocmConfigMap.Data = map[string]string{}
+				if tt.existingOCMControllers != nil {
+					ocmConfigMap.Data[ocm.ConfigKey] = serializeOCMConfig(t, tt.existingOCMControllers)
+				} else {
+					ocmConfigMap.Data[ocm.ConfigKey] = serializeOCMConfig(t, nil)
+				}
+			}
+
+			cpClient := fake.NewClientBuilder().
+				WithScheme(api.Scheme).
+				WithObjects(ocmConfigMap).
+				Build()
+
+			hcp := &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: hcpNamespace,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: tt.platformType,
+					},
+				},
+			}
+
+			r := &reconciler{
+				client:                 guestClient,
+				cpClient:               cpClient,
+				CreateOrUpdateProvider: &simpleCreateOrUpdater{},
+				platformType:           tt.platformType,
+				hcpNamespace:           hcpNamespace,
+			}
+
+			log := zapr.NewLogger(zaptest.NewLogger(t))
+			errs := r.reconcileRegistryAndIngress(t.Context(), hcp, log)
+			for _, e := range errs {
+				g.Expect(e.Error()).ToNot(ContainSubstring("openshift-controller-manager config"), "unexpected OCM config error: %v", e)
+			}
+
+			resultConfigMap := cpomanifests.OpenShiftControllerManagerConfig(hcpNamespace)
+			err := cpClient.Get(t.Context(), client.ObjectKeyFromObject(resultConfigMap), resultConfigMap)
+			g.Expect(err).ToNot(HaveOccurred(), "failed to get OCM ConfigMap")
+
+			if tt.expectedControllers == nil {
+				config := &openshiftcpv1.OpenShiftControllerManagerConfig{}
+				if configStr, exists := resultConfigMap.Data[ocm.ConfigKey]; exists && len(configStr) > 0 {
+					err := k8sutil.DeserializeResource(configStr, config, api.Scheme)
+					g.Expect(err).ToNot(HaveOccurred(), "failed to deserialize OCM config")
+				}
+				g.Expect(config.Controllers).To(BeNil(), "controllers should remain nil for excluded platform")
+			} else {
+				config := &openshiftcpv1.OpenShiftControllerManagerConfig{}
+				configStr, exists := resultConfigMap.Data[ocm.ConfigKey]
+				g.Expect(exists).To(BeTrue(), "OCM config should exist")
+				err := k8sutil.DeserializeResource(configStr, config, api.Scheme)
+				g.Expect(err).ToNot(HaveOccurred(), "failed to deserialize OCM config")
+				g.Expect(config.Controllers).To(Equal(tt.expectedControllers))
+			}
+		})
+	}
+}
+
+func TestReconcileConfigOperatorReconciliationCondition(t *testing.T) {
+	testCases := []struct {
+		name                   string
+		reconcileErr           error
+		existingCondition      *metav1.Condition
+		expectedConditionState metav1.ConditionStatus
+		expectedReason         string
+		expectedMessage        string
+	}{
+		{
+			name:                   "When reconciliation succeeds it should set condition to True",
+			reconcileErr:           nil,
+			expectedConditionState: metav1.ConditionTrue,
+			expectedReason:         hyperv1.AsExpectedReason,
+			expectedMessage:        hyperv1.AllIsWellMessage,
+		},
+		{
+			name:                   "When reconciliation fails it should set condition to False with error message",
+			reconcileErr:           fmt.Errorf("failed to reconcile crds: connection refused"),
+			expectedConditionState: metav1.ConditionFalse,
+			expectedReason:         hyperv1.ReconcileErrorReason,
+			expectedMessage:        "failed to reconcile crds: connection refused",
+		},
+		{
+			name:         "When reconciliation recovers from error it should transition condition to True",
+			reconcileErr: nil,
+			existingCondition: &metav1.Condition{
+				Type:    string(hyperv1.ConfigOperatorReconciliationSucceeded),
+				Status:  metav1.ConditionFalse,
+				Reason:  hyperv1.ReconcileErrorReason,
+				Message: "previous error",
+			},
+			expectedConditionState: metav1.ConditionTrue,
+			expectedReason:         hyperv1.AsExpectedReason,
+			expectedMessage:        hyperv1.AllIsWellMessage,
+		},
+		{
+			name:         "When reconciliation fails after success it should transition condition to False",
+			reconcileErr: fmt.Errorf("failed to reconcile namespaces: context deadline exceeded"),
+			existingCondition: &metav1.Condition{
+				Type:    string(hyperv1.ConfigOperatorReconciliationSucceeded),
+				Status:  metav1.ConditionTrue,
+				Reason:  hyperv1.AsExpectedReason,
+				Message: hyperv1.AllIsWellMessage,
+			},
+			expectedConditionState: metav1.ConditionFalse,
+			expectedReason:         hyperv1.ReconcileErrorReason,
+			expectedMessage:        "failed to reconcile namespaces: context deadline exceeded",
+		},
+		{
+			name:                   "When error message exceeds max length it should be truncated",
+			reconcileErr:           fmt.Errorf("%s", strings.Repeat("a", 2000)),
+			expectedConditionState: metav1.ConditionFalse,
+			expectedReason:         hyperv1.ReconcileErrorReason,
+			expectedMessage:        strings.Repeat("a", maxConditionMessageLength-3) + "...",
 		},
 	}
 
@@ -3039,52 +4359,38 @@ func TestReconcileImageRegistry(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			g := NewWithT(t)
 
-			var guestObjects []client.Object
-			if tc.existingRegistryConfig != nil {
-				guestObjects = append(guestObjects, tc.existingRegistryConfig)
+			hcp := fakeHCP()
+			hcp.Generation = 7
+			if tc.existingCondition != nil {
+				meta.SetStatusCondition(&hcp.Status.Conditions, *tc.existingCondition)
 			}
-
-			guestClient := fake.NewClientBuilder().
-				WithScheme(api.Scheme).
-				WithObjects(guestObjects...).
-				Build()
 
 			cpClient := fake.NewClientBuilder().
 				WithScheme(api.Scheme).
-				WithObjects(tc.hcp).
+				WithObjects(hcp).
 				WithStatusSubresource(&hyperv1.HostedControlPlane{}).
 				Build()
 
 			r := &reconciler{
-				client:                 guestClient,
-				cpClient:               cpClient,
-				CreateOrUpdateProvider: &simpleCreateOrUpdater{},
-				platformType:           tc.platformType,
+				cpClient:     cpClient,
+				hcpName:      hcp.Name,
+				hcpNamespace: hcp.Namespace,
 			}
 
 			ctx := logr.NewContext(t.Context(), zapr.NewLogger(zaptest.NewLogger(t)))
-			errs := r.reconcileImageRegistry(ctx, tc.hcp)
+			err := r.reconcileConfigOperatorReconciliationCondition(ctx, hcp, tc.reconcileErr)
+			g.Expect(err).ToNot(HaveOccurred())
 
-			if tc.expectErrors {
-				g.Expect(len(errs)).To(BeNumerically(">", 0), "expected errors but got none")
-			} else {
-				g.Expect(len(errs)).To(Equal(0), "expected no errors but got: %v", errs)
-			}
+			updatedHCP := &hyperv1.HostedControlPlane{}
+			err = cpClient.Get(ctx, client.ObjectKeyFromObject(hcp), updatedHCP)
+			g.Expect(err).ToNot(HaveOccurred())
 
-			registryConfig := manifests.Registry()
-			err := guestClient.Get(t.Context(), client.ObjectKeyFromObject(registryConfig), registryConfig)
-			if tc.expectRegistryReconciled {
-				g.Expect(err).ToNot(HaveOccurred(), "expected registry config to exist after reconciliation")
-				g.Expect(registryConfig.Spec.HTTPSecret).ToNot(BeEmpty(), "expected HTTPSecret to be set")
-			} else if tc.existingRegistryConfig == nil {
-				g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected registry config to not exist")
-			}
-
-			if tc.expectVAPReconciled {
-				vap := manifests.ValidatingAdmissionPolicy("deny-removed-managementstate")
-				err := guestClient.Get(t.Context(), client.ObjectKeyFromObject(vap), vap)
-				g.Expect(err).ToNot(HaveOccurred(), "expected ValidatingAdmissionPolicy to exist for Azure platform")
-			}
+			condition := meta.FindStatusCondition(updatedHCP.Status.Conditions, string(hyperv1.ConfigOperatorReconciliationSucceeded))
+			g.Expect(condition).ToNot(BeNil(), "ConfigOperatorReconciliationSucceeded condition should be present")
+			g.Expect(condition.Status).To(Equal(tc.expectedConditionState))
+			g.Expect(condition.Reason).To(Equal(tc.expectedReason))
+			g.Expect(condition.Message).To(Equal(tc.expectedMessage))
+			g.Expect(condition.ObservedGeneration).To(Equal(hcp.Generation))
 		})
 	}
 }

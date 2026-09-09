@@ -10,6 +10,7 @@ import (
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
 	"github.com/openshift/hypershift/support/config"
 	component "github.com/openshift/hypershift/support/controlplane-component"
+	"github.com/openshift/hypershift/support/podspec"
 	"github.com/openshift/hypershift/support/util"
 
 	configv1 "github.com/openshift/api/config/v1"
@@ -34,7 +35,8 @@ const (
 )
 
 func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Deployment) error {
-	util.UpdateContainer(ComponentName, deployment.Spec.Template.Spec.Containers, func(c *corev1.Container) {
+	podspec.UpdateContainer(ComponentName, deployment.Spec.Template.Spec.Containers, func(c *corev1.Container) {
+		c.Args = append(c.Args, fmt.Sprintf("--v=%d", resolveOAuthVerbosity(cpContext.HCP)))
 		if cpContext.HCP.Spec.AuditWebhook != nil && len(cpContext.HCP.Spec.AuditWebhook.Name) > 0 {
 			c.Args = append(c.Args, fmt.Sprintf("--audit-webhook-config-file=%s", path.Join("/etc/kubernetes/auditwebhook", hyperv1.AuditWebhookKubeconfigKey)))
 			c.Args = append(c.Args, "--audit-webhook-mode=batch")
@@ -52,22 +54,20 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 				},
 			})
 		}
-
+		noProxy := []string{manifests.KubeAPIServerService("").Name, config.AuditWebhookService, getOAuthServiceDNS(cpContext.HCP.Namespace)}
 		if cpContext.HCP.Spec.Platform.Type == hyperv1.IBMCloudPlatform {
-			noProxy := []string{
-				manifests.KubeAPIServerService("").Name, config.AuditWebhookService,
-				"iam.cloud.ibm.com", "iam.test.cloud.ibm.com",
-			}
-			util.UpsertEnvVar(c, corev1.EnvVar{
-				Name:  "NO_PROXY",
-				Value: strings.Join(noProxy, ","),
-			})
+			noProxy = append(noProxy, "iam.cloud.ibm.com", "iam.test.cloud.ibm.com")
 		}
+
+		podspec.UpsertEnvVar(c, corev1.EnvVar{
+			Name:  "NO_PROXY",
+			Value: strings.Join(noProxy, ","),
+		})
 	})
 
 	configuration := cpContext.HCP.Spec.Configuration
 	if configuration.GetAuditPolicyConfig().Profile == configv1.NoneAuditProfileType {
-		util.RemoveContainer("audit-logs", &deployment.Spec.Template.Spec)
+		podspec.RemoveContainer("audit-logs", &deployment.Spec.Template.Spec)
 	}
 
 	if namedCertificates := configuration.GetNamedCertificates(); len(namedCertificates) > 0 {
@@ -77,17 +77,17 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 	if configuration != nil && configuration.OAuth != nil {
 		oauthTemplates := configuration.OAuth.Templates
 		if oauthTemplates.Error.Name != "" {
-			util.UpdateVolume(oauthErrorTemplateVolumeName, deployment.Spec.Template.Spec.Volumes, func(v *corev1.Volume) {
+			podspec.UpdateVolume(oauthErrorTemplateVolumeName, deployment.Spec.Template.Spec.Volumes, func(v *corev1.Volume) {
 				v.Secret.SecretName = oauthTemplates.Error.Name
 			})
 		}
 		if oauthTemplates.Login.Name != "" {
-			util.UpdateVolume(oauthLoginTemplateVolumeName, deployment.Spec.Template.Spec.Volumes, func(v *corev1.Volume) {
+			podspec.UpdateVolume(oauthLoginTemplateVolumeName, deployment.Spec.Template.Spec.Volumes, func(v *corev1.Volume) {
 				v.Secret.SecretName = oauthTemplates.Login.Name
 			})
 		}
 		if oauthTemplates.ProviderSelection.Name != "" {
-			util.UpdateVolume(oauthProvidersTemplateVolumeName, deployment.Spec.Template.Spec.Volumes, func(v *corev1.Volume) {
+			podspec.UpdateVolume(oauthProvidersTemplateVolumeName, deployment.Spec.Template.Spec.Volumes, func(v *corev1.Volume) {
 				v.Secret.SecretName = oauthTemplates.ProviderSelection.Name
 			})
 		}
@@ -99,7 +99,7 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 			// A condition will be set on the HC to indicate the error
 			if len(volumeMountInfo.Volumes) > 0 {
 				deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, volumeMountInfo.Volumes...)
-				util.UpdateContainer(ComponentName, deployment.Spec.Template.Spec.Containers, func(c *corev1.Container) {
+				podspec.UpdateContainer(ComponentName, deployment.Spec.Template.Spec.Containers, func(c *corev1.Container) {
 					c.VolumeMounts = append(c.VolumeMounts, volumeMountInfo.VolumeMounts.ContainerMounts(ComponentName)...)
 				})
 			}
@@ -109,7 +109,7 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 	kubeadminPasswordSecret := common.KubeadminPasswordSecret(deployment.Namespace)
 	if err := cpContext.Client.Get(cpContext, client.ObjectKeyFromObject(kubeadminPasswordSecret), kubeadminPasswordSecret); err != nil {
 		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("failed to get kubeadmin password secret: %v", err)
+			return fmt.Errorf("failed to get kubeadmin password secret: %w", err)
 		}
 		delete(deployment.Spec.Template.ObjectMeta.Annotations, KubeadminSecretHashAnnotation)
 	} else {
@@ -122,8 +122,16 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 	return nil
 }
 
+func resolveOAuthVerbosity(hcp *hyperv1.HostedControlPlane) int {
+	var level hyperv1.LogLevel
+	if hcp.Spec.OperatorConfiguration != nil {
+		level = hcp.Spec.OperatorConfiguration.OAuthServer.LogLevel
+	}
+	return util.LogLevelToKlogVerbosity(level)
+}
+
 func applyNamedCertificateMounts(certs []configv1.APIServerNamedServingCert, spec *corev1.PodSpec) {
-	util.UpdateContainer(ComponentName, spec.Containers, func(c *corev1.Container) {
+	podspec.UpdateContainer(ComponentName, spec.Containers, func(c *corev1.Container) {
 		for i, namedCert := range certs {
 			volumeName := fmt.Sprintf("named-cert-%d", i+1)
 			spec.Volumes = append(spec.Volumes, corev1.Volume{

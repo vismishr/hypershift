@@ -8,6 +8,8 @@ import (
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 
+	configv1 "github.com/openshift/api/config/v1"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -19,15 +21,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/blang/semver"
+	"github.com/google/go-cmp/cmp"
 )
 
 const (
 	// Test service account emails used across GCP tests
-	testNodePoolGSA        = "test-capg-sa@test-project.iam.gserviceaccount.com"
-	testControlPlaneGSA    = "test-control-plane-sa@test-project.iam.gserviceaccount.com"
-	testCloudControllerGSA = "test-cloud-controller@test-project.iam.gserviceaccount.com"
-	testStorageGSA         = "test-storage@test-project.iam.gserviceaccount.com"
-	testImageRegistryGSA   = "test-image-registry@test-project.iam.gserviceaccount.com"
+	testNodePoolGSA        hyperv1.GCPServiceAccountEmail = "test-capg-sa@test-project.iam.gserviceaccount.com"
+	testControlPlaneGSA    hyperv1.GCPServiceAccountEmail = "test-control-plane-sa@test-project.iam.gserviceaccount.com"
+	testCloudControllerGSA hyperv1.GCPServiceAccountEmail = "test-cloud-controller@test-project.iam.gserviceaccount.com"
+	testStorageGSA         hyperv1.GCPServiceAccountEmail = "test-storage@test-project.iam.gserviceaccount.com"
+	testImageRegistryGSA   hyperv1.GCPServiceAccountEmail = "test-image-registry@test-project.iam.gserviceaccount.com"
+	testNetworkGSA         hyperv1.GCPServiceAccountEmail = "test-network-sa@test-project.iam.gserviceaccount.com"
 )
 
 // testCreateOrUpdate is a test helper that implements createOrUpdate functionality
@@ -93,6 +97,7 @@ func validHostedCluster() *hyperv1.HostedCluster {
 							CloudController: testCloudControllerGSA,
 							Storage:         testStorageGSA,
 							ImageRegistry:   testImageRegistryGSA,
+							Network:         testNetworkGSA,
 						},
 					},
 				},
@@ -293,103 +298,6 @@ func TestDeleteCredentials(t *testing.T) {
 	g.Expect(err).To(BeNil()) // Minimal implementation returns nil
 }
 
-func TestBuildGCPWorkloadIdentityCredentials(t *testing.T) {
-	g := NewWithT(t)
-
-	wif := hyperv1.GCPWorkloadIdentityConfig{
-		ProjectNumber: "123456789012",
-		PoolID:        "test-pool",
-		ProviderID:    "test-provider",
-		ServiceAccountsEmails: hyperv1.GCPServiceAccountsEmails{
-			NodePool:        testNodePoolGSA,
-			ControlPlane:    testControlPlaneGSA,
-			CloudController: testCloudControllerGSA,
-			Storage:         testStorageGSA,
-			ImageRegistry:   testImageRegistryGSA,
-		},
-	}
-
-	// Using NodePool GSA as an example - the function is generic and works the same
-	// for any service account email (NodePool, ControlPlane, CloudController, etc.)
-	credentials, err := buildGCPWorkloadIdentityCredentials(wif, wif.ServiceAccountsEmails.NodePool)
-	g.Expect(err).To(BeNil())
-	g.Expect(credentials).To(ContainSubstring(`"type":"external_account"`))
-	g.Expect(credentials).To(ContainSubstring("123456789012"))
-	g.Expect(credentials).To(ContainSubstring("test-pool"))
-	g.Expect(credentials).To(ContainSubstring("test-provider"))
-	g.Expect(credentials).To(ContainSubstring("/var/run/secrets/openshift/serviceaccount/token"))
-}
-
-func TestBuildGCPWorkloadIdentityCredentialsValidation(t *testing.T) {
-	g := NewWithT(t)
-
-	// validWIF returns a baseline valid GCPWorkloadIdentityConfig.
-	// Callers mutate individual fields to test specific validation errors.
-	validWIF := func() hyperv1.GCPWorkloadIdentityConfig {
-		return hyperv1.GCPWorkloadIdentityConfig{
-			ProjectNumber: "123456789012",
-			PoolID:        "test-pool",
-			ProviderID:    "test-provider",
-			ServiceAccountsEmails: hyperv1.GCPServiceAccountsEmails{
-				NodePool:        testNodePoolGSA,
-				ControlPlane:    testControlPlaneGSA,
-				CloudController: testCloudControllerGSA,
-				Storage:         testStorageGSA,
-				ImageRegistry:   testImageRegistryGSA,
-			},
-		}
-	}
-
-	tests := []struct {
-		name     string
-		mutate   func(*hyperv1.GCPWorkloadIdentityConfig)
-		errorMsg string
-	}{
-		{
-			name:   "valid configuration",
-			mutate: nil,
-		},
-		{
-			name:     "missing project number",
-			mutate:   func(wif *hyperv1.GCPWorkloadIdentityConfig) { wif.ProjectNumber = "" },
-			errorMsg: "project number cannot be empty",
-		},
-		{
-			name:     "missing pool ID",
-			mutate:   func(wif *hyperv1.GCPWorkloadIdentityConfig) { wif.PoolID = "" },
-			errorMsg: "pool ID cannot be empty",
-		},
-		{
-			name:     "missing provider ID",
-			mutate:   func(wif *hyperv1.GCPWorkloadIdentityConfig) { wif.ProviderID = "" },
-			errorMsg: "provider ID cannot be empty",
-		},
-		{
-			name:     "missing service account email",
-			mutate:   func(wif *hyperv1.GCPWorkloadIdentityConfig) { wif.ServiceAccountsEmails.NodePool = "" },
-			errorMsg: "service account email cannot be empty",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			wif := validWIF()
-			if tt.mutate != nil {
-				tt.mutate(&wif)
-			}
-			// Using NodePool GSA as the serviceAccountEmail parameter - the function
-			// is generic and works the same for any service account email
-			_, err := buildGCPWorkloadIdentityCredentials(wif, wif.ServiceAccountsEmails.NodePool)
-			if tt.errorMsg != "" {
-				g.Expect(err).ToNot(BeNil())
-				g.Expect(err.Error()).To(ContainSubstring(tt.errorMsg))
-			} else {
-				g.Expect(err).To(BeNil())
-			}
-		})
-	}
-}
-
 func TestValidateWorkloadIdentityConfiguration(t *testing.T) {
 	g := NewWithT(t)
 
@@ -438,6 +346,13 @@ func TestValidateWorkloadIdentityConfiguration(t *testing.T) {
 				hc.Spec.Platform.GCP.WorkloadIdentity.ServiceAccountsEmails.ImageRegistry = ""
 			},
 			errorMsg: "image registry service account email is required",
+		},
+		{
+			name: "missing network service account email",
+			mutate: func(hc *hyperv1.HostedCluster) {
+				hc.Spec.Platform.GCP.WorkloadIdentity.ServiceAccountsEmails.Network = ""
+			},
+			errorMsg: "network service account email is required",
 		},
 	}
 
@@ -503,4 +418,112 @@ func TestReconcileGCPClusterPreservesServerDefaultedFields(t *testing.T) {
 	g.Expect(gcpCluster.Spec.Network.Name).To(Equal(ptr.To("test-network")))
 	g.Expect(gcpCluster.Spec.Network.Subnets[0].Name).To(Equal("test-subnet"))
 	g.Expect(gcpCluster.Spec.Network.Subnets[0].Region).To(Equal("us-central1"))
+}
+
+func buildGCPHostedControlPlane(tlsProfile *configv1.TLSSecurityProfile) *hyperv1.HostedControlPlane {
+	return &hyperv1.HostedControlPlane{
+		Spec: hyperv1.HostedControlPlaneSpec{
+			Configuration: &hyperv1.ClusterConfiguration{
+				APIServer: &configv1.APIServerSpec{
+					TLSSecurityProfile: tlsProfile,
+				},
+			},
+		},
+	}
+}
+
+func TestCAPIProviderDeploymentSpecWithTLS(t *testing.T) {
+	defaultArgs := []string{
+		"--namespace=$(MY_NAMESPACE)",
+		"--leader-elect=true",
+		"--feature-gates=MachinePool=false",
+		"--v=2",
+	}
+
+	defaultUtilitiesImage := "test-utilities-image"
+	defaultCapgImage := "test-capg-image"
+
+	customTLSProfile := &configv1.TLSSecurityProfile{
+		Type: configv1.TLSProfileCustomType,
+		Custom: &configv1.CustomTLSProfile{
+			TLSProfileSpec: configv1.TLSProfileSpec{
+				MinTLSVersion: configv1.VersionTLS12,
+				Ciphers: []string{
+					"ECDHE-ECDSA-AES128-GCM-SHA256",
+					"ECDHE-RSA-AES128-GCM-SHA256",
+				},
+			},
+		},
+	}
+
+	testCases := []struct {
+		name           string
+		hcp            *hyperv1.HostedControlPlane
+		payloadVersion *semver.Version
+		expectedArgs   []string
+	}{
+		{
+			name:           "When HostedControlPlane is nil it should not append TLS args",
+			payloadVersion: ptr.To(semver.MustParse("4.23.0")),
+			expectedArgs:   defaultArgs,
+		},
+		{
+			name: "When version is 4.22 and HCP has TLS profile it should not append TLS args",
+			hcp: buildGCPHostedControlPlane(&configv1.TLSSecurityProfile{
+				Type: configv1.TLSProfileModernType,
+			}),
+			payloadVersion: ptr.To(semver.MustParse("4.22.0")),
+			expectedArgs:   defaultArgs,
+		},
+		{
+			name: "When version is 4.23 and HCP has Modern TLS profile it should append min-version only",
+			hcp: buildGCPHostedControlPlane(&configv1.TLSSecurityProfile{
+				Type: configv1.TLSProfileModernType,
+			}),
+			payloadVersion: ptr.To(semver.MustParse("4.23.0")),
+			expectedArgs: append(defaultArgs,
+				"--tls-min-version=VersionTLS13",
+			),
+		},
+		{
+			name:           "When version is 5.0 and HCP has custom TLS profile it should append custom TLS args",
+			hcp:            buildGCPHostedControlPlane(customTLSProfile),
+			payloadVersion: ptr.To(semver.MustParse("5.0.0")),
+			expectedArgs: append(defaultArgs,
+				"--tls-min-version=VersionTLS12",
+				"--tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+			),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			platform := New(defaultUtilitiesImage, defaultCapgImage, tc.payloadVersion)
+			spec, err := platform.CAPIProviderDeploymentSpec(
+				&hyperv1.HostedCluster{
+					Spec: hyperv1.HostedClusterSpec{
+						Platform: hyperv1.PlatformSpec{
+							Type: hyperv1.GCPPlatform,
+							GCP:  &hyperv1.GCPPlatformSpec{},
+						},
+					},
+				},
+				tc.hcp,
+			)
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if spec == nil {
+				t.Fatal("expected deployment spec, got nil")
+			}
+			if len(spec.Template.Spec.Containers) == 0 {
+				t.Fatal("expected at least 1 container, got 0")
+			}
+
+			if diff := cmp.Diff(spec.Template.Spec.Containers[0].Args, tc.expectedArgs); diff != "" {
+				t.Errorf("args differ (-got +want):\n%s", diff)
+			}
+		})
+	}
 }

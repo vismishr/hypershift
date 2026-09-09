@@ -8,8 +8,8 @@ import (
 	"github.com/openshift/hypershift/support/azureutil"
 	"github.com/openshift/hypershift/support/config"
 	component "github.com/openshift/hypershift/support/controlplane-component"
+	"github.com/openshift/hypershift/support/k8sutil"
 	"github.com/openshift/hypershift/support/rhobsmonitoring"
-	"github.com/openshift/hypershift/support/util"
 
 	rbacv1 "k8s.io/api/rbac/v1"
 )
@@ -39,7 +39,7 @@ func adaptRole(cpContext component.WorkloadContext, role *rbacv1.Role) error {
 		})
 	}
 
-	if azureutil.IsAroHCP() {
+	if azureutil.IsAroHCPByHCP(cpContext.HCP) {
 		role.Rules = append(role.Rules, rbacv1.PolicyRule{
 			APIGroups: []string{"secrets-store.csi.x-k8s.io"},
 			Resources: []string{"secretproviderclasses"},
@@ -56,7 +56,7 @@ func adaptRole(cpContext component.WorkloadContext, role *rbacv1.Role) error {
 	if role.Annotations == nil {
 		role.Annotations = map[string]string{}
 	}
-	role.Annotations[util.HostedClusterAnnotation] = cpContext.HCP.Annotations[util.HostedClusterAnnotation]
+	role.Annotations[k8sutil.HostedClusterAnnotation] = cpContext.HCP.Annotations[k8sutil.HostedClusterAnnotation]
 
 	return nil
 }

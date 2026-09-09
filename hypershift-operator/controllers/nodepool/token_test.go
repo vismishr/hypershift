@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	ignitionapi "github.com/coreos/ignition/v2/config/v3_2/types"
+	"github.com/coreos/stream-metadata-go/stream"
 	"github.com/go-logr/logr/testr"
 	"github.com/google/uuid"
 )
@@ -100,6 +101,7 @@ func TestNewToken(t *testing.T) {
 				},
 				nodePool:              &hyperv1.NodePool{},
 				controlplaneNamespace: controlplaneNamespace,
+				rolloutConfig:         &rolloutConfig{},
 			},
 			fakeObjects: []crclient.Object{
 				pullSecret,
@@ -131,6 +133,7 @@ func TestNewToken(t *testing.T) {
 				},
 				nodePool:              &hyperv1.NodePool{},
 				controlplaneNamespace: controlplaneNamespace,
+				rolloutConfig:         &rolloutConfig{},
 			},
 			fakeObjects: []crclient.Object{
 				pullSecret,
@@ -162,6 +165,7 @@ func TestNewToken(t *testing.T) {
 				},
 				nodePool:              &hyperv1.NodePool{},
 				controlplaneNamespace: controlplaneNamespace,
+				rolloutConfig:         &rolloutConfig{},
 			},
 			fakeObjects: []crclient.Object{
 				additionalTrustBundle,
@@ -192,6 +196,7 @@ func TestNewToken(t *testing.T) {
 				},
 				nodePool:              &hyperv1.NodePool{},
 				controlplaneNamespace: controlplaneNamespace,
+				rolloutConfig:         &rolloutConfig{},
 			},
 			fakeObjects: []crclient.Object{
 				pullSecret,
@@ -222,6 +227,7 @@ func TestNewToken(t *testing.T) {
 				},
 				nodePool:              &hyperv1.NodePool{},
 				controlplaneNamespace: controlplaneNamespace,
+				rolloutConfig:         &rolloutConfig{},
 			},
 			fakeObjects: []crclient.Object{
 				pullSecret,
@@ -263,6 +269,7 @@ func TestNewToken(t *testing.T) {
 				},
 				nodePool:              &hyperv1.NodePool{},
 				controlplaneNamespace: controlplaneNamespace,
+				rolloutConfig:         &rolloutConfig{},
 			},
 			fakeObjects: []crclient.Object{
 				pullSecret,
@@ -351,7 +358,7 @@ func TestTokenCleanupOutdated(t *testing.T) {
 		expectedError string
 	}{
 		{
-			name: "When userdata and token secret are outdated userdata secret should be deleted and token secret should get and expiration timestamp",
+			name: "When userdata and token secret are outdated, it should delete userdata secret and add expiration timestamp to token secret",
 			token: &Token{
 				ConfigGenerator: &ConfigGenerator{
 					nodePool: &hyperv1.NodePool{
@@ -368,6 +375,7 @@ func TestTokenCleanupOutdated(t *testing.T) {
 						},
 					},
 					controlplaneNamespace: controlplaneNamespace,
+					rolloutConfig:         &rolloutConfig{},
 				},
 			},
 			fakeObjects: []crclient.Object{
@@ -394,6 +402,7 @@ func TestTokenCleanupOutdated(t *testing.T) {
 						},
 					},
 					controlplaneNamespace: controlplaneNamespace,
+					rolloutConfig:         &rolloutConfig{},
 				},
 			},
 			fakeObjects:   []crclient.Object{},
@@ -417,10 +426,63 @@ func TestTokenCleanupOutdated(t *testing.T) {
 						},
 					},
 					controlplaneNamespace: controlplaneNamespace,
+					rolloutConfig:         &rolloutConfig{},
 				},
 			},
 			fakeObjects: []crclient.Object{
 				tokenSecretWithTimestamp,
+			},
+			expectedError: "",
+		},
+		{
+			name: "When platform is KubeVirt, it should preserve outdated userdata secret and add expiration timestamp to token secret",
+			token: &Token{
+				ConfigGenerator: &ConfigGenerator{
+					nodePool: &hyperv1.NodePool{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: nodePoolName,
+							Annotations: map[string]string{
+								nodePoolAnnotationCurrentConfigVersion: outdatedHash,
+							},
+						},
+						Spec: hyperv1.NodePoolSpec{
+							Platform: hyperv1.NodePoolPlatform{
+								Type: hyperv1.KubevirtPlatform,
+							},
+						},
+					},
+					controlplaneNamespace: controlplaneNamespace,
+				},
+			},
+			fakeObjects: []crclient.Object{
+				userdataSecret.DeepCopy(),
+				tokenSecret.DeepCopy(),
+			},
+			expectedError: "",
+		},
+		{
+			name: "When platform is AWS, it should preserve outdated userdata secret and add expiration timestamp to token secret",
+			token: &Token{
+				ConfigGenerator: &ConfigGenerator{
+					nodePool: &hyperv1.NodePool{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: nodePoolName,
+							Annotations: map[string]string{
+								nodePoolAnnotationCurrentConfigVersion: outdatedHash,
+							},
+						},
+						Spec: hyperv1.NodePoolSpec{
+							Platform: hyperv1.NodePoolPlatform{
+								Type: hyperv1.AWSPlatform,
+							},
+						},
+					},
+					controlplaneNamespace: controlplaneNamespace,
+				},
+			},
+			fakeObjects: []crclient.Object{
+				userdataSecret.DeepCopy(),
+				tokenSecret.DeepCopy(),
 			},
 			expectedError: "",
 		},
@@ -441,12 +503,15 @@ func TestTokenCleanupOutdated(t *testing.T) {
 			}
 			g.Expect(err).NotTo(HaveOccurred())
 
-			// user data secret should be deleted.
 			got := &corev1.Secret{}
 			err = fakeClient.Get(t.Context(), crclient.ObjectKeyFromObject(userdataSecret), got)
-			g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			platformType := tc.token.nodePool.Spec.Platform.Type
+			if platformType == hyperv1.AWSPlatform || platformType == hyperv1.KubevirtPlatform {
+				g.Expect(err).ToNot(HaveOccurred(), "userdata secret should be preserved for %s platform", platformType)
+			} else {
+				g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "userdata secret should be deleted for %s platform", platformType)
+			}
 
-			// token secret if exists it should be have an expiration time.
 			got = &corev1.Secret{}
 			err = fakeClient.Get(t.Context(), crclient.ObjectKeyFromObject(tokenSecret), got)
 			if err != nil {
@@ -739,6 +804,8 @@ func TestTokenReconcile(t *testing.T) {
 			g.Expect(UUIDToken).To(BeAssignableToTypeOf(uuid.UUID{}))
 			g.Expect(gotTokenSecret.Data[TokenSecretReleaseKey]).To(Equal([]byte(tc.configGenerator.nodePool.Spec.Release.Image)))
 			g.Expect(gotTokenSecret.Data[TokenSecretReleaseKey]).ToNot(BeEmpty())
+			g.Expect(gotTokenSecret.Data[TokenSecretReleaseVersionKey]).To(Equal([]byte(tc.configGenerator.releaseImage.Version())))
+			g.Expect(gotTokenSecret.Data[TokenSecretReleaseVersionKey]).ToNot(BeEmpty())
 
 			// Validate the config is compressed and encoded in the token secret.
 			compressedAndEncodedConfig := gotTokenSecret.Data[TokenSecretConfigKey]
@@ -755,6 +822,9 @@ func TestTokenReconcile(t *testing.T) {
 			g.Expect(gotTokenSecret.Data[TokenSecretPullSecretHashKey]).To(Equal(expectedPullSecretHash))
 			g.Expect(gotTokenSecret.Data[TokenSecretAdditionalTrustBundleKey]).To(Equal(expectedAdditionalTrustBundleHash))
 			g.Expect(gotTokenSecret.Data[TokenSecretHCConfigurationHashKey]).To(Equal([]byte(expectedGlobalConfig)))
+
+			// Validate the os-stream key is set to the resolved RHEL stream.
+			g.Expect(gotTokenSecret.Data[TokenSecretOSStreamKey]).To(Equal([]byte(tc.configGenerator.resolvedRHELStreamForBootImage)))
 
 			// Validate the user data secret has all the expected annotations.
 			// Start Generation Here
@@ -1083,6 +1153,7 @@ func TestSetKarpenterAMILabels(t *testing.T) {
 		userDataSecret *corev1.Secret
 		releaseImage   *releaseinfo.ReleaseImage
 		region         string
+		rhelStream     string
 		expectedError  string
 		expectedLabels map[string]string
 	}{
@@ -1136,19 +1207,7 @@ func TestSetKarpenterAMILabels(t *testing.T) {
 				ImageStream: &imageapi.ImageStream{
 					ObjectMeta: metav1.ObjectMeta{Name: "test-release"},
 				},
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
-						"x86_64": {
-							Images: releaseinfo.CoreOSImages{
-								AWS: releaseinfo.CoreOSAWSImages{
-									Regions: map[string]releaseinfo.CoreOSAWSImage{
-										"us-east-1": {Image: "ami-amd64-only"},
-									},
-								},
-							},
-						},
-					},
-				},
+				StreamMetadata: testAWSStream("x86_64", "us-east-1", "ami-amd64-only"),
 			},
 			expectedLabels: map[string]string{
 				karpenterutil.ArchToAMILabelKey(hyperv1.ArchitectureAMD64): "ami-amd64-only",
@@ -1169,6 +1228,107 @@ func TestSetKarpenterAMILabels(t *testing.T) {
 			},
 			expectedError: "failed to get supported architectures: unsupported platform: Azure",
 		},
+		{
+			name:       "When rhelStream is rhel-9 with single-stream payload, it should set AMI labels from StreamMetadata fallback",
+			platform:   hyperv1.AWSPlatform,
+			region:     "us-east-1",
+			rhelStream: "rhel-9",
+			userDataSecret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "user-data-secret",
+					Namespace: "test-namespace",
+					Labels: map[string]string{
+						karpenterutil.ManagedByKarpenterLabel: "true",
+					},
+				},
+			},
+			releaseImage: &releaseinfo.ReleaseImage{
+				ImageStream: &imageapi.ImageStream{
+					ObjectMeta: metav1.ObjectMeta{Name: "4.17.0"},
+				},
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
+						"x86_64": {
+							Images: stream.Images{
+								Aws: &stream.AwsImage{
+									Regions: map[string]stream.SingleImage{
+										"us-east-1": {Image: "ami-rhel9-fallback-amd64"},
+									},
+								},
+							},
+						},
+						"aarch64": {
+							Images: stream.Images{
+								Aws: &stream.AwsImage{
+									Regions: map[string]stream.SingleImage{
+										"us-east-1": {Image: "ami-rhel9-fallback-arm64"},
+									},
+								},
+							},
+						},
+					},
+				},
+				OSStreams: nil,
+			},
+			expectedLabels: map[string]string{
+				karpenterutil.ArchToAMILabelKey(hyperv1.ArchitectureAMD64): "ami-rhel9-fallback-amd64",
+				karpenterutil.ArchToAMILabelKey(hyperv1.ArchitectureARM64): "ami-rhel9-fallback-arm64",
+			},
+		},
+		{
+			name:       "When rhelStream is rhel-9 with multi-stream payload, it should use OSStreams rhel-9 AMI",
+			platform:   hyperv1.AWSPlatform,
+			region:     "us-east-1",
+			rhelStream: "rhel-9",
+			userDataSecret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "user-data-secret",
+					Namespace: "test-namespace",
+					Labels: map[string]string{
+						karpenterutil.ManagedByKarpenterLabel: "true",
+					},
+				},
+			},
+			releaseImage: &releaseinfo.ReleaseImage{
+				ImageStream: &imageapi.ImageStream{
+					ObjectMeta: metav1.ObjectMeta{Name: "5.0.0"},
+				},
+				StreamMetadata: testAWSStream("x86_64", "us-east-1", "ami-default-amd64"),
+				OSStreams: map[string]*stream.Stream{
+					"rhel-9": testAWSStream("x86_64", "us-east-1", "ami-rhel9-osstream-amd64"),
+				},
+			},
+			expectedLabels: map[string]string{
+				karpenterutil.ArchToAMILabelKey(hyperv1.ArchitectureAMD64): "ami-rhel9-osstream-amd64",
+			},
+		},
+		{
+			name:       "When rhelStream is rhel-10 with multi-stream payload, it should use OSStreams rhel-10 AMI",
+			platform:   hyperv1.AWSPlatform,
+			region:     "us-east-1",
+			rhelStream: "rhel-10",
+			userDataSecret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "user-data-secret",
+					Namespace: "test-namespace",
+					Labels: map[string]string{
+						karpenterutil.ManagedByKarpenterLabel: "true",
+					},
+				},
+			},
+			releaseImage: &releaseinfo.ReleaseImage{
+				ImageStream: &imageapi.ImageStream{
+					ObjectMeta: metav1.ObjectMeta{Name: "5.0.0"},
+				},
+				StreamMetadata: testAWSStream("x86_64", "us-east-1", "ami-default-amd64"),
+				OSStreams: map[string]*stream.Stream{
+					"rhel-10": testAWSStream("x86_64", "us-east-1", "ami-rhel10-osstream-amd64"),
+				},
+			},
+			expectedLabels: map[string]string{
+				karpenterutil.ArchToAMILabelKey(hyperv1.ArchitectureAMD64): "ami-rhel10-osstream-amd64",
+			},
+		},
 	}
 	log := testr.New(t)
 	for _, tc := range testCases {
@@ -1178,7 +1338,7 @@ func TestSetKarpenterAMILabels(t *testing.T) {
 			if ri == nil {
 				ri = testutils.InitReleaseImageOrDie("test-release")
 			}
-			err := setKarpenterAMILabels(log, tc.userDataSecret, tc.region, ri, tc.platform)
+			err := setKarpenterAMILabels(log, tc.userDataSecret, tc.region, ri, tc.platform, tc.rhelStream)
 			if tc.expectedError != "" {
 				g.Expect(err).To(HaveOccurred())
 				g.Expect(err.Error()).To(Equal(tc.expectedError))

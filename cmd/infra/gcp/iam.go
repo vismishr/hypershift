@@ -6,9 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
+	"net"
+	"net/url"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -25,9 +29,9 @@ const (
 	// defaultOIDCAudience is the default audience for OIDC providers.
 	defaultOIDCAudience = "openshift"
 
-	// iamPropagationTimeout is the maximum time to wait for IAM eventual consistency.
-	// GCP IAM changes typically propagate in 5-30 seconds, we allow 60 seconds to be safe.
-	iamPropagationTimeout = 60 * time.Second
+	// iamPropagationTimeout is the maximum time to wait for IAM eventual consistency and rate limit recovery.
+	// GCP IAM changes typically propagate in 5-30 seconds; 120 seconds gives room for rate limit backoff.
+	iamPropagationTimeout = 120 * time.Second
 
 	// iamPropagationInitialBackoff is the initial backoff duration for IAM retry operations.
 	iamPropagationInitialBackoff = 2 * time.Second
@@ -53,8 +57,8 @@ type ServiceAccountDefinition struct {
 	// Roles are the GCP IAM roles to assign to this GSA
 	Roles []string `json:"roles"`
 
-	// K8sServiceAccount contains the namespace and name of the K8s SA for WIF binding
-	K8sServiceAccount *K8sServiceAccountRef `json:"k8sServiceAccount,omitempty"`
+	// K8sServiceAccounts contains the namespace and name of each K8s SA for WIF binding
+	K8sServiceAccounts []K8sServiceAccountRef `json:"k8sServiceAccounts,omitempty"`
 }
 
 // K8sServiceAccountRef identifies a Kubernetes ServiceAccount for WIF binding.
@@ -68,25 +72,11 @@ type ServiceAccountsConfig struct {
 	ServiceAccounts []ServiceAccountDefinition `json:"serviceAccounts"`
 }
 
-// loadServiceAccountDefinitions loads and parses the service accounts configuration.
-// It uses the embedded JSON file by default, or can load from a custom file if provided.
-func loadServiceAccountDefinitions(customConfigPath string) ([]ServiceAccountDefinition, error) {
-	var data []byte
-	var err error
-
-	if customConfigPath != "" {
-		// Load from custom file path
-		data, err = os.ReadFile(customConfigPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read custom service accounts config: %w", err)
-		}
-	} else {
-		// Use embedded default configuration
-		data = defaultServiceAccountsJSON
-	}
-
+// loadServiceAccountDefinitions loads and parses the service accounts configuration
+// from the embedded JSON file.
+func loadServiceAccountDefinitions() ([]ServiceAccountDefinition, error) {
 	var config ServiceAccountsConfig
-	if err := json.Unmarshal(data, &config); err != nil {
+	if err := json.Unmarshal(defaultServiceAccountsJSON, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse service accounts configuration: %w", err)
 	}
 
@@ -144,7 +134,12 @@ func (c *IAMManager) GetProjectNumber(ctx context.Context) (string, error) {
 	}
 	c.logger.Info("Retrieving project number", "projectID", c.projectID)
 
-	projectNumber, err := c.getProjectNumberFromID(ctx)
+	var projectNumber int64
+	err := c.retryWithExponentialBackoff(ctx, "getProjectNumber", isTransientError, func() error {
+		var getErr error
+		projectNumber, getErr = c.getProjectNumberFromID(ctx)
+		return getErr
+	})
 	if err != nil {
 		return "", fmt.Errorf("failed to retrieve project number for %s: %w", c.projectID, err)
 	}
@@ -166,10 +161,11 @@ func (c *IAMManager) CreateWorkloadIdentityPool(ctx context.Context) (string, er
 		Disabled:    false,
 	}
 	parent := fmt.Sprintf("projects/%s/locations/global", c.projectID)
-	err := c.createWorkloadIdentityPool(ctx, parent, poolID, pool)
+	err := c.retryWithExponentialBackoff(ctx, "createWorkloadIdentityPool", isRetryableIAMError, func() error {
+		return c.createWorkloadIdentityPool(ctx, parent, poolID, pool)
+	})
 	if err != nil {
 		if isAlreadyExistsError(err) {
-			// Pool exists, check and fix its state if needed
 			c.logger.Info("Workload Identity Pool already exists, checking state", "poolID", poolID)
 			return c.ensurePoolUsable(ctx, parent, poolID)
 		}
@@ -228,38 +224,50 @@ func (c *IAMManager) CreateOIDCProvider(ctx context.Context) (string, string, er
 	providerID := c.formatProviderID()
 	c.logger.Info("Creating OIDC Provider", "providerID", providerID, "poolID", c.formatPoolID())
 
-	jwksData, err := os.ReadFile(c.jwksFile)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to read JWKS file: %w", err)
-	}
-	// Basic JSON validation
-	var js map[string]any
-	if err := json.Unmarshal(jwksData, &js); err != nil {
-		return "", "", fmt.Errorf("JWKS file contains invalid JSON: %w", err)
+	// When JWKS file is provided, embed the public keys inline in the provider.
+	// When omitted, GCP fetches the keys from the issuer URL's OIDC discovery endpoint.
+	var (
+		jwksJson string
+		err      error
+	)
+	if c.jwksFile != "" {
+		jwksJson, err = loadAndValidateJWKS(c.jwksFile)
+		if err != nil {
+			return "", "", err
+		}
+		c.logger.Info("Using inline JWKS for OIDC provider")
+	} else {
+		c.logger.Info("No JWKS file provided; GCP will fetch keys from issuer URL")
 	}
 
+	issuerURI := c.formatIssuerUri()
+	c.logger.Info("Using OIDC issuer URI", "issuerURI", issuerURI)
+
 	providerAudience := c.formatProviderAudience()
+	oidc := &iam.Oidc{
+		AllowedAudiences: []string{defaultOIDCAudience},
+		IssuerUri:        issuerURI,
+		JwksJson:         jwksJson,
+	}
+	if jwksJson == "" {
+		oidc.ForceSendFields = []string{"JwksJson"}
+	}
+
 	provider := &iam.WorkloadIdentityPoolProvider{
 		Description: fmt.Sprintf("OIDC Provider for HyperShift cluster %s", c.infraID),
 		DisplayName: providerID,
 		Disabled:    false,
-		// JWKS is sufficient for the provider;
-		// Valid OIDC issuer URL option is only relevant when JWKS is not provided.
-		// In this case, the issuer URL will be derived from infraID if not provided.
-		Oidc: &iam.Oidc{
-			AllowedAudiences: []string{defaultOIDCAudience},
-			IssuerUri:        c.formatIssuerUri(),
-			JwksJson:         string(jwksData),
-		},
+		Oidc:        oidc,
 		AttributeMapping: map[string]string{
 			"google.subject": "assertion.sub",
 		},
 	}
 	parent := c.formatPoolParent()
-	err = c.createWorkloadIdentityProvider(ctx, parent, providerID, provider)
+	err = c.retryWithExponentialBackoff(ctx, "createOIDCProvider", isRetryableIAMError, func() error {
+		return c.createWorkloadIdentityProvider(ctx, parent, providerID, provider)
+	})
 	if err != nil {
 		if isAlreadyExistsError(err) {
-			// Provider exists, check and fix its state/config if needed
 			c.logger.Info("OIDC Provider already exists, checking state and configuration", "providerID", providerID)
 			return c.ensureProviderUsable(ctx, providerID, provider, providerAudience)
 		}
@@ -345,7 +353,7 @@ func (c *IAMManager) ensureProviderUsable(ctx context.Context, providerID string
 func (c *IAMManager) CreateServiceAccounts(ctx context.Context) (map[string]string, error) {
 	serviceAccountEmails := make(map[string]string)
 
-	definitions, err := loadServiceAccountDefinitions("")
+	definitions, err := loadServiceAccountDefinitions()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load service account definitions: %w", err)
 	}
@@ -353,8 +361,13 @@ func (c *IAMManager) CreateServiceAccounts(ctx context.Context) (map[string]stri
 	for _, def := range definitions {
 		c.logger.Info("Processing service account", "name", def.Name)
 
-		// Create the GSA
-		email, err := c.createServiceAccount(ctx, def)
+		// Create the GSA (with retry for rate limiting)
+		var email string
+		err = c.retryWithExponentialBackoff(ctx, fmt.Sprintf("createServiceAccount-%s", def.Name), isRetryableIAMError, func() error {
+			var createErr error
+			email, createErr = c.createServiceAccount(ctx, def)
+			return createErr
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create service account %s: %w", def.Name, err)
 		}
@@ -362,7 +375,7 @@ func (c *IAMManager) CreateServiceAccounts(ctx context.Context) (map[string]stri
 
 		// Assign roles to the GSA (with retry for IAM propagation)
 		if len(def.Roles) > 0 {
-			err := c.retryWithExponentialBackoff(ctx, fmt.Sprintf("assignRoles-%s", def.Name), func() error {
+			err := c.retryWithExponentialBackoff(ctx, fmt.Sprintf("assignRoles-%s", def.Name), isRetryableIAMError, func() error {
 				return c.assignRoles(ctx, email, def.Roles)
 			})
 			if err != nil {
@@ -370,10 +383,10 @@ func (c *IAMManager) CreateServiceAccounts(ctx context.Context) (map[string]stri
 			}
 		}
 
-		// Create WIF binding if K8s SA is specified (with retry for IAM propagation)
-		if def.K8sServiceAccount != nil {
-			err := c.retryWithExponentialBackoff(ctx, fmt.Sprintf("createWIFBinding-%s", def.Name), func() error {
-				return c.createWorkloadIdentityBinding(ctx, email, def.K8sServiceAccount)
+		// Create WIF bindings for each K8s SA (with retry for IAM propagation)
+		for i, k8sSA := range def.K8sServiceAccounts {
+			err := c.retryWithExponentialBackoff(ctx, fmt.Sprintf("createWIFBinding-%s-%d", def.Name, i), isRetryableIAMError, func() error {
+				return c.createWorkloadIdentityBinding(ctx, email, &k8sSA)
 			})
 			if err != nil {
 				return nil, fmt.Errorf("failed to create WIF binding for %s: %w", def.Name, err)
@@ -649,10 +662,34 @@ func (c *IAMManager) waitOperation(ctx context.Context, opName string) error {
 	}
 }
 
+// loadAndValidateJWKS reads a JWKS file from disk, validates that it contains
+// well-formed JSON, and returns the raw content as a string.
+func loadAndValidateJWKS(filePath string) (string, error) {
+	jwksData, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read JWKS file: %w", err)
+	}
+	var js map[string]any
+	if err := json.Unmarshal(jwksData, &js); err != nil {
+		return "", fmt.Errorf("JWKS file contains invalid JSON: %w", err)
+	}
+	return string(jwksData), nil
+}
+
 // compareJWKS performs a semantic comparison of two JWKS JSON strings.
 // It parses both as JSON and compares the resulting structures, ignoring
 // differences in whitespace, key ordering, or formatting.
 func (c *IAMManager) compareJWKS(jwks1, jwks2 string) bool {
+	jwks1 = strings.TrimSpace(jwks1)
+	jwks2 = strings.TrimSpace(jwks2)
+
+	if jwks1 == "" && jwks2 == "" {
+		return true
+	}
+	if jwks1 == "" || jwks2 == "" {
+		return false
+	}
+
 	var obj1, obj2 map[string]any
 
 	if err := json.Unmarshal([]byte(jwks1), &obj1); err != nil {
@@ -677,8 +714,27 @@ func (c *IAMManager) compareJWKS(jwks1, jwks2 string) bool {
 	return string(canonical1) == string(canonical2)
 }
 
+// isTransientError returns true for errors that are transient for any operation:
+// network blips, rate limits, and server errors.
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isTransientNetworkError(err) {
+		return true
+	}
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) {
+		switch apiErr.Code {
+		case 429, 500, 502, 503, 504:
+			return true
+		}
+	}
+	return false
+}
+
 // isTransientIAMError checks if the error is likely due to IAM eventual consistency.
-// These errors should be retried as they typically resolve once IAM changes propagate.
+// These errors typically resolve once IAM changes propagate.
 func isTransientIAMError(err error) bool {
 	if err == nil {
 		return false
@@ -688,18 +744,14 @@ func isTransientIAMError(err error) bool {
 	if errors.As(err, &apiErr) {
 		switch apiErr.Code {
 		case 404:
-			// Not found - resource may not have propagated yet
 			return true
 		case 400:
-			// Bad request - sometimes occurs during IAM propagation
-			// Check if it's related to IAM/permissions or resource propagation
 			return strings.Contains(apiErr.Message, "IAM") ||
 				strings.Contains(apiErr.Message, "permission") ||
 				strings.Contains(apiErr.Message, "policy") ||
 				strings.Contains(apiErr.Message, "does not exist") ||
 				strings.Contains(apiErr.Message, "Service account")
 		case 403:
-			// Permission denied - might be temporary during propagation
 			return strings.Contains(apiErr.Message, "Permission") ||
 				strings.Contains(apiErr.Message, "policy")
 		}
@@ -708,9 +760,61 @@ func isTransientIAMError(err error) bool {
 	return false
 }
 
+// isRetryableIAMError returns true for errors that are retryable for IAM
+// create/binding paths: transient errors plus IAM eventual-consistency conditions.
+func isRetryableIAMError(err error) bool {
+	return isTransientError(err) || isTransientIAMError(err)
+}
+
+// isTransientNetworkError checks if the error is a transient network-level error
+// such as connection reset, connection refused, or network unreachable.
+// Permanent network errors (e.g., DNS not found, invalid address) return false.
+func isTransientNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return dnsErr.IsTimeout || dnsErr.IsTemporary
+	}
+
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return true
+		}
+		return isTransientNetworkError(netErr.Err)
+	}
+
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return isTransientNetworkError(urlErr.Err)
+	}
+
+	if errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ETIMEDOUT) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, io.EOF) {
+		return true
+	}
+
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return ne.Timeout()
+	}
+
+	return false
+}
+
 // retryWithExponentialBackoff retries an operation with exponential backoff.
-// It only retries on transient IAM errors and respects the context deadline.
-func (c *IAMManager) retryWithExponentialBackoff(ctx context.Context, operationName string, operation func() error) error {
+// The isRetryable predicate controls which errors trigger a retry.
+func (c *IAMManager) retryWithExponentialBackoff(ctx context.Context, operationName string, isRetryable func(error) bool, operation func() error) error {
 	deadline := time.Now().Add(iamPropagationTimeout)
 	backoff := iamPropagationInitialBackoff
 	attempt := 0
@@ -726,16 +830,15 @@ func (c *IAMManager) retryWithExponentialBackoff(ctx context.Context, operationN
 			return nil
 		}
 
-		// Check if error is transient
-		if !isTransientIAMError(err) {
-			c.logger.Info("Operation failed with non-transient error", "operation", operationName, "error", err)
+		if !isRetryable(err) {
+			c.logger.Info("Operation failed with non-retryable error", "operation", operationName, "error", err)
 			return err
 		}
 
 		// Check if we've exceeded the deadline
 		if time.Now().After(deadline) {
 			c.logger.Info("Operation timed out after retries", "operation", operationName, "attempts", attempt, "lastError", err)
-			return fmt.Errorf("operation timed out after %d attempts due to IAM propagation delays: %w", attempt, err)
+			return fmt.Errorf("operation timed out after %d attempts: %w", attempt, err)
 		}
 
 		// Check context cancellation
@@ -746,7 +849,7 @@ func (c *IAMManager) retryWithExponentialBackoff(ctx context.Context, operationN
 		// Add jitter to backoff to avoid thundering herd (±25% randomization)
 		jitter := time.Duration(float64(backoff) * (0.75 + rand.Float64()*0.5))
 
-		c.logger.Info("Retrying operation due to IAM propagation delay",
+		c.logger.Info("Retrying operation due to transient error",
 			"operation", operationName,
 			"attempt", attempt,
 			"backoff", jitter,
@@ -769,7 +872,7 @@ func (c *IAMManager) retryWithExponentialBackoff(ctx context.Context, operationN
 }
 
 func (c *IAMManager) getProjectNumberFromID(ctx context.Context) (int64, error) {
-	project, err := c.crmService.Projects.Get(c.projectID).Do()
+	project, err := c.crmService.Projects.Get(c.projectID).Context(ctx).Do()
 	if err != nil {
 		return 0, err
 	}
@@ -973,7 +1076,7 @@ func (c *IAMManager) DeleteOIDCProvider(ctx context.Context) error {
 
 // DeleteServiceAccounts deletes all Google Service Accounts created for this cluster.
 func (c *IAMManager) DeleteServiceAccounts(ctx context.Context) error {
-	definitions, err := loadServiceAccountDefinitions("")
+	definitions, err := loadServiceAccountDefinitions()
 	if err != nil {
 		return fmt.Errorf("failed to load service account definitions: %w", err)
 	}

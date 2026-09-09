@@ -20,8 +20,6 @@ import (
 	apiconversion "k8s.io/apimachinery/pkg/conversion"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 
-	infrav1beta1 "sigs.k8s.io/cluster-api-provider-aws/v2/api/v1beta1"
-	infrav1 "sigs.k8s.io/cluster-api-provider-aws/v2/api/v1beta2"
 	expinfrav1 "sigs.k8s.io/cluster-api-provider-aws/v2/exp/api/v1beta2"
 	utilconversion "sigs.k8s.io/cluster-api/util/conversion"
 )
@@ -43,11 +41,17 @@ func (src *AWSMachinePool) ConvertTo(dstRaw conversion.Hub) error {
 		dst.Spec.SuspendProcesses = restored.Spec.SuspendProcesses
 	}
 	if restored.Spec.RefreshPreferences != nil {
+		if dst.Spec.RefreshPreferences == nil {
+			dst.Spec.RefreshPreferences = &expinfrav1.RefreshPreferences{}
+		}
 		dst.Spec.RefreshPreferences.Disable = restored.Spec.RefreshPreferences.Disable
 		dst.Spec.RefreshPreferences.MaxHealthyPercentage = restored.Spec.RefreshPreferences.MaxHealthyPercentage
 	}
 	if restored.Spec.AWSLaunchTemplate.InstanceMetadataOptions != nil {
 		dst.Spec.AWSLaunchTemplate.InstanceMetadataOptions = restored.Spec.AWSLaunchTemplate.InstanceMetadataOptions
+	}
+	if restored.Spec.AWSLaunchTemplate.EnclaveOptions != nil {
+		dst.Spec.AWSLaunchTemplate.EnclaveOptions = restored.Spec.AWSLaunchTemplate.EnclaveOptions
 	}
 	if restored.Spec.AvailabilityZoneSubnetType != nil {
 		dst.Spec.AvailabilityZoneSubnetType = restored.Spec.AvailabilityZoneSubnetType
@@ -123,6 +127,10 @@ func (src *AWSManagedMachinePool) ConvertTo(dstRaw conversion.Hub) error {
 		dst.Spec.AWSLaunchTemplate.InstanceMetadataOptions = restored.Spec.AWSLaunchTemplate.InstanceMetadataOptions
 		dst.Spec.AWSLaunchTemplate.NonRootVolumes = restored.Spec.AWSLaunchTemplate.NonRootVolumes
 
+		if restored.Spec.AWSLaunchTemplate.EnclaveOptions != nil {
+			dst.Spec.AWSLaunchTemplate.EnclaveOptions = restored.Spec.AWSLaunchTemplate.EnclaveOptions
+		}
+
 		if restored.Spec.AWSLaunchTemplate.PrivateDNSName != nil {
 			dst.Spec.AWSLaunchTemplate.PrivateDNSName = restored.Spec.AWSLaunchTemplate.PrivateDNSName
 		}
@@ -148,6 +156,10 @@ func (src *AWSManagedMachinePool) ConvertTo(dstRaw conversion.Hub) error {
 
 	dst.Spec.RolePath = restored.Spec.RolePath
 	dst.Spec.RolePermissionsBoundary = restored.Spec.RolePermissionsBoundary
+
+	if restored.Spec.NodeRepairConfig != nil {
+		dst.Spec.NodeRepairConfig = restored.Spec.NodeRepairConfig
+	}
 
 	return nil
 }
@@ -228,26 +240,6 @@ func (r *AWSFargateProfileList) ConvertFrom(srcRaw conversion.Hub) error {
 	src := srcRaw.(*expinfrav1.AWSFargateProfileList)
 
 	return Convert_v1beta2_AWSFargateProfileList_To_v1beta1_AWSFargateProfileList(src, r, nil)
-}
-
-// Convert_v1beta1_AMIReference_To_v1beta2_AMIReference converts the v1beta1 AMIReference receiver to a v1beta2 AMIReference.
-func Convert_v1beta1_AMIReference_To_v1beta2_AMIReference(in *infrav1beta1.AMIReference, out *infrav1.AMIReference, s apiconversion.Scope) error {
-	return infrav1beta1.Convert_v1beta1_AMIReference_To_v1beta2_AMIReference(in, out, s)
-}
-
-// Convert_v1beta2_AMIReference_To_v1beta1_AMIReference converts the v1beta2 AMIReference receiver to a v1beta1 AMIReference.
-func Convert_v1beta2_AMIReference_To_v1beta1_AMIReference(in *infrav1.AMIReference, out *infrav1beta1.AMIReference, s apiconversion.Scope) error {
-	return infrav1beta1.Convert_v1beta2_AMIReference_To_v1beta1_AMIReference(in, out, s)
-}
-
-// Convert_v1beta2_Instance_To_v1beta1_Instance is a conversion function.
-func Convert_v1beta2_Instance_To_v1beta1_Instance(in *infrav1.Instance, out *infrav1beta1.Instance, s apiconversion.Scope) error {
-	return infrav1beta1.Convert_v1beta2_Instance_To_v1beta1_Instance(in, out, s)
-}
-
-// Convert_v1beta1_Instance_To_v1beta2_Instance is a conversion function.
-func Convert_v1beta1_Instance_To_v1beta2_Instance(in *infrav1beta1.Instance, out *infrav1.Instance, s apiconversion.Scope) error {
-	return infrav1beta1.Convert_v1beta1_Instance_To_v1beta2_Instance(in, out, s)
 }
 
 // Convert_v1beta2_AWSLaunchTemplate_To_v1beta1_AWSLaunchTemplate converts the v1beta2 AWSLaunchTemplate receiver to a v1beta1 AWSLaunchTemplate.

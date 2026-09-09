@@ -9,11 +9,12 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
-	hyperkarpenterv1 "github.com/openshift/hypershift/api/karpenter/v1beta1"
+	hyperkarpenterv1 "github.com/openshift/hypershift/api/karpenter/v1"
 	scheduling "github.com/openshift/hypershift/api/scheduling/v1alpha1"
 	"github.com/openshift/hypershift/cmd/log"
 	"github.com/openshift/hypershift/cmd/util"
@@ -22,7 +23,7 @@ import (
 	kvinfra "github.com/openshift/hypershift/kubevirtexternalinfra"
 	hyperapi "github.com/openshift/hypershift/support/api"
 	supportforwarder "github.com/openshift/hypershift/support/forwarder"
-	supportutil "github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/netutil"
 
 	configv1 "github.com/openshift/api/config/v1"
 	imagev1 "github.com/openshift/api/image/v1"
@@ -41,7 +42,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -56,13 +57,13 @@ import (
 	capikubevirt "sigs.k8s.io/cluster-api-provider-kubevirt/api/v1alpha1"
 	capiopenstackv1alpha1 "sigs.k8s.io/cluster-api-provider-openstack/api/v1alpha1"
 	capiopenstackv1beta1 "sigs.k8s.io/cluster-api-provider-openstack/api/v1beta1"
-	capiv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	karpenterv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
 
 	"github.com/go-logr/logr"
-	orcv1alpha1 "github.com/k-orc/openstack-resource-controller/api/v1alpha1"
+	orcv1alpha1 "github.com/k-orc/openstack-resource-controller/v2/api/v1alpha1"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	prometheusoperatorv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"github.com/spf13/cobra"
@@ -70,9 +71,15 @@ import (
 	cdiv1beta1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 )
 
+// DumpGuestClusterPolicy controls guest-cluster dump behavior.
+// Policies which can be parsed as a bool are not supported.
+type DumpGuestClusterPolicy string
+
 const (
-	hypershiftNamespace = "hypershift"
-	kubevirtNamespace   = "openshift-cnv"
+	hypershiftNamespace                               = "hypershift"
+	kubevirtNamespace                                 = "openshift-cnv"
+	DirectKubeApiServiceAccess DumpGuestClusterPolicy = "direct-kube-api-service-access"
+	FailOnError                DumpGuestClusterPolicy = "fail-on-error"
 )
 
 var (
@@ -115,6 +122,11 @@ var (
 		&prometheusoperatorv1.ServiceMonitor{},
 		&prometheusoperatorv1.PodMonitor{},
 	}
+
+	allowedDumpGuestClusterPolicies = map[DumpGuestClusterPolicy]struct{}{
+		DirectKubeApiServiceAccess: {},
+		FailOnError:                {},
+	}
 )
 
 type DumpOptions struct {
@@ -129,15 +141,21 @@ type DumpOptions struct {
 	// are located, when using the agent platform.
 	AgentNamespace string
 
-	DumpGuestCluster                   bool
-	DumpGuestClusterThroughKubeService bool
+	IsDumpingGuestCluster    bool
+	DumpGuestClusterPolicies map[DumpGuestClusterPolicy]struct{}
 
 	ImpersonateAs string
 
 	Log logr.Logger
 }
 
-func NewDumpCommand() *cobra.Command {
+type DumpCallback func(ctx context.Context, opts *DumpOptions) error
+
+func NewDumpCommand(dumpCallback DumpCallback) *cobra.Command {
+	const defaultDumpGuestClusterPolicy = "default-policy" // Not a real policy, placeholder to allow --dump-guest-cluster to be specified without a value
+	var dumpGuestClusterFlag string
+	var dumpGuestClusterThroughKubeService bool
+
 	cmd := &cobra.Command{
 		Use:          "cluster",
 		Short:        "Dumps hostedcluster diagnostic info",
@@ -145,12 +163,13 @@ func NewDumpCommand() *cobra.Command {
 	}
 
 	opts := &DumpOptions{
-		Namespace:      "clusters",
-		Name:           "example",
-		ArtifactDir:    "",
-		ArchiveDump:    true,
-		AgentNamespace: "",
-		Log:            log.Log,
+		Namespace:                "clusters",
+		Name:                     "example",
+		ArtifactDir:              "",
+		ArchiveDump:              true,
+		AgentNamespace:           "",
+		DumpGuestClusterPolicies: map[DumpGuestClusterPolicy]struct{}{},
+		Log:                      log.Log,
 	}
 
 	cmd.Flags().StringVar(&opts.Namespace, "namespace", opts.Namespace, "The namespace of the hostedcluster to dump")
@@ -159,21 +178,72 @@ func NewDumpCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.ArtifactDir, "artifact-dir", opts.ArtifactDir, "Destination directory for dump files")
 	cmd.Flags().BoolVar(&opts.ArchiveDump, "archive-dump", opts.ArchiveDump, "Create a tar archive of the artifact directory")
 	cmd.Flags().StringVar(&opts.AgentNamespace, "agent-namespace", opts.AgentNamespace, "For agent platform, the namespace where the agents are located")
-	cmd.Flags().BoolVar(&opts.DumpGuestCluster, "dump-guest-cluster", opts.DumpGuestCluster, "Dump data plane content as well")
-	cmd.Flags().BoolVar(&opts.DumpGuestClusterThroughKubeService, "dump-guest-cluster-through-kube-service", opts.DumpGuestClusterThroughKubeService,
-		"Dump data plane content through the kube-apiserver service (to be used within MC clusters for which debug handlers are disabled)")
+	cmd.Flags().StringVar(&dumpGuestClusterFlag, "dump-guest-cluster", "", "Dump data plane content as well. "+
+		"Optionally takes an argument, a comma separated list of policies, here are the possible values: "+
+		"'"+string(DirectKubeApiServiceAccess)+"' tells the hypershift CLI to directly access the kube API service of the hosted cluster without port-forwarding it; "+
+		"this is only possible if the hypershift CLI is run from within a cluster; this is suitable if this (management) cluster has its debug handlers disabled. "+
+		"'"+string(FailOnError)+"' makes the hypershift CLI exit in error if the dump fails instead of just logging a warning.")
+	// Deprecated, replaced by --dump-guest-cluster direct-kube-api-service-access
+	cmd.Flags().BoolVar(&dumpGuestClusterThroughKubeService, "dump-guest-cluster-through-kube-service", false, "")
 
 	_ = cmd.MarkFlagRequired("artifact-dir")
+	cmd.Flags().Lookup("dump-guest-cluster").NoOptDefVal = defaultDumpGuestClusterPolicy // allow to set --dump-guest-cluster without a value
 	cmd.MarkFlagsMutuallyExclusive("dump-guest-cluster", "dump-guest-cluster-through-kube-service")
+	_ = cmd.Flags().MarkDeprecated("dump-guest-cluster-through-kube-service", "use --dump-guest-cluster=direct-kube-api-service-access instead")
 
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		if err := DumpCluster(cmd.Context(), opts); err != nil {
-			opts.Log.Error(err, "Error")
-			return err
+		isDumpingGuestCluster, err := strconv.ParseBool(dumpGuestClusterFlag)
+		if err == nil {
+			// Backward compatibility: when --dump-guest-cluster used to be a boolean flag
+			opts.IsDumpingGuestCluster = isDumpingGuestCluster
+		} else if len(dumpGuestClusterFlag) > 0 {
+			opts.IsDumpingGuestCluster = true
+
+			if dumpGuestClusterFlag != defaultDumpGuestClusterPolicy {
+				for _, policy := range strings.Split(dumpGuestClusterFlag, ",") {
+					if _, ok := allowedDumpGuestClusterPolicies[DumpGuestClusterPolicy(policy)]; !ok {
+						return fmt.Errorf("unsupported --dump-guest-cluster policy: %v", policy)
+					}
+					opts.DumpGuestClusterPolicies[DumpGuestClusterPolicy(policy)] = struct{}{}
+				}
+			}
 		}
-		return nil
+
+		if dumpGuestClusterThroughKubeService {
+			opts.IsDumpingGuestCluster = true
+			opts.DumpGuestClusterPolicies[DirectKubeApiServiceAccess] = struct{}{}
+		}
+
+		return dumpCallback(cmd.Context(), opts)
 	}
 	return cmd
+}
+
+// DumpClusterWithRetry retries DumpCluster on a fixed 5-second interval until
+// it succeeds or the context is canceled. Every error is treated as retryable —
+// the caller controls the deadline via the context.
+func DumpClusterWithRetry(ctx context.Context, opts *DumpOptions) error {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		// 1. Attempt the operation immediately on every iteration
+		err := DumpCluster(ctx, opts)
+		if err == nil {
+			return nil
+		}
+
+		opts.Log.Info("Retrying cluster dump after error", "error", err)
+
+		// 2. Wait for either context cancellation or the next tick before looping
+		select {
+		case <-ctx.Done():
+			opts.Log.Error(err, "Context canceled during cluster dump retries")
+			return err
+		case <-ticker.C:
+			// Loop repeats to try DumpCluster again
+		}
+	}
 }
 
 func dumpGuestCluster(ctx context.Context, opts *DumpOptions) error {
@@ -199,7 +269,7 @@ func dumpGuestCluster(ctx context.Context, opts *DumpOptions) error {
 	var localPort int
 	var forwarderStop chan struct{}
 
-	if opts.DumpGuestClusterThroughKubeService {
+	if _, ok := opts.DumpGuestClusterPolicies[DirectKubeApiServiceAccess]; ok {
 		localPort = -1 // Indicates connection via kube-apiserver service instead of port-forward
 	} else {
 		localPort = rand.IntN(45000-32767) + 32767
@@ -232,7 +302,7 @@ func dumpGuestCluster(ctx context.Context, opts *DumpOptions) error {
 			Out:       forwarderOutput,
 			ErrOut:    forwarderOutput,
 		}
-		podPort := supportutil.KASPodPortFromHostedCluster(hostedCluster)
+		podPort := netutil.KASPodPortFromHostedCluster(hostedCluster)
 		forwarderStop = make(chan struct{})
 		if err := forwarder.ForwardPorts([]string{fmt.Sprintf("%d:%d", localPort, podPort)}, forwarderStop); err != nil {
 			return fmt.Errorf("cannot forward kube apiserver port: %w, output: %s", err, forwarderOutput.String())
@@ -479,8 +549,11 @@ func DumpCluster(ctx context.Context, opts *DumpOptions) error {
 
 	gatherNetworkLogs(ocCommand, controlPlaneNamespace, opts.ArtifactDir, ctx, c, opts.Log)
 
-	if opts.DumpGuestCluster || opts.DumpGuestClusterThroughKubeService {
+	if opts.IsDumpingGuestCluster {
 		if err = dumpGuestCluster(ctx, opts); err != nil {
+			if _, ok := opts.DumpGuestClusterPolicies[FailOnError]; ok {
+				return fmt.Errorf("failed to dump guest cluster: %w", err)
+			}
 			opts.Log.Error(err, "Failed to dump guest cluster")
 		}
 	}
@@ -905,7 +978,7 @@ func shouldDumpKubevirt(nodePools []*hyperv1.NodePool) ([]kubevirtExtCluster, bo
 func isResourceRegistered(discoveryClient discovery.DiscoveryInterface, gvk schema.GroupVersionKind) (bool, error) {
 	apiResourceLists, err := discoveryClient.ServerResourcesForGroupVersion(gvk.GroupVersion().String())
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			return false, nil
 		}
 		return false, err

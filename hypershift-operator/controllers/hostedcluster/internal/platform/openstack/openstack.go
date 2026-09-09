@@ -7,6 +7,7 @@ import (
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/cloud/openstack"
+	"github.com/openshift/hypershift/support/config"
 	"github.com/openshift/hypershift/support/images"
 	"github.com/openshift/hypershift/support/openstackutil"
 	"github.com/openshift/hypershift/support/upsert"
@@ -20,7 +21,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	capo "sigs.k8s.io/cluster-api-provider-openstack/api/v1beta1"
-	capiv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/blang/semver"
@@ -174,7 +175,7 @@ func reconcileOpenStackClusterSpec(hcluster *hyperv1.HostedCluster, openStackClu
 	return nil
 }
 
-func (a OpenStack) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _ *hyperv1.HostedControlPlane) (*appsv1.DeploymentSpec, error) {
+func (a OpenStack) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, hcp *hyperv1.HostedControlPlane) (*appsv1.DeploymentSpec, error) {
 	capoImage := a.capiProviderImage
 	if envImage := os.Getenv(images.OpenStackCAPIProviderEnvVar); len(envImage) > 0 {
 		capoImage = envImage
@@ -189,6 +190,31 @@ func (a OpenStack) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _
 	if override, ok := hcluster.Annotations[hyperv1.OpenStackResourceControllerImage]; ok {
 		orcImage = override
 	}
+
+	capoArgs := []string{
+		"--namespace=$(MY_NAMESPACE)",
+		"--leader-elect",
+		"--v=2",
+		// HyperShift runs CAPO in a namespace-scoped deployment and manages CRDs
+		// itself. CAPO v0.14 introduced a crdmigrator controller that requires
+		// cluster-scoped RBAC (list openstackclusteridentities, patch
+		// customresourcedefinitions) that we do not and cannot grant. Skipping
+		// all phases causes crdmigrator.SetupWithManager to return early without
+		// registering the controller, eliminating the spurious RBAC errors.
+		"--skip-crd-migration-phases=StorageVersionMigration",
+		"--skip-crd-migration-phases=CleanupManagedFields",
+	}
+
+	if hcp != nil && a.payloadVersion != nil && (a.payloadVersion.Major >= 5 || (a.payloadVersion.Major == 4 && a.payloadVersion.Minor >= 23)) {
+		tlsArgs, err := config.TLSArgs(hcp.Spec.Configuration.GetTLSSecurityProfile())
+		if err != nil {
+			return nil, err
+		}
+		if len(tlsArgs) > 0 {
+			capoArgs = append(capoArgs, tlsArgs...)
+		}
+	}
+
 	allowPrivilegeEscalation := false
 	defaultMode := int32(0640)
 	deploymentSpec := appsv1.DeploymentSpec{
@@ -221,11 +247,7 @@ func (a OpenStack) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _
 					Image:           capoImage,
 					ImagePullPolicy: corev1.PullIfNotPresent,
 					Command:         []string{"/manager"},
-					Args: []string{
-						"--namespace=$(MY_NAMESPACE)",
-						"--leader-elect",
-						"--v=2",
-					},
+					Args:            capoArgs,
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
 							corev1.ResourceCPU:    resource.MustParse("10m"),
@@ -441,9 +463,10 @@ func (a OpenStack) CAPIProviderPolicyRules() []rbacv1.PolicyRule {
 		},
 		// We deploy ORC in the same namespace as the CAPI provider, so we need to create the
 		// necessary RBAC policy rules for ORC to manage the OpenStack resources.
+		// Note that we use a wildcard here ORC has a lot of resources.
 		{
 			APIGroups: []string{"openstack.k-orc.cloud"},
-			Resources: []string{"images", "images/status"},
+			Resources: []string{"*"},
 			Verbs:     []string{rbacv1.VerbAll},
 		},
 	}

@@ -14,6 +14,7 @@ import (
 	awsinfra "github.com/openshift/hypershift/cmd/infra/aws"
 	awsutil "github.com/openshift/hypershift/cmd/infra/aws/util"
 	"github.com/openshift/hypershift/cmd/util"
+	supportawsutil "github.com/openshift/hypershift/support/awsutil"
 
 	configv1 "github.com/openshift/api/config/v1"
 
@@ -126,7 +127,7 @@ func (o *ValidatedCreateOptions) Complete(ctx context.Context, opts *core.Create
 		opts.EtcdStorageClass = "gp3-csi"
 	}
 
-	client, err := util.GetClient()
+	client, err := util.GetClientWithKubeconfig(opts.Kubeconfig)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +196,7 @@ func (o *ValidatedCreateOptions) Complete(ctx context.Context, opts *core.Create
 	// TODO: drop support for this flag, it's really muddying the waters for the CLI
 	if len(o.CredentialSecretName) > 0 {
 		var secret *corev1.Secret
-		secret, err = util.GetSecret(o.CredentialSecretName, opts.Namespace)
+		secret, err = util.GetSecretWithClient(client, o.CredentialSecretName, opts.Namespace)
 		if err != nil {
 			return nil, err
 		}
@@ -220,9 +221,9 @@ func (o *CreateOptions) ApplyPlatformSpecifics(cluster *hyperv1.HostedCluster) e
 	if err != nil {
 		return fmt.Errorf("failed to parse additional tags: %w", err)
 	}
-	var tags []hyperv1.AWSResourceTag
+	var tags []hyperv1.AWSClusterResourceTag
 	for k, v := range tagMap {
-		tags = append(tags, hyperv1.AWSResourceTag{Key: k, Value: v})
+		tags = append(tags, hyperv1.AWSClusterResourceTag{Key: k, Value: v})
 	}
 
 	cluster.Spec.InfraID = o.infra.InfraID
@@ -273,12 +274,12 @@ func (o *CreateOptions) ApplyPlatformSpecifics(cluster *hyperv1.HostedCluster) e
 		},
 	}
 	if o.AutoNode {
-		cluster.Spec.AutoNode = &hyperv1.AutoNode{
+		cluster.Spec.AutoNode = hyperv1.AutoNode{
 			Provisioner: hyperv1.ProvisionerConfig{
 				Name: hyperv1.ProvisionerKarpenter,
-				Karpenter: &hyperv1.KarpenterConfig{
+				Karpenter: hyperv1.KarpenterConfig{
 					Platform: hyperv1.AWSPlatform,
-					AWS: &hyperv1.KarpenterAWSConfig{
+					AWS: hyperv1.KarpenterAWSConfig{
 						RoleARN: o.iamInfo.KarpenterRoleARN,
 					},
 				},
@@ -332,7 +333,7 @@ func (o *CreateOptions) ApplyPlatformSpecifics(cluster *hyperv1.HostedCluster) e
 			},
 		}
 	}
-	cluster.Spec.Services = core.GetIngressServicePublishingStrategyMapping(cluster.Spec.Networking.NetworkType, o.externalDNSDomain != "")
+	cluster.Spec.Services = core.GetIngressServicePublishingStrategyMapping(cluster.Spec.Networking.NetworkType, o.externalDNSDomain != "", false)
 	if o.externalDNSDomain != "" {
 		for i, svc := range cluster.Spec.Services {
 			switch svc.Service {
@@ -428,6 +429,7 @@ func serviceAccountTokenIssuerSecret(namespace, name string) *corev1.Secret {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-%s", name, SATokenIssuerSecret),
 			Namespace: namespace,
+			Labels:    map[string]string{util.DeleteWithClusterLabelName: "true"},
 		},
 	}
 }
@@ -447,6 +449,10 @@ func (o *CreateOptions) GenerateResources() ([]client.Object, error) {
 			return nil, fmt.Errorf("failed to decode proxy private ssh key: %w", err)
 		}
 		secret := util.SecretResource(o.namespace, o.proxyPrivateSSHKeySecretName())
+		if secret.Labels == nil {
+			secret.Labels = make(map[string]string)
+		}
+		secret.Labels[util.DeleteWithClusterLabelName] = "true"
 		secret.Data = map[string][]byte{
 			"privatekey": decodedKey,
 		}
@@ -555,7 +561,7 @@ func CreateInfraOptions(awsOpts *ValidatedCreateOptions, opts *core.CreateOption
 		BaseDomain:                   opts.BaseDomain,
 		BaseDomainPrefix:             opts.BaseDomainPrefix,
 		RedactBaseDomain:             opts.RedactBaseDomain,
-		AdditionalTags:               awsOpts.AdditionalTags,
+		AdditionalTags:               append(awsOpts.AdditionalTags, supportawsutil.HypershiftSourceTagKey+"=cli"),
 		Zones:                        awsOpts.Zones,
 		EnableProxy:                  awsOpts.EnableProxy,
 		EnableSecureProxy:            awsOpts.EnableSecureProxy,
@@ -574,7 +580,7 @@ func CreateIAMOptions(awsOpts *ValidatedCreateOptions, infra *awsinfra.CreateInf
 		AWSCredentialsOpts:           awsOpts.Credentials,
 		InfraID:                      infra.InfraID,
 		IssuerURL:                    awsOpts.IssuerURL,
-		AdditionalTags:               awsOpts.AdditionalTags,
+		AdditionalTags:               append(awsOpts.AdditionalTags, supportawsutil.HypershiftSourceTagKey+"=cli", supportawsutil.HypershiftClusterNameTagKey+"="+infra.Name),
 		PrivateZoneID:                infra.PrivateZoneID,
 		PublicZoneID:                 infra.PublicZoneID,
 		LocalZoneID:                  infra.LocalZoneID,
@@ -590,8 +596,8 @@ func CreateIAMOptions(awsOpts *ValidatedCreateOptions, infra *awsinfra.CreateInf
 
 // ValidateCreateCredentialInfo validates if the credentials secret name is empty that the aws-creds and pull-secret flags are
 // not empty; validates if the credentials secret is not empty, that it can be retrieved
-func ValidateCreateCredentialInfo(opts awsutil.AWSCredentialsOptions, credentialSecretName, namespace, pullSecretFile string) error {
-	if err := ValidateCredentialInfo(opts, credentialSecretName, namespace); err != nil {
+func ValidateCreateCredentialInfo(opts awsutil.AWSCredentialsOptions, credentialSecretName, namespace, pullSecretFile, kubeconfigPath string) error {
+	if err := ValidateCredentialInfo(opts, credentialSecretName, namespace, kubeconfigPath); err != nil {
 		return err
 	}
 
@@ -604,8 +610,8 @@ func ValidateCreateCredentialInfo(opts awsutil.AWSCredentialsOptions, credential
 }
 
 // validateAWSOptions validates different AWS flag parameters
-func validateAWSOptions(ctx context.Context, opts *core.CreateOptions, awsOpts *RawCreateOptions) error {
-	if err := ValidateCreateCredentialInfo(awsOpts.Credentials, awsOpts.CredentialSecretName, opts.Namespace, opts.PullSecretFile); err != nil {
+func validateAWSOptions(_ context.Context, opts *core.CreateOptions, awsOpts *RawCreateOptions) error {
+	if err := ValidateCreateCredentialInfo(awsOpts.Credentials, awsOpts.CredentialSecretName, opts.Namespace, opts.PullSecretFile, opts.Kubeconfig); err != nil {
 		return err
 	}
 

@@ -12,6 +12,8 @@ import (
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/kas"
 	karpenterassets "github.com/openshift/hypershift/karpenter-operator/controllers/karpenter/assets"
 	"github.com/openshift/hypershift/support/config"
+	"github.com/openshift/hypershift/support/k8sutil"
+	"github.com/openshift/hypershift/support/podspec"
 	"github.com/openshift/hypershift/support/util"
 
 	corev1 "k8s.io/api/core/v1"
@@ -19,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,7 +44,54 @@ const (
 	// podSafeToEvictLocalVolumesAnnotation is an annotation denoting the local volumes of a pod that can be safely evicted.
 	// This is needed for the CA operator to make sure it can properly drain the nodes with those volumes.
 	podSafeToEvictLocalVolumesAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict-local-volumes"
+
+	// defaultNodeFailureTolerationSeconds is the TolerationSeconds applied to the
+	// well-known node.kubernetes.io/not-ready and node.kubernetes.io/unreachable
+	// NoExecute taints for API-critical components. When a management node fails,
+	// this evicts and replaces those (stateless, highly-available) pods quickly
+	// instead of waiting for the 300s default that the DefaultTolerationSeconds
+	// admission plugin would otherwise inject, reducing HA recovery time. Users can
+	// override this per-key via HostedControlPlane.spec.tolerations.
+	defaultNodeFailureTolerationSeconds int64 = 10
+
+	// etcdNodeFailureTolerationSeconds is the TolerationSeconds applied to the same
+	// node-failure taints for etcd. etcd is a quorum-based StatefulSet, so evicting a
+	// member too aggressively on a transient node partition forces unnecessary member
+	// churn and data re-sync. This value is still far below the 300s default (so full
+	// redundancy is restored faster after a genuine node loss) while long enough to
+	// ride out brief blips.
+	etcdNodeFailureTolerationSeconds int64 = 60
 )
+
+// shortNodeFailureToleration returns a NoExecute toleration for the given
+// well-known node-failure taint key (node.kubernetes.io/not-ready or
+// node.kubernetes.io/unreachable) with the provided short TolerationSeconds.
+func shortNodeFailureToleration(key string, seconds int64) corev1.Toleration {
+	return corev1.Toleration{
+		Key:               key,
+		Operator:          corev1.TolerationOpExists,
+		Effect:            corev1.TaintEffectNoExecute,
+		TolerationSeconds: ptr.To(seconds),
+	}
+}
+
+// tolerationsTolerateTaint reports whether any of the given tolerations tolerates
+// the provided taint using Kubernetes taint-matching semantics. This is used to
+// decide whether a user-specified toleration already covers a node-failure taint,
+// so we don't inject our short default. It correctly handles cases that a naive
+// key/effect comparison would get wrong, e.g. an empty-Effect toleration (which
+// matches all effects) or an Operator=Equal toleration with a non-empty Value
+// (which does NOT tolerate the empty-valued node-failure taints).
+func tolerationsTolerateTaint(tolerations []corev1.Toleration, taint *corev1.Taint) bool {
+	for i := range tolerations {
+		// enableComparisonOperators=false: the Lt/Gt operators are irrelevant for the
+		// empty-valued node-failure taints and are treated as non-matching.
+		if tolerations[i].ToleratesTaint(klog.Background(), taint, false) {
+			return true
+		}
+	}
+	return false
+}
 
 var (
 	apiCriticalComponents = sets.New(
@@ -112,11 +162,11 @@ func (c *controlPlaneWorkload[T]) setDefaultOptions(cpContext ControlPlaneContex
 	}
 
 	if c.availabilityProberOpts != nil {
-		availabilityProberImage := cpContext.ReleaseImageProvider.GetImage(util.AvailabilityProberImageName)
-		util.AvailabilityProber(
+		availabilityProberImage := cpContext.ReleaseImageProvider.GetImage(podspec.AvailabilityProberImageName)
+		podspec.AvailabilityProber(
 			kas.InClusterKASReadyURL(hcp.Spec.Platform.Type), availabilityProberImage,
 			&podTemplateSpec.Spec,
-			util.WithOptions(c.availabilityProberOpts))
+			podspec.WithOptions(c.availabilityProberOpts))
 	}
 
 	enforceTerminationMessagePolicy(podTemplateSpec.Spec.InitContainers)
@@ -136,7 +186,7 @@ func (c *controlPlaneWorkload[T]) setDefaultOptions(cpContext ControlPlaneContex
 		podTemplateSpec.Spec.SecurityContext = &corev1.PodSecurityContext{
 			RunAsUser: ptr.To[int64](uid),
 		}
-		if c.Name() == etcdComponentName {
+		if isEtcdComponent(c.Name()) {
 			podTemplateSpec.Spec.SecurityContext.FSGroup = ptr.To[int64](uid)
 		}
 	}
@@ -149,7 +199,7 @@ func (c *controlPlaneWorkload[T]) setDefaultOptions(cpContext ControlPlaneContex
 	// Containers that need specific capabilities (e.g., NET_BIND_SERVICE for haproxy)
 	// should declare them in their deployment templates, and they will be preserved.
 	if hcp.Spec.Platform.Type == hyperv1.GCPPlatform {
-		if err := util.EnforceRestrictedSecurityContextToContainers(&podTemplateSpec.Spec); err != nil {
+		if err := podspec.EnforceRestrictedSecurityContextToContainers(&podTemplateSpec.Spec); err != nil {
 			return fmt.Errorf("failed to enforce restricted security context: %w", err)
 		}
 	}
@@ -250,6 +300,29 @@ func (c *controlPlaneWorkload[T]) setControlPlaneIsolation(podTemplate *corev1.P
 			Effect:   corev1.TaintEffectNoSchedule,
 		})
 	}
+	// For API-critical and etcd components, default to short NoExecute tolerations
+	// so pods are evicted and replaced quickly, reducing HA recovery time after a
+	// management node failure. User-specified tolerations for the same keys take
+	// precedence and are applied unfiltered below.
+	if apiCriticalComponents.Has(c.Name()) || isEtcdComponent(c.Name()) {
+		tolerationSeconds := defaultNodeFailureTolerationSeconds
+		if isEtcdComponent(c.Name()) {
+			// etcd uses a longer value to avoid quorum churn on transient partitions.
+			tolerationSeconds = etcdNodeFailureTolerationSeconds
+		}
+		for _, key := range []string{corev1.TaintNodeNotReady, corev1.TaintNodeUnreachable} {
+			// Only inject our short default if the user hasn't already provided a
+			// toleration that actually tolerates this node-failure taint. The taints
+			// are added by the node-lifecycle-controller with NoExecute and an empty
+			// value, so we match against that exact taint.
+			taint := &corev1.Taint{Key: key, Effect: corev1.TaintEffectNoExecute}
+			if !tolerationsTolerateTaint(hcp.Spec.Tolerations, taint) {
+				podTemplate.Spec.Tolerations = append(podTemplate.Spec.Tolerations,
+					shortNodeFailureToleration(key, tolerationSeconds))
+			}
+		}
+	}
+
 	// set additional Tolerations
 	if len(hcp.Spec.Tolerations) != 0 {
 		podTemplate.Spec.Tolerations = append(podTemplate.Spec.Tolerations, hcp.Spec.Tolerations...)
@@ -305,7 +378,7 @@ func (c *controlPlaneWorkload[T]) setControlPlaneIsolation(podTemplate *corev1.P
 
 		var additionalRequestServingNodeSelector map[string]string
 		if hcp.Annotations[hyperv1.RequestServingNodeAdditionalSelectorAnnotation] != "" {
-			additionalRequestServingNodeSelector = util.ParseNodeSelector(hcp.Annotations[hyperv1.RequestServingNodeAdditionalSelectorAnnotation])
+			additionalRequestServingNodeSelector = k8sutil.ParseNodeSelector(hcp.Annotations[hyperv1.RequestServingNodeAdditionalSelectorAnnotation])
 		}
 		for key, value := range additionalRequestServingNodeSelector {
 			nodeSelectorRequirements = append(nodeSelectorRequirements, corev1.NodeSelectorRequirement{
@@ -424,13 +497,36 @@ func (c *controlPlaneWorkload[T]) applyRequestsOverrides(podTemplate *corev1.Pod
 
 	for i, c := range podTemplate.Spec.InitContainers {
 		if res, ok := requestsOverrides[c.Name]; ok {
+			if podTemplate.Spec.InitContainers[i].Resources.Requests == nil {
+				podTemplate.Spec.InitContainers[i].Resources.Requests = corev1.ResourceList{}
+			}
 			maps.Copy(podTemplate.Spec.InitContainers[i].Resources.Requests, res)
+			applyNonOvercommitableResourceLimits(&podTemplate.Spec.InitContainers[i], res)
 		}
 	}
 	for i, c := range podTemplate.Spec.Containers {
 		if res, ok := requestsOverrides[c.Name]; ok {
+			if podTemplate.Spec.Containers[i].Resources.Requests == nil {
+				podTemplate.Spec.Containers[i].Resources.Requests = corev1.ResourceList{}
+			}
 			maps.Copy(podTemplate.Spec.Containers[i].Resources.Requests, res)
+			applyNonOvercommitableResourceLimits(&podTemplate.Spec.Containers[i], res)
 		}
+	}
+}
+
+const aroSwiftNICResource corev1.ResourceName = "aro.openshift.io/swift-nic"
+
+// applyNonOvercommitableResourceLimits sets limits equal to requests for extended
+// resources that cannot be overcommitted, specifically "aro.openshift.io/swift-nic".
+// The API server requires limits == requests for these resources.
+// https://github.com/kubernetes/kubernetes/blob/621e250502ddeeab8274836e88b506c0c4f57232/pkg/apis/core/validation/validation.go#L7975-L7976
+func applyNonOvercommitableResourceLimits(container *corev1.Container, overrides corev1.ResourceList) {
+	if quantity, ok := overrides[aroSwiftNICResource]; ok {
+		if container.Resources.Limits == nil {
+			container.Resources.Limits = corev1.ResourceList{}
+		}
+		container.Resources.Limits[aroSwiftNICResource] = quantity
 	}
 }
 
@@ -577,7 +673,7 @@ func enforceImagePullPolicy(containers []corev1.Container) error {
 
 func enforceReadOnlyRootFilesystem(podSpec *corev1.PodSpec) {
 	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
-		Name: util.PodTmpDirMountName,
+		Name: podspec.PodTmpDirMountName,
 		VolumeSource: corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		},
@@ -591,11 +687,11 @@ func enforceReadOnlyRootFilesystemContainers(containers []corev1.Container) {
 			containers[i].SecurityContext = &corev1.SecurityContext{}
 		}
 		if !slices.ContainsFunc(containers[i].VolumeMounts, func(vm corev1.VolumeMount) bool {
-			return vm.MountPath == util.PodTmpDirMountPath
+			return vm.MountPath == podspec.PodTmpDirMountPath
 		}) {
 			containers[i].VolumeMounts = append(containers[i].VolumeMounts, corev1.VolumeMount{
-				Name:      util.PodTmpDirMountName,
-				MountPath: util.PodTmpDirMountPath,
+				Name:      podspec.PodTmpDirMountName,
+				MountPath: podspec.PodTmpDirMountPath,
 			})
 		}
 		containers[i].SecurityContext.ReadOnlyRootFilesystem = ptr.To(true)
@@ -633,7 +729,7 @@ func priorityClass(componentName string, hcp *hyperv1.HostedControlPlane) string
 	priorityClass := config.DefaultPriorityClass
 	overrideAnnotation := hyperv1.ControlPlanePriorityClass
 
-	if componentName == etcdComponentName {
+	if isEtcdComponent(componentName) {
 		priorityClass = config.EtcdPriorityClass
 		overrideAnnotation = hyperv1.EtcdPriorityClass
 	} else if apiCriticalComponents.Has(componentName) {
@@ -657,7 +753,7 @@ func DefaultReplicas(hcp *hyperv1.HostedControlPlane, options ComponentOptions, 
 	if options.IsRequestServing() && hcp.Annotations[hyperv1.TopologyAnnotation] == hyperv1.DedicatedRequestServingComponentsTopology {
 		return 2
 	}
-	if name == etcdComponentName || apiCriticalComponents.Has(name) {
+	if isEtcdComponent(name) || apiCriticalComponents.Has(name) {
 		return 3
 	}
 	return 2
@@ -667,7 +763,7 @@ func DefaultReplicas(hcp *hyperv1.HostedControlPlane, options ComponentOptions, 
 // debugDeploymentsAnnotation value, indicating the Component should be considered to
 // be in development mode.
 func debugComponentsSet(hcp *hyperv1.HostedControlPlane) sets.Set[string] {
-	val, exists := hcp.Annotations[util.DebugDeploymentsAnnotation]
+	val, exists := hcp.Annotations[k8sutil.DebugDeploymentsAnnotation]
 	if !exists {
 		return nil
 	}

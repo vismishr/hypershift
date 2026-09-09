@@ -10,6 +10,43 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestHCPEtcdBackupFeatureGate(t *testing.T) {
+	testcases := []struct {
+		name                  string
+		featureSet            configv1.FeatureSet
+		expectedHCPEtcdBackup bool
+	}{
+		{
+			name:                  "Default feature set should disable HCPEtcdBackup",
+			featureSet:            configv1.Default,
+			expectedHCPEtcdBackup: false,
+		},
+		{
+			name:                  "TechPreviewNoUpgrade feature set should enable HCPEtcdBackup",
+			featureSet:            configv1.TechPreviewNoUpgrade,
+			expectedHCPEtcdBackup: true,
+		},
+		{
+			name:                  "DevPreviewNoUpgrade feature set should disable HCPEtcdBackup",
+			featureSet:            configv1.DevPreviewNoUpgrade,
+			expectedHCPEtcdBackup: false,
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			featuregate.ConfigureFeatureSet(string(tc.featureSet))
+
+			actualHCPEtcdBackup := featuregate.Gate().Enabled(featuregate.HCPEtcdBackup)
+			assert.Equal(t, tc.expectedHCPEtcdBackup, actualHCPEtcdBackup,
+				"HCPEtcdBackup feature gate enabled state should match expected value for feature set %s", tc.featureSet)
+
+			assert.Equal(t, tc.featureSet, featuregate.FeatureSet(),
+				"Feature set should be correctly configured")
+		})
+	}
+}
+
 func TestGCPPlatformFeatureGate(t *testing.T) {
 	testcases := []struct {
 		name                string
@@ -57,30 +94,39 @@ func TestAllHypershiftOperatorFeatureGates(t *testing.T) {
 		expected   map[string]bool
 	}{
 		{
-			name:       "Default feature set",
+			name:       "When using Default feature set, it should disable all feature gates",
 			featureSet: configv1.Default,
 			expected: map[string]bool{
 				"AROHCPManagedIdentities": false,
 				"OpenStack":               false,
 				"GCPPlatform":             false,
+				"HCPEtcdBackup":           false,
+				"KarpenterOperator":       false,
+				"OSStreams":               true,
 			},
 		},
 		{
-			name:       "TechPreviewNoUpgrade feature set",
+			name:       "When using TechPreviewNoUpgrade feature set, it should enable all feature gates",
 			featureSet: configv1.TechPreviewNoUpgrade,
 			expected: map[string]bool{
 				"AROHCPManagedIdentities": true,
 				"OpenStack":               true,
 				"GCPPlatform":             true,
+				"HCPEtcdBackup":           true,
+				"KarpenterOperator":       true,
+				"OSStreams":               true,
 			},
 		},
 		{
-			name:       "DevPreviewNoUpgrade feature set",
+			name:       "When using DevPreviewNoUpgrade feature set, it should disable all feature gates",
 			featureSet: configv1.DevPreviewNoUpgrade,
 			expected: map[string]bool{
 				"AROHCPManagedIdentities": false,
 				"OpenStack":               false,
 				"GCPPlatform":             false,
+				"HCPEtcdBackup":           false,
+				"KarpenterOperator":       false,
+				"OSStreams":               false,
 			},
 		},
 	}
@@ -107,6 +153,24 @@ func TestAllHypershiftOperatorFeatureGates(t *testing.T) {
 			assert.Equal(t, tc.expected["GCPPlatform"], actualGCPPlatform,
 				"GCPPlatform should be %v for feature set %s",
 				tc.expected["GCPPlatform"], tc.featureSet)
+
+			// Test HCPEtcdBackup
+			actualHCPEtcdBackup := featuregate.Gate().Enabled(featuregate.HCPEtcdBackup)
+			assert.Equal(t, tc.expected["HCPEtcdBackup"], actualHCPEtcdBackup,
+				"HCPEtcdBackup should be %v for feature set %s",
+				tc.expected["HCPEtcdBackup"], tc.featureSet)
+
+			// Test KarpenterOperator
+			actualKarpenterOperator := featuregate.Gate().Enabled(featuregate.KarpenterOperator)
+			assert.Equal(t, tc.expected["KarpenterOperator"], actualKarpenterOperator,
+				"KarpenterOperator should be %v for feature set %s",
+				tc.expected["KarpenterOperator"], tc.featureSet)
+
+			// Test OSStreams
+			actualOSStreams := featuregate.Gate().Enabled(featuregate.OSStreams)
+			assert.Equal(t, tc.expected["OSStreams"], actualOSStreams,
+				"OSStreams should be %v for feature set %s",
+				tc.expected["OSStreams"], tc.featureSet)
 		})
 	}
 }
@@ -116,4 +180,7 @@ func TestFeatureGateConstants(t *testing.T) {
 	assert.Equal(t, "AROHCPManagedIdentities", string(featuregate.AROHCPManagedIdentities))
 	assert.Equal(t, "OpenStack", string(featuregate.OpenStack))
 	assert.Equal(t, "GCPPlatform", string(featuregate.GCPPlatform))
+	assert.Equal(t, "HCPEtcdBackup", string(featuregate.HCPEtcdBackup))
+	assert.Equal(t, "KarpenterOperator", string(featuregate.KarpenterOperator))
+	assert.Equal(t, "OSStreams", string(featuregate.OSStreams))
 }

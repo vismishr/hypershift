@@ -963,7 +963,7 @@ func (infra *Infra) createVpc(ctx context.Context, logger logr.Logger, options *
 		})
 
 		if err != nil {
-			return nil, fmt.Errorf("error attaching inbound security group rule to allow %d to vpc %v", port, err)
+			return nil, fmt.Errorf("error attaching inbound security group rule to allow %d to vpc %w", port, err)
 		}
 	}
 
@@ -1213,7 +1213,7 @@ func isDHCPServerActive(logger logr.Logger, client *instance.IBMPIDhcpClient, dh
 }
 
 // createPowerVSDhcp creates a new dhcp server in powervs
-func (infra *Infra) createPowerVSDhcp(ctx context.Context, logger logr.Logger, options *CreateInfraOptions, client *instance.IBMPIDhcpClient) (*models.DHCPServerDetail, error) {
+func (infra *Infra) createPowerVSDhcp(ctx context.Context, logger logr.Logger, _ *CreateInfraOptions, client *instance.IBMPIDhcpClient) (*models.DHCPServerDetail, error) {
 	startTime := time.Now()
 	var dhcpServer *models.DHCPServerDetail
 

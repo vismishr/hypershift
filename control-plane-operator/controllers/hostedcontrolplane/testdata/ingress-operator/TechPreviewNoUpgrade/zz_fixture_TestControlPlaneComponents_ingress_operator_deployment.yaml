@@ -1,6 +1,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    hypershift.openshift.io/desired-state-hash: 86999514b8c6a2b846c9bad8ec5868199adc73859ce9336f6674cf1bd9d35e05
   labels:
     hypershift.openshift.io/managed-by: control-plane-operator
   name: ingress-operator
@@ -68,6 +70,12 @@ spec:
         - openshift-ingress-operator
         - --image
         - $(IMAGE)
+        - --haproxy-image
+        - 2.8=$(HAPROXY_28_IMAGE)
+        - --haproxy-image
+        - 3.2=$(HAPROXY_32_IMAGE)
+        - --default-haproxy-version
+        - $(DEFAULT_HAPROXY_VERSION)
         - --canary-image
         - $(CANARY_IMAGE)
         - --release-version
@@ -79,6 +87,12 @@ spec:
           value: 4.18.0
         - name: IMAGE
           value: haproxy-router
+        - name: HAPROXY_28_IMAGE
+          value: haproxy-router-haproxy28
+        - name: HAPROXY_32_IMAGE
+          value: haproxy-router-haproxy32
+        - name: DEFAULT_HAPROXY_VERSION
+          value: "3.2"
         - name: CANARY_IMAGE
           value: cluster-ingress-operator
         - name: KUBECONFIG
@@ -137,32 +151,6 @@ spec:
           name: konnectivity-proxy-ca
         - mountPath: /tmp
           name: tmp-dir
-      - args:
-        - --token-audience=openshift
-        - --service-account-namespace=openshift-ingress-operator
-        - --service-account-name=ingress-operator
-        - --token-file=/var/run/secrets/openshift/serviceaccount/token
-        - --kubeconfig=/etc/kubernetes/kubeconfig
-        command:
-        - /usr/bin/control-plane-operator
-        - token-minter
-        image: token-minter
-        imagePullPolicy: IfNotPresent
-        name: cloud-token-minter
-        resources:
-          requests:
-            cpu: 10m
-            memory: 30Mi
-        securityContext:
-          readOnlyRootFilesystem: true
-        terminationMessagePolicy: FallbackToLogsOnError
-        volumeMounts:
-        - mountPath: /var/run/secrets/openshift/serviceaccount
-          name: cloud-token
-        - mountPath: /etc/kubernetes
-          name: admin-kubeconfig
-        - mountPath: /tmp
-          name: tmp-dir
       initContainers:
       - command:
         - /usr/bin/control-plane-operator
@@ -179,6 +167,37 @@ spec:
         volumeMounts:
         - mountPath: /var/kubeconfig
           name: service-account-kubeconfig
+      - args:
+        - --token-audience=openshift
+        - --service-account-namespace=openshift-ingress-operator
+        - --service-account-name=ingress-operator
+        - --token-file=/var/run/secrets/openshift/serviceaccount/token
+        - --kubeconfig=/etc/kubernetes/kubeconfig
+        command:
+        - /usr/bin/control-plane-operator
+        - token-minter
+        image: token-minter
+        imagePullPolicy: IfNotPresent
+        name: cloud-token-minter
+        resources:
+          requests:
+            cpu: 10m
+            memory: 30Mi
+        restartPolicy: Always
+        startupProbe:
+          exec:
+            command:
+            - test
+            - -f
+            - /var/run/secrets/openshift/serviceaccount/token
+          failureThreshold: 30
+          periodSeconds: 1
+        terminationMessagePolicy: FallbackToLogsOnError
+        volumeMounts:
+        - mountPath: /var/run/secrets/openshift/serviceaccount
+          name: cloud-token
+        - mountPath: /etc/kubernetes
+          name: admin-kubeconfig
       priorityClassName: hypershift-control-plane
       tolerations:
       - effect: NoSchedule

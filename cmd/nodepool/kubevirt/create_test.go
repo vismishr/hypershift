@@ -1,6 +1,7 @@
 package kubevirt
 
 import (
+	"strings"
 	"testing"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
@@ -13,14 +14,65 @@ import (
 	"github.com/spf13/pflag"
 )
 
-func TestRawKubevirtPlatformCreateOptions_Validate(t *testing.T) {
-	for _, test := range []struct {
-		name          string
-		input         RawKubevirtPlatformCreateOptions
-		expectedError string
+func TestNodePoolPlatform_When_memory_is_set_it_should_parse_correctly(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		memory         string
+		expectMemory   bool
+		expectedString string
 	}{
 		{
-			name: "should fail excluding default network without additional ones",
+			name:           "When memory value is valid it should parse correctly",
+			memory:         "8Gi",
+			expectMemory:   true,
+			expectedString: "8Gi",
+		},
+		{
+			name:         "When memory is empty it should leave Compute.Memory nil",
+			memory:       "",
+			expectMemory: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := &CompletedKubevirtPlatformCreateOptions{
+				completedKubevirtPlatformCreateOptions: &completedKubevirtPlatformCreateOptions{
+					KubevirtPlatformOptions: &KubevirtPlatformOptions{
+						Memory:               tc.memory,
+						Cores:                2,
+						RootVolumeSize:       32,
+						AttachDefaultNetwork: ptr.To(true),
+					},
+				},
+			}
+
+			platform := opts.NodePoolPlatform()
+			if platform.Compute == nil {
+				t.Fatal("expected Compute to be set")
+			}
+			if tc.expectMemory {
+				if platform.Compute.Memory == nil {
+					t.Fatal("expected Compute.Memory to be set")
+				}
+				if platform.Compute.Memory.String() != tc.expectedString {
+					t.Errorf("expected Compute.Memory to be %s, got %s", tc.expectedString, platform.Compute.Memory.String())
+				}
+			} else {
+				if platform.Compute.Memory != nil {
+					t.Errorf("expected Compute.Memory to be nil, got %s", platform.Compute.Memory.String())
+				}
+			}
+		})
+	}
+}
+
+func TestRawKubevirtPlatformCreateOptions_Validate(t *testing.T) {
+	for _, test := range []struct {
+		name                   string
+		input                  RawKubevirtPlatformCreateOptions
+		expectedErrorSubstring string
+	}{
+		{
+			name: "When default network is attached without additional ones, it should succeed",
 			input: RawKubevirtPlatformCreateOptions{
 				KubevirtPlatformOptions: &KubevirtPlatformOptions{
 					Cores:                1,
@@ -28,16 +80,33 @@ func TestRawKubevirtPlatformCreateOptions_Validate(t *testing.T) {
 					AttachDefaultNetwork: ptr.To(true),
 				},
 			},
-			expectedError: "",
+			expectedErrorSubstring: "",
+		},
+		{
+			name: "When memory value is invalid, it should return a validation error",
+			input: RawKubevirtPlatformCreateOptions{
+				KubevirtPlatformOptions: &KubevirtPlatformOptions{
+					Memory:               "not-a-quantity",
+					Cores:                2,
+					RootVolumeSize:       32,
+					AttachDefaultNetwork: ptr.To(true),
+				},
+			},
+			expectedErrorSubstring: `invalid memory quantity "not-a-quantity"`,
 		},
 	} {
-		var errString string
-		if _, err := test.input.Validate(t.Context(), nil); err != nil {
-			errString = err.Error()
-		}
-		if diff := cmp.Diff(test.expectedError, errString); diff != "" {
-			t.Errorf("got incorrect error: %v", diff)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			var errString string
+			if _, err := test.input.Validate(t.Context(), nil); err != nil {
+				errString = err.Error()
+			}
+			switch {
+			case test.expectedErrorSubstring == "" && errString != "":
+				t.Errorf("unexpected error: %s", errString)
+			case test.expectedErrorSubstring != "" && !strings.Contains(errString, test.expectedErrorSubstring):
+				t.Errorf("expected error containing %q, got %q", test.expectedErrorSubstring, errString)
+			}
+		})
 	}
 }
 
@@ -48,7 +117,7 @@ func TestCreateNodePool_When_flags_are_parsed_it_should_generate_correct_nodepoo
 		args []string
 	}{
 		{
-			name: "minimal configuration",
+			name: "When minimal configuration is provided, it should generate correct nodepool",
 			args: []string{
 				"--cores=2",
 				"--memory=4Gi",
@@ -56,7 +125,7 @@ func TestCreateNodePool_When_flags_are_parsed_it_should_generate_correct_nodepoo
 			},
 		},
 		{
-			name: "full configuration with additional networks",
+			name: "When full configuration with additional networks is provided, it should generate correct nodepool",
 			args: []string{
 				"--cores=4",
 				"--memory=8Gi",
@@ -72,7 +141,7 @@ func TestCreateNodePool_When_flags_are_parsed_it_should_generate_correct_nodepoo
 			},
 		},
 		{
-			name: "with host devices",
+			name: "When host devices are configured, it should generate correct nodepool",
 			args: []string{
 				"--cores=8",
 				"--memory=16Gi",
@@ -144,7 +213,7 @@ func TestValidatedKubevirtPlatformCreateOptions_Complete(t *testing.T) {
 		expectedError string
 	}{
 		{
-			name: "should succeed configuring additional networks",
+			name: "When additional networks are configured, it should succeed",
 			input: RawKubevirtPlatformCreateOptions{
 				KubevirtPlatformOptions: &KubevirtPlatformOptions{
 					Cores:                1,
@@ -166,7 +235,7 @@ func TestValidatedKubevirtPlatformCreateOptions_Complete(t *testing.T) {
 			},
 		},
 		{
-			name: "should fail with unexpected additional network parameters",
+			name: "When unexpected additional network parameters are provided, it should fail",
 			input: RawKubevirtPlatformCreateOptions{
 				KubevirtPlatformOptions: &KubevirtPlatformOptions{
 					Cores:                1,
@@ -180,7 +249,7 @@ func TestValidatedKubevirtPlatformCreateOptions_Complete(t *testing.T) {
 			expectedError: `failed to parse "--additional-network" flag: unknown param(s): badfield:ns2/nad2`,
 		},
 		{
-			name: "should succeed configuring NetworkInterfaceMultiQueue=Enable",
+			name: "When NetworkInterfaceMultiQueue is set to Enable, it should succeed",
 			input: RawKubevirtPlatformCreateOptions{
 				KubevirtPlatformOptions: &KubevirtPlatformOptions{
 					Cores:                1,
@@ -203,7 +272,7 @@ func TestValidatedKubevirtPlatformCreateOptions_Complete(t *testing.T) {
 			},
 		},
 		{
-			name: "should succeed configuring NetworkInterfaceMultiQueue=Disable",
+			name: "When NetworkInterfaceMultiQueue is set to Disable, it should succeed",
 			input: RawKubevirtPlatformCreateOptions{
 				KubevirtPlatformOptions: &KubevirtPlatformOptions{
 					Cores:                1,
@@ -226,7 +295,7 @@ func TestValidatedKubevirtPlatformCreateOptions_Complete(t *testing.T) {
 			},
 		},
 		{
-			name: "should fail configuring NetworkInterfaceMultiQueue",
+			name: "When NetworkInterfaceMultiQueue has wrong value, it should fail",
 			input: RawKubevirtPlatformCreateOptions{
 				KubevirtPlatformOptions: &KubevirtPlatformOptions{
 					Cores:                1,
@@ -242,7 +311,7 @@ func TestValidatedKubevirtPlatformCreateOptions_Complete(t *testing.T) {
 			expectedError: `wrong value for the --network-multiqueue parameter. Supported values are "Enable" or "Disable"`,
 		},
 		{
-			name: "should succeed configuring two Host Devices",
+			name: "When two Host Devices are configured, it should succeed",
 			input: RawKubevirtPlatformCreateOptions{
 				KubevirtPlatformOptions: &KubevirtPlatformOptions{
 					Cores:          2,
@@ -255,7 +324,7 @@ func TestValidatedKubevirtPlatformCreateOptions_Complete(t *testing.T) {
 			},
 		},
 		{
-			name: "should fail configuring Host Devices without misspelled count",
+			name: "When Host Device has misspelled count, it should fail",
 			input: RawKubevirtPlatformCreateOptions{
 				KubevirtPlatformOptions: &KubevirtPlatformOptions{
 					Cores:          2,
@@ -268,7 +337,7 @@ func TestValidatedKubevirtPlatformCreateOptions_Complete(t *testing.T) {
 			expectedError: "invalid KubeVirt host device setting: [my-fabulous-gpu,cuont:2]",
 		},
 		{
-			name: "should fail configuring Host Devices with an unsupported option",
+			name: "When Host Device has an unsupported option, it should fail",
 			input: RawKubevirtPlatformCreateOptions{
 				KubevirtPlatformOptions: &KubevirtPlatformOptions{
 					Cores:          2,
@@ -281,7 +350,7 @@ func TestValidatedKubevirtPlatformCreateOptions_Complete(t *testing.T) {
 			expectedError: "invalid KubeVirt host device setting: [my-fabulous-gpu,count:2,speed:100GFLOPS]",
 		},
 		{
-			name: "should fail configuring Host Devices with a non-integer count",
+			name: "When Host Device has a non-integer count, it should fail",
 			input: RawKubevirtPlatformCreateOptions{
 				KubevirtPlatformOptions: &KubevirtPlatformOptions{
 					Cores:          2,
@@ -294,7 +363,7 @@ func TestValidatedKubevirtPlatformCreateOptions_Complete(t *testing.T) {
 			expectedError: "could not parse host device count: [my-fabulous-gpu,count:1K]",
 		},
 		{
-			name: "should fail configuring Host Devices with a negative count",
+			name: "When Host Device has a negative count, it should fail",
 			input: RawKubevirtPlatformCreateOptions{
 				KubevirtPlatformOptions: &KubevirtPlatformOptions{
 					Cores:          2,

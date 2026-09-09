@@ -33,23 +33,42 @@ spec:
               fieldPath: status.podIP
         image: hyperkube
         imagePullPolicy: IfNotPresent
+        # livenessProbe restarts a wedged-but-alive KAS. It uses livez?exclude=etcd so a
+        # slow/unavailable etcd does not trigger restart storms. The startupProbe gates
+        # this probe until KAS has started, so no initialDelaySeconds is needed.
+        # Budget to restart = failureThreshold(3) x periodSeconds(60) = 180s of sustained
+        # livez failure, with a 30s per-probe timeout for headroom under load.
         livenessProbe:
-          failureThreshold: 6
+          failureThreshold: 3
           httpGet:
             path: livez?exclude=etcd
             port: client
             scheme: HTTPS
-          initialDelaySeconds: 300
-          periodSeconds: 180
+          periodSeconds: 60
           successThreshold: 1
-          timeoutSeconds: 160
+          timeoutSeconds: 30
         name: kube-apiserver
         ports:
         - containerPort: 6443
           name: client
           protocol: TCP
+        # startupProbe gates liveness/readiness until KAS has finished starting.
+        # Budget = failureThreshold(36) x periodSeconds(10) = 360s, covering the previous
+        # livenessProbe initialDelaySeconds(300s) plus headroom for slow starts at scale.
+        startupProbe:
+          failureThreshold: 36
+          httpGet:
+            path: readyz
+            port: client
+            scheme: HTTPS
+          periodSeconds: 10
+          timeoutSeconds: 10
+        # readinessProbe ejects a healthy-but-slow KAS from Service endpoints without
+        # killing it. Budget = failureThreshold(6) x periodSeconds(10) = ~60s of sustained
+        # slow /readyz, tuned to avoid flapping healthy pods under load while still ejecting
+        # far faster than the previous 180s.
         readinessProbe:
-          failureThreshold: 18
+          failureThreshold: 6
           httpGet:
             path: readyz
             port: client
@@ -108,6 +127,8 @@ spec:
         - /work
         env:
         - name: KUBECONFIG
+          value: /var/secrets/kas-bootstrap-container-kubeconfig/kubeconfig
+        - name: KUBECONFIG_ADMIN
           value: /var/secrets/localhost-kubeconfig/kubeconfig
         image: controlplane-operator
         imagePullPolicy: IfNotPresent
@@ -121,6 +142,8 @@ spec:
           name: bootstrap-manifests
         - mountPath: /var/secrets/localhost-kubeconfig
           name: localhost-kubeconfig
+        - mountPath: /var/secrets/kas-bootstrap-container-kubeconfig
+          name: kas-bootstrap-container-kubeconfig
       - args:
         - --logtostderr=true
         - --log-file-max-size=0
@@ -128,6 +151,8 @@ spec:
         - /etc/konnectivity/cluster/tls.crt
         - --cluster-key
         - /etc/konnectivity/cluster/tls.key
+        - --cluster-ca-cert
+        - /etc/konnectivity/ca/ca.crt
         - --server-cert
         - /etc/konnectivity/server/tls.crt
         - --server-key
@@ -246,6 +271,22 @@ spec:
             name: system:hosted-cluster-config
           EOF
 
+          touch /tmp/manifests/00_kas-bootstrap-container-rolebinding.yaml
+          cat <<EOF >/tmp/manifests/00_kas-bootstrap-container-rolebinding.yaml
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: kas-bootstrap-container-cluster-admin
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: cluster-admin
+          subjects:
+          - apiGroup: rbac.authorization.k8s.io
+            kind: User
+            name: system:kas-bootstrap-container
+          EOF
+
           /usr/bin/render \
              --asset-output-dir /tmp/output \
              --rendered-manifest-dir=/tmp/manifests \
@@ -322,6 +363,10 @@ spec:
         secret:
           defaultMode: 416
           secretName: localhost-kubeconfig
+      - name: kas-bootstrap-container-kubeconfig
+        secret:
+          defaultMode: 416
+          secretName: kas-bootstrap-container-kubeconfig
       - emptyDir: {}
         name: logs
       - configMap:

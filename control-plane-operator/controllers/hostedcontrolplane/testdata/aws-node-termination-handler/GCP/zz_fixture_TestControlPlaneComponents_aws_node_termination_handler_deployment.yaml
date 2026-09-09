@@ -1,6 +1,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    hypershift.openshift.io/desired-state-hash: 13f2a2015d30bc547d6893c0f63618daee9db69ed82b41aa2a0f267564316fd9
   labels:
     hypershift.openshift.io/managed-by: control-plane-operator
   name: aws-node-termination-handler
@@ -100,7 +102,7 @@ spec:
           value: info
         - name: WEBHOOK_URL
         - name: WORKERS
-          value: "10"
+          value: "20"
         - name: METADATA_TRIES
           value: "3"
         - name: KUBERNETES_SERVICE_HOST
@@ -174,6 +176,8 @@ spec:
           name: svc-kubeconfig
         - mountPath: /tmp
           name: tmp-dir
+      enableServiceLinks: false
+      initContainers:
       - args:
         - --token-audience=openshift
         - --service-account-namespace=kube-system
@@ -190,22 +194,27 @@ spec:
           requests:
             cpu: 10m
             memory: 30Mi
+        restartPolicy: Always
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
             drop:
             - ALL
-          readOnlyRootFilesystem: true
           runAsNonRoot: true
+        startupProbe:
+          exec:
+            command:
+            - test
+            - -f
+            - /var/run/secrets/openshift/serviceaccount/token
+          failureThreshold: 30
+          periodSeconds: 1
         terminationMessagePolicy: FallbackToLogsOnError
         volumeMounts:
         - mountPath: /var/run/secrets/openshift/serviceaccount
           name: cloud-token
         - mountPath: /etc/kubernetes
           name: svc-kubeconfig
-        - mountPath: /tmp
-          name: tmp-dir
-      enableServiceLinks: false
       nodeSelector:
         kubernetes.io/os: linux
       priorityClassName: hypershift-control-plane

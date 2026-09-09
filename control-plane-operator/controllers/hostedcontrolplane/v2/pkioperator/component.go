@@ -38,6 +38,10 @@ func NewComponent(certRotationScale time.Duration) component.ControlPlaneCompone
 	}
 	return component.NewDeploymentComponent(ComponentName, operator).
 		WithAdaptFunction(operator.adaptDeployment).
+		WithManifestAdapter(
+			"controller-config.yaml",
+			component.WithAdaptFunction(component.NewGenericControllerConfigAdapter("0.0.0.0:8443", "tcp4")),
+		).
 		WithPredicate(predicate).
 		Build()
 }

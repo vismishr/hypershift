@@ -2,7 +2,11 @@ package azure
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"strings"
+	"time"
 
 	"github.com/openshift/hypershift/support/azureutil"
 
@@ -12,6 +16,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v5"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/privatedns/armprivatedns"
 
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -176,7 +182,7 @@ func (n *NetworkManager) CreatePrivateDNSZone(ctx context.Context, resourceGroup
 	privateZoneParams := armprivatedns.PrivateZone{
 		Location: ptr.To("global"),
 	}
-	privateDNSZonePromise, err := privateZoneClient.BeginCreateOrUpdate(ctx, resourceGroupName, name+"-azurecluster."+baseDomain, privateZoneParams, nil)
+	privateDNSZonePromise, err := privateZoneClient.BeginCreateOrUpdate(ctx, resourceGroupName, name+"."+baseDomain, privateZoneParams, nil)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create private DNS zone: %w", err)
 	}
@@ -207,7 +213,8 @@ func NewVirtualNetworkLink(location string, vnetID string, registrationEnabled b
 	}
 }
 
-// CreatePrivateDNSZoneLink creates the private DNS Zone network link
+// CreatePrivateDNSZoneLink creates the private DNS Zone network link.
+// It is idempotent: if the link already exists, it returns successfully.
 func (n *NetworkManager) CreatePrivateDNSZoneLink(ctx context.Context, resourceGroupName string, name string, infraID string, vnetID string, privateDNSZoneName string) error {
 	cloudConfig, err := azureutil.GetAzureCloudConfiguration(n.cloud)
 	if err != nil {
@@ -218,13 +225,32 @@ func (n *NetworkManager) CreatePrivateDNSZoneLink(ctx context.Context, resourceG
 		return fmt.Errorf("failed to create new virtual network links client: %w", err)
 	}
 
+	linkName := name + "-" + infraID
+
+	// Check if the link already exists to handle re-runs gracefully.
+	// Azure resource IDs are case-insensitive, so use case-insensitive comparison.
+	existingLink, err := privateZoneLinkClient.Get(ctx, resourceGroupName, privateDNSZoneName, linkName, nil)
+	if err == nil &&
+		existingLink.Properties != nil &&
+		existingLink.Properties.VirtualNetwork != nil &&
+		existingLink.Properties.VirtualNetwork.ID != nil &&
+		strings.EqualFold(*existingLink.Properties.VirtualNetwork.ID, vnetID) {
+		return nil
+	}
+
 	virtualNetworkLinkParams := NewVirtualNetworkLink(VirtualNetworkLinkLocation, vnetID, false)
-	networkLinkPromise, err := privateZoneLinkClient.BeginCreateOrUpdate(ctx, resourceGroupName, privateDNSZoneName, name+"-"+infraID, virtualNetworkLinkParams, nil)
+	networkLinkPromise, err := privateZoneLinkClient.BeginCreateOrUpdate(ctx, resourceGroupName, privateDNSZoneName, linkName, virtualNetworkLinkParams, nil)
 	if err != nil {
 		return fmt.Errorf("failed to set up network link for private DNS zone: %w", err)
 	}
 	_, err = networkLinkPromise.PollUntilDone(ctx, nil)
 	if err != nil {
+		// Handle Conflict error when the DNS zone is already linked to this VNet
+		// (e.g., via a link with a different name from a previous run).
+		var respErr *azcore.ResponseError
+		if errors.As(err, &respErr) && strings.EqualFold(respErr.ErrorCode, "Conflict") {
+			return nil
+		}
 		return fmt.Errorf("failed waiting for network link for private DNS zone: %w", err)
 	}
 
@@ -259,8 +285,22 @@ func NewPublicIPAddress(name string, location string) armnetwork.PublicIPAddress
 	}
 }
 
+// isAzureConflictError returns true for Azure 409 Conflict errors that the SDK's
+// default retry policy does not cover (the SDK already retries 408/429/500/502/503/504).
+func isAzureConflictError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var respErr *azcore.ResponseError
+	if !errors.As(err, &respErr) {
+		return false
+	}
+	return respErr.StatusCode == http.StatusConflict
+}
+
 // CreatePublicIPAddressForLB creates a public IP address to use for the outbound rule in the load balancer
 func (n *NetworkManager) CreatePublicIPAddressForLB(ctx context.Context, resourceGroupName string, infraID string, location string) (*armnetwork.PublicIPAddress, error) {
+	log := ctrl.LoggerFrom(ctx)
 	cloudConfig, err := azureutil.GetAzureCloudConfiguration(n.cloud)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get Azure cloud configuration: %w", err)
@@ -271,22 +311,47 @@ func (n *NetworkManager) CreatePublicIPAddressForLB(ctx context.Context, resourc
 	}
 
 	publicIPAddress := NewPublicIPAddress(infraID, location)
-	pollerResp, err := publicIPAddressClient.BeginCreateOrUpdate(
-		ctx,
-		resourceGroupName,
-		infraID,
-		publicIPAddress,
-		nil,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create public IP address, %w", err)
+
+	// Max total retry wait ~155s (5+10+20+40+80), suitable for infra provisioning.
+	backoff := wait.Backoff{
+		Steps:    5,
+		Duration: 5 * time.Second,
+		Factor:   2.0,
+		Jitter:   0.1,
 	}
 
-	resp, err := pollerResp.PollUntilDone(ctx, nil)
+	var result *armnetwork.PublicIPAddress
+	// BeginCreateOrUpdate is idempotent (CreateOrUpdate), so retries that re-submit
+	// the creation request after a transient failure on PollUntilDone are safe.
+	err = retry.OnError(backoff, isAzureConflictError, func() error {
+		pollerResp, err := publicIPAddressClient.BeginCreateOrUpdate(
+			ctx,
+			resourceGroupName,
+			infraID,
+			publicIPAddress,
+			nil,
+		)
+		if err != nil {
+			if isAzureConflictError(err) {
+				log.Info("Transient error creating public IP address, will retry", "error", err)
+			}
+			return err
+		}
+
+		resp, err := pollerResp.PollUntilDone(ctx, nil)
+		if err != nil {
+			if isAzureConflictError(err) {
+				log.Info("Transient error waiting for public IP address creation, will retry", "error", err)
+			}
+			return err
+		}
+		result = &resp.PublicIPAddress
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed while waiting create public IP address, %w", err)
+		return nil, fmt.Errorf("failed to create public IP address: %w", err)
 	}
-	return &resp.PublicIPAddress, nil
+	return result, nil
 }
 
 // newFrontendIPConfiguration creates a frontend IP configuration for a load balancer.
@@ -431,7 +496,11 @@ func (n *NetworkManager) CreateLoadBalancer(ctx context.Context, resourceGroupNa
 	idPrefix := fmt.Sprintf("subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/loadBalancers", n.subscriptionID, resourceGroupName)
 	loadBalancerName := infraID
 
-	loadBalancerClient, err := armnetwork.NewLoadBalancersClient(n.subscriptionID, n.creds, nil)
+	cloudConfig, err := azureutil.GetAzureCloudConfiguration(n.cloud)
+	if err != nil {
+		return fmt.Errorf("failed to get cloud configuration: %w", err)
+	}
+	loadBalancerClient, err := armnetwork.NewLoadBalancersClient(n.subscriptionID, n.creds, &arm.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: cloudConfig}})
 	if err != nil {
 		return fmt.Errorf("failed to create load balancer client, %w", err)
 	}

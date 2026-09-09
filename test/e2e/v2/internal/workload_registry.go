@@ -1,7 +1,7 @@
 //go:build e2ev2
 
-// This file is generated. Do not edit manually.
-// Run: go run /tmp/generate_workloads.go > generated_workloads.go
+// This file defines the control plane workload registry.
+// Add new workload entries here when onboarding new components.
 
 package internal
 
@@ -11,10 +11,11 @@ import (
 	"slices"
 	"time"
 
+	"github.com/blang/semver"
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
-	supportutil "github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/podspec"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -24,6 +25,7 @@ type WorkloadSpec struct {
 	Type        string
 	Name        string
 	Platform    *hyperv1.PlatformType
+	MaxVersion  *semver.Version // if set, workload is only expected on clusters < this version
 	PodSelector map[string]string
 }
 
@@ -31,6 +33,7 @@ type WorkloadSpec struct {
 func GetControlPlaneWorkloads() []WorkloadSpec {
 	awsPlatform := hyperv1.AWSPlatform
 	azurePlatform := hyperv1.AzurePlatform
+	gcpPlatform := hyperv1.GCPPlatform
 	kubevirtPlatform := hyperv1.KubevirtPlatform
 	openstackPlatform := hyperv1.OpenStackPlatform
 	powervsPlatform := hyperv1.PowerVSPlatform
@@ -264,6 +267,13 @@ func GetControlPlaneWorkloads() []WorkloadSpec {
 		},
 		{
 			Type: "Deployment",
+			Name: "kube-storage-version-migrator",
+			PodSelector: map[string]string{
+				"app": "kube-storage-version-migrator",
+			},
+		},
+		{
+			Type: "Deployment",
 			Name: "machine-approver",
 			PodSelector: map[string]string{
 				"app": "machine-approver",
@@ -340,8 +350,9 @@ func GetControlPlaneWorkloads() []WorkloadSpec {
 			},
 		},
 		{
-			Type: "Deployment",
-			Name: "redhat-marketplace-catalog",
+			Type:       "Deployment",
+			Name:       "redhat-marketplace-catalog",
+			MaxVersion: &semver.Version{Major: 4, Minor: 22, Patch: 0},
 			PodSelector: map[string]string{
 				"olm.catalogSource": "redhat-marketplace",
 			},
@@ -383,6 +394,14 @@ func GetControlPlaneWorkloads() []WorkloadSpec {
 			Platform: &awsPlatform,
 			PodSelector: map[string]string{
 				"app": "aws-node-termination-handler",
+			},
+		},
+		{
+			Type:     "Deployment",
+			Name:     "gcp-cloud-controller-manager",
+			Platform: &gcpPlatform,
+			PodSelector: map[string]string{
+				"app": "cloud-controller-manager",
 			},
 		},
 		{
@@ -499,12 +518,29 @@ func ShouldSkipWorkloadForPlatform(workload WorkloadSpec, hostedCluster *hyperv1
 	return false
 }
 
+// ShouldSkipWorkloadForVersion determines whether the workload should be skipped.
+// Returns true if the cluster version is at or above the workload's MaxVersion.
+func ShouldSkipWorkloadForVersion(workload WorkloadSpec, hcVersion semver.Version) bool {
+	return workload.MaxVersion != nil && hcVersion.GE(*workload.MaxVersion)
+}
+
 // validateControlPlaneWorkloadsByType validates control plane workloads of specified types.
 // This is a generic function that handles both Deployments and StatefulSets.
 func validateControlPlaneWorkloadsByType(testCtx *TestContext, workloadTypes []string, excludeWorkloads []string) error {
 	workloads := GetControlPlaneWorkloads()
+	hostedCluster, err := testCtx.GetHostedCluster()
+	if err != nil {
+		return fmt.Errorf("failed to get HostedCluster: %w", err)
+	}
+	version, err := testCtx.GetHostedClusterVersion()
+	if err != nil {
+		return fmt.Errorf("failed to get HostedCluster version: %w", err)
+	}
 	for _, workload := range workloads {
-		if ShouldSkipWorkloadForPlatform(workload, testCtx.GetHostedCluster()) {
+		if ShouldSkipWorkloadForPlatform(workload, hostedCluster) {
+			continue
+		}
+		if ShouldSkipWorkloadForVersion(workload, version) {
 			continue
 		}
 		if !slices.Contains(workloadTypes, workload.Type) {
@@ -524,7 +560,7 @@ func validateControlPlaneWorkloadsByType(testCtx *TestContext, workloadTypes []s
 			if err != nil {
 				return fmt.Errorf("failed to get deployment %s: %w", workload.Name, err)
 			}
-			if !supportutil.IsDeploymentReady(testCtx, deployment) {
+			if !podspec.IsDeploymentReady(testCtx, deployment) {
 				desired := int32(0)
 				if deployment.Spec.Replicas != nil {
 					desired = *deployment.Spec.Replicas
@@ -542,7 +578,7 @@ func validateControlPlaneWorkloadsByType(testCtx *TestContext, workloadTypes []s
 			if err != nil {
 				return fmt.Errorf("failed to get statefulset %s: %w", workload.Name, err)
 			}
-			if !supportutil.IsStatefulSetReady(testCtx, statefulSet) {
+			if !podspec.IsStatefulSetReady(testCtx, statefulSet) {
 				desired := int32(0)
 				if statefulSet.Spec.Replicas != nil {
 					desired = *statefulSet.Spec.Replicas

@@ -1,6 +1,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    hypershift.openshift.io/desired-state-hash: 05145338d25da24cb2b8ac3f4ac4ccb198f79e351e124f8fd886bc7252eb3e33
   labels:
     hypershift.openshift.io/managed-by: control-plane-operator
   name: azure-cloud-controller-manager
@@ -25,7 +27,7 @@ spec:
     metadata:
       annotations:
         cluster-autoscaler.kubernetes.io/safe-to-evict-local-volumes: cloud-token,tmp-dir
-        component.hypershift.openshift.io/config-hash: 6390db5f
+        component.hypershift.openshift.io/config-hash: 5e25069a
         hypershift.openshift.io/release-image: quay.io/openshift-release-dev/ocp-release:4.16.10-x86_64
       labels:
         app: cloud-controller-manager
@@ -74,6 +76,8 @@ spec:
         - --leader-elect-resource-namespace=openshift-cloud-controller-manager
         - --v=4
         - --cluster-name=
+        - --tls-min-version=VersionTLS12
+        - --tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
         command:
         - /bin/azure-cloud-controller-manager
         image: azure-cloud-controller-manager
@@ -100,6 +104,7 @@ spec:
           name: cloud-token
         - mountPath: /tmp
           name: tmp-dir
+      initContainers:
       - args:
         - --token-audience=openshift
         - --service-account-namespace=kube-system
@@ -116,22 +121,29 @@ spec:
           requests:
             cpu: 10m
             memory: 30Mi
+        restartPolicy: Always
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
             drop:
             - ALL
-          readOnlyRootFilesystem: true
           runAsNonRoot: true
+        startupProbe:
+          exec:
+            command:
+            - test
+            - -f
+            - /var/run/secrets/openshift/serviceaccount/token
+          failureThreshold: 30
+          periodSeconds: 1
         terminationMessagePolicy: FallbackToLogsOnError
         volumeMounts:
         - mountPath: /var/run/secrets/openshift/serviceaccount
           name: cloud-token
         - mountPath: /etc/kubernetes
           name: kubeconfig
-        - mountPath: /tmp
-          name: tmp-dir
       priorityClassName: hypershift-control-plane
+      serviceAccountName: azure-cloud-controller-manager
       tolerations:
       - effect: NoSchedule
         key: hypershift.openshift.io/control-plane

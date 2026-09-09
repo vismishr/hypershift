@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -54,28 +55,36 @@ func TestValidateCreateCredentialInfo(t *testing.T) {
 		credentials          awsutil.AWSCredentialsOptions
 		credentialSecretName string
 		pullSecretFile       string
+		kubeconfigPath       string
 		expectError          bool
 	}{
-		"when CredentialSecretName is blank and aws-creds is also blank": {
+		"When CredentialSecretName and aws-creds are blank, it should return an error": {
 			expectError: true,
 		},
-		"when CredentialSecretName is blank, aws-creds is not blank, and pull-secret is blank": {
+		"When CredentialSecretName and pull-secret are blank and aws-creds is set, it should return an error": {
 			pullSecretFile:       "",
 			credentialSecretName: "",
 			credentials:          awsutil.AWSCredentialsOptions{AWSCredentialsFile: "asdf"},
 			expectError:          true,
 		},
-		"when CredentialSecretName is blank, aws-creds is not blank, and pull-secret is not blank": {
+		"When CredentialSecretName is blank and aws-creds and pull-secret are set, it should succeed": {
 			pullSecretFile:       "asdf",
 			credentialSecretName: "",
 			credentials:          awsutil.AWSCredentialsOptions{AWSCredentialsFile: "asdf"},
 			expectError:          false,
 		},
+		"When CredentialSecretName is set with invalid kubeconfig, it should fail": {
+			credentialSecretName: "my-secret",
+			kubeconfigPath:       "/nonexistent/kubeconfig",
+			credentials:          awsutil.AWSCredentialsOptions{AWSCredentialsFile: "/some/creds"},
+			pullSecretFile:       "asdf",
+			expectError:          true,
+		},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			err := ValidateCreateCredentialInfo(test.credentials, test.credentialSecretName, "", test.pullSecretFile)
+			err := ValidateCreateCredentialInfo(test.credentials, test.credentialSecretName, "", test.pullSecretFile, test.kubeconfigPath)
 			if test.expectError {
 				g.Expect(err).To(HaveOccurred())
 			} else {
@@ -171,7 +180,7 @@ func TestCreateCluster(t *testing.T) {
 		args []string
 	}{
 		{
-			name: "minimal flags necessary to render",
+			name: "When minimal flags are provided, it should render successfully",
 			args: []string{
 				"--sts-creds=" + credentialsFile,
 				"--infra-json=" + infraFile,
@@ -183,7 +192,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "default creation flags for cesar",
+			name: "When default creation flags are provided, it should create cluster with expected configuration",
 			args: []string{
 				"--pull-secret=" + pullSecretFile,
 				"--name=example",
@@ -206,7 +215,7 @@ func TestCreateCluster(t *testing.T) {
 			},
 		},
 		{
-			name: "minimal with KubeAPIServerDNSName",
+			name: "When KubeAPIServerDNSName is provided, it should configure custom DNS name",
 			args: []string{
 				"--name=example",
 				"--sts-creds=" + credentialsFile,
@@ -215,6 +224,19 @@ func TestCreateCluster(t *testing.T) {
 				"--role-arn=fakeRoleARN",
 				"--pull-secret=" + pullSecretFile,
 				"--kas-dns-name=test-dns-name.example.com",
+			},
+		},
+		{
+			name: "When OVNKubernetesMTU is provided, it should configure custom MTU",
+			args: []string{
+				"--name=example",
+				"--sts-creds=" + credentialsFile,
+				"--infra-json=" + infraFile,
+				"--iam-json=" + iamFile,
+				"--role-arn=fakeRoleARN",
+				"--pull-secret=" + pullSecretFile,
+				"--render-sensitive",
+				"--ovn-kubernetes-mtu=1400",
 			},
 		},
 	} {
@@ -244,4 +266,34 @@ func TestCreateCluster(t *testing.T) {
 			testutil.CompareWithFixture(t, manifests)
 		})
 	}
+}
+
+func TestServiceAccountTokenIssuerSecret(t *testing.T) {
+	g := NewGomegaWithT(t)
+	secret := serviceAccountTokenIssuerSecret("test-ns", "test")
+	g.Expect(secret.Labels).To(HaveKeyWithValue(util.DeleteWithClusterLabelName, "true"))
+}
+
+func TestGenerateResources(t *testing.T) {
+	t.Run("ProxySSHKeySecretHasDeleteWithClusterLabel", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		opts := &CreateOptions{
+			completedCreateOptions: &completedCreateOptions{
+				ValidatedCreateOptions: &ValidatedCreateOptions{
+					validatedCreateOptions: &validatedCreateOptions{
+						RawCreateOptions: &RawCreateOptions{},
+					},
+				},
+				infra: &awsinfra.CreateInfraOutput{
+					Name:               "test",
+					ProxyPrivateSSHKey: base64.StdEncoding.EncodeToString([]byte("fake-key")),
+				},
+				namespace: "test-ns",
+			},
+		}
+		resources, err := opts.GenerateResources()
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(resources).To(HaveLen(1))
+		g.Expect(resources[0].GetLabels()).To(HaveKeyWithValue(util.DeleteWithClusterLabelName, "true"))
+	})
 }

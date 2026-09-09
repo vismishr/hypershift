@@ -2,12 +2,13 @@ package kcm
 
 import (
 	"fmt"
-	"strings"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
 	"github.com/openshift/hypershift/support/config"
 	component "github.com/openshift/hypershift/support/controlplane-component"
+	"github.com/openshift/hypershift/support/netutil"
+	"github.com/openshift/hypershift/support/podspec"
 	"github.com/openshift/hypershift/support/proxy"
 	"github.com/openshift/hypershift/support/util"
 
@@ -17,6 +18,14 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+func resolveKCMVerbosity(hcp *hyperv1.HostedControlPlane) int {
+	var level hyperv1.LogLevel
+	if hcp.Spec.OperatorConfiguration != nil {
+		level = hcp.Spec.OperatorConfiguration.KubeControllerManager.LogLevel
+	}
+	return util.LogLevelToKlogVerbosity(level)
+}
 
 func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Deployment) error {
 	hcp := cpContext.HCP
@@ -30,10 +39,16 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 		return err
 	}
 
-	util.UpdateContainer(ComponentName, deployment.Spec.Template.Spec.Containers, func(c *corev1.Container) {
+	tlsArgs, err := config.TLSArgs(hcp.Spec.Configuration.GetTLSSecurityProfile())
+	if err != nil {
+		return err
+	}
+
+	podspec.UpdateContainer(ComponentName, deployment.Spec.Template.Spec.Containers, func(c *corev1.Container) {
+		c.Args = append(c.Args, fmt.Sprintf("--v=%d", resolveKCMVerbosity(hcp)))
 		c.Args = append(c.Args,
-			fmt.Sprintf("--cluster-cidr=%s", util.FirstClusterCIDR(hcp.Spec.Networking.ClusterNetwork)),
-			fmt.Sprintf("--service-cluster-ip-range=%s", util.FirstServiceCIDR(hcp.Spec.Networking.ServiceNetwork)),
+			fmt.Sprintf("--cluster-cidr=%s", netutil.FirstClusterCIDR(hcp.Spec.Networking.ClusterNetwork)),
+			fmt.Sprintf("--service-cluster-ip-range=%s", netutil.FirstServiceCIDR(hcp.Spec.Networking.ServiceNetwork)),
 		)
 		// This value comes from the Cloud Provider Azure documentation: https://cloud-provider-azure.sigs.k8s.io/install/azure-ccm/#kube-controller-manager
 		if hcp.Spec.Platform.Type == hyperv1.AzurePlatform {
@@ -53,12 +68,10 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 			c.Args = append(c.Args, "--node-monitor-grace-period=50s")
 		}
 
-		if tlsMinVersion := config.MinTLSVersion(hcp.Spec.Configuration.GetTLSSecurityProfile()); tlsMinVersion != "" {
-			c.Args = append(c.Args, fmt.Sprintf("--tls-min-version=%s", tlsMinVersion))
+		if len(tlsArgs) > 0 {
+			c.Args = append(c.Args, tlsArgs...)
 		}
-		if cipherSuites := config.CipherSuites(hcp.Spec.Configuration.GetTLSSecurityProfile()); len(cipherSuites) != 0 {
-			c.Args = append(c.Args, fmt.Sprintf("--tls-cipher-suites=%s", strings.Join(cipherSuites, ",")))
-		}
+
 		if util.StringListContains(hcp.Annotations[hyperv1.DisableProfilingAnnotation], ComponentName) {
 			c.Args = append(c.Args, "--profiling=false")
 		}

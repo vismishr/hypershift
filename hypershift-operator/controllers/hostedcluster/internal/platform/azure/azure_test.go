@@ -2,24 +2,34 @@ package azure
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	. "github.com/onsi/gomega"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	azurecloud "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/cloud/azure"
 	"github.com/openshift/hypershift/support/api"
 	"github.com/openshift/hypershift/support/config"
 
+	configv1 "github.com/openshift/api/config/v1"
+
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	capiazure "sigs.k8s.io/cluster-api-provider-azure/api/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/blang/semver"
+	"github.com/google/go-cmp/cmp"
 )
 
 func TestReconcileAzureClusterIdentity(t *testing.T) {
@@ -40,7 +50,7 @@ func TestReconcileAzureClusterIdentity(t *testing.T) {
 		expectedAzureClusterIdentity *capiazure.AzureClusterIdentity
 	}{
 		{
-			name:             "when MANAGED_SERVICE is set to AROHCP, it should reconcile AzureClusterIdentity as UserAssignedIdentityCredential",
+			name:             "When MANAGED_SERVICE is set to AROHCP it should reconcile AzureClusterIdentity as UserAssignedIdentityCredential",
 			isManagedService: true,
 			hc: &hyperv1.HostedCluster{
 				ObjectMeta: metav1.ObjectMeta{
@@ -80,7 +90,7 @@ func TestReconcileAzureClusterIdentity(t *testing.T) {
 			},
 		},
 		{
-			name:             "when MANAGED_SERVICE is not set, it should reconcile AzureClusterIdentity as WorkloadIdentity",
+			name:             "When MANAGED_SERVICE is not set it should reconcile AzureClusterIdentity as WorkloadIdentity",
 			isManagedService: false,
 			hc: &hyperv1.HostedCluster{
 				ObjectMeta: metav1.ObjectMeta{
@@ -152,25 +162,25 @@ func TestParseCloudType(t *testing.T) {
 		expectedError  bool
 	}{
 		{
-			name:           "when input is AzurePublicCloud, expected output is public",
+			name:           "When input is AzurePublicCloud, it should return public",
 			input:          "AzurePublicCloud",
 			expectedOutput: "public",
 			expectedError:  false,
 		},
 		{
-			name:           "when input is AzureUSGovernmentCloud, expected output is usgovernment",
+			name:           "When input is AzureUSGovernmentCloud, it should return usgovernment",
 			input:          "AzureUSGovernmentCloud",
 			expectedOutput: "usgovernment",
 			expectedError:  false,
 		},
 		{
-			name:           "when input is AzureChinaCloud, expected output is china",
+			name:           "When input is AzureChinaCloud, it should return china",
 			input:          "AzureChinaCloud",
 			expectedOutput: "china",
 			expectedError:  false,
 		},
 		{
-			name:           "when input is an invalid cloud type, expect error",
+			name:           "When input is an invalid cloud type, it should return an error",
 			input:          "AzureGermanCloud",
 			expectedOutput: "",
 			expectedError:  true,
@@ -255,7 +265,7 @@ func TestReconcileCredentials(t *testing.T) {
 		validateSecrets      func(secrets []*corev1.Secret)
 	}{
 		{
-			name:           "self-managed Azure with workload identities creates all credential secrets",
+			name:           "When self-managed Azure has workload identities it should create all credential secrets",
 			managedService: "",
 			hcluster: createTestHostedCluster(true, &hyperv1.AzureWorkloadIdentities{
 				Ingress: hyperv1.WorkloadIdentity{
@@ -309,7 +319,7 @@ func TestReconcileCredentials(t *testing.T) {
 			},
 		},
 		{
-			name:           "self-managed Azure with disabled capabilities skips appropriate secrets",
+			name:           "When self-managed Azure has disabled capabilities it should skip appropriate secrets",
 			managedService: "",
 			hcluster: func() *hyperv1.HostedCluster {
 				hc := createTestHostedCluster(true, &hyperv1.AzureWorkloadIdentities{
@@ -353,7 +363,7 @@ func TestReconcileCredentials(t *testing.T) {
 			},
 		},
 		{
-			name:                 "managed Azure (ARO-HCP) does not create workload identity secrets",
+			name:                 "When managed Azure ARO-HCP is used it should not create workload identity secrets",
 			managedService:       hyperv1.AroHCP,
 			hcluster:             createTestHostedCluster(false, nil),
 			expectedSecretsCount: 1, // Only CNCC secret should be created
@@ -408,6 +418,704 @@ func TestReconcileCredentials(t *testing.T) {
 			if tt.validateSecrets != nil {
 				tt.validateSecrets(createdSecrets)
 			}
+		})
+	}
+}
+
+func TestReconcileKMSConfigSecret(t *testing.T) {
+	baseHC := func() *hyperv1.HostedCluster {
+		return &hyperv1.HostedCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+			Spec: hyperv1.HostedClusterSpec{
+				InfraID: "test-infra",
+				Platform: hyperv1.PlatformSpec{
+					Type: hyperv1.AzurePlatform,
+					Azure: &hyperv1.AzurePlatformSpec{
+						Cloud:             "AzurePublicCloud",
+						TenantID:          "test-tenant-id",
+						SubscriptionID:    "test-sub-id",
+						ResourceGroupName: "test-rg",
+						Location:          "eastus",
+					},
+				},
+				SecretEncryption: &hyperv1.SecretEncryptionSpec{
+					Type: hyperv1.KMS,
+					KMS: &hyperv1.KMSSpec{
+						Provider: hyperv1.AZURE,
+						Azure: &hyperv1.AzureKMSSpec{
+							ActiveKey: hyperv1.AzureKMSKey{
+								KeyVaultName: "test-vault",
+								KeyName:      "test-key",
+								KeyVersion:   "v1",
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	testCases := []struct {
+		name           string
+		managedService string
+		hc             *hyperv1.HostedCluster
+		expectErr      bool
+		validate       func(g Gomega, cfg azurecloud.AzureConfig)
+	}{
+		{
+			name:           "When ARO HCP, it should set AADMSIDataPlaneIdentityPath",
+			managedService: hyperv1.AroHCP,
+			hc: func() *hyperv1.HostedCluster {
+				hc := baseHC()
+				hc.Spec.SecretEncryption.KMS.Azure.KMS = hyperv1.ManagedIdentity{
+					CredentialsSecretName: "kms-creds",
+				}
+				return hc
+			}(),
+			validate: func(g Gomega, cfg azurecloud.AzureConfig) {
+				g.Expect(cfg.AADMSIDataPlaneIdentityPath).To(Equal(config.ManagedAzureCertificatePath + "kms-creds"))
+				g.Expect(cfg.UseWorkloadIdentityExtension).To(BeFalse())
+				g.Expect(cfg.AADClientID).To(BeEmpty())
+			},
+		},
+		{
+			name: "When self-managed Azure with workload identities, it should set federated identity fields",
+			hc: func() *hyperv1.HostedCluster {
+				hc := baseHC()
+				hc.Spec.SecretEncryption.KMS.Azure.WorkloadIdentity = hyperv1.WorkloadIdentity{
+					ClientID: "kms-client-id",
+				}
+				return hc
+			}(),
+			validate: func(g Gomega, cfg azurecloud.AzureConfig) {
+				g.Expect(cfg.UseWorkloadIdentityExtension).To(BeTrue())
+				g.Expect(cfg.AADClientID).To(BeEmpty())
+				g.Expect(cfg.AADMSIDataPlaneIdentityPath).To(BeEmpty())
+			},
+		},
+		{
+			name:      "When Azure KMS without any credentials, it should return an error",
+			hc:        baseHC(),
+			expectErr: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			if tc.managedService != "" {
+				t.Setenv("MANAGED_SERVICE", tc.managedService)
+			}
+
+			secret := &corev1.Secret{}
+			err := reconcileKMSConfigSecret(secret, tc.hc)
+			if tc.expectErr {
+				g.Expect(err).To(HaveOccurred())
+				return
+			}
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(secret.Data).To(HaveKey(azurecloud.CloudConfigKey))
+
+			var cfg azurecloud.AzureConfig
+			err = json.Unmarshal(secret.Data[azurecloud.CloudConfigKey], &cfg)
+			g.Expect(err).ToNot(HaveOccurred())
+
+			// Verify common base fields
+			g.Expect(cfg.Cloud).To(Equal("AzurePublicCloud"))
+			g.Expect(cfg.TenantID).To(Equal("test-tenant-id"))
+			g.Expect(cfg.SubscriptionID).To(Equal("test-sub-id"))
+			g.Expect(cfg.ResourceGroup).To(Equal("test-rg"))
+			g.Expect(cfg.Location).To(Equal("eastus"))
+			g.Expect(cfg.LoadBalancerName).To(Equal("test-infra"))
+			g.Expect(cfg.CloudProviderBackoff).To(BeTrue())
+			g.Expect(cfg.LoadBalancerSku).To(Equal("standard"))
+
+			tc.validate(g, cfg)
+		})
+	}
+}
+
+func TestDeleteOrphanedMachines(t *testing.T) {
+	controlPlaneNamespace := "test-cp-namespace"
+
+	managedIdentitiesHC := &hyperv1.HostedCluster{
+		Spec: hyperv1.HostedClusterSpec{
+			Platform: hyperv1.PlatformSpec{
+				Azure: &hyperv1.AzurePlatformSpec{
+					AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{
+						ManagedIdentities: &hyperv1.AzureResourceManagedIdentities{},
+					},
+				},
+			},
+		},
+	}
+
+	// staleDeletionTimestamp simulates a machine that has been pending deletion beyond the threshold.
+	staleDeletionTimestamp := metav1.NewTime(time.Now().Add(-(deletionFailedThreshold + time.Minute)))
+	recentDeletionTimestamp := metav1.NewTime(time.Now())
+
+	deletionFailedConditions := capiv1.Conditions{
+		{
+			Type:   capiv1.ReadyCondition,
+			Status: corev1.ConditionFalse,
+			Reason: capiazure.DeletionFailedReason,
+		},
+	}
+
+	healthyCapiProvider := capiProviderDeploymentWithAvailableCondition(controlPlaneNamespace, corev1.ConditionTrue, 0)
+	// staleUnavailableCapiProvider simulates CAPZ having been unable to run beyond the
+	// deletionFailedThreshold, e.g. the availability-prober has been blocked the whole time.
+	staleUnavailableCapiProvider := capiProviderDeploymentWithAvailableCondition(controlPlaneNamespace, corev1.ConditionFalse, deletionFailedThreshold+time.Minute)
+	// recentlyUnavailableCapiProvider simulates a brief CAPZ restart (e.g. an OOM kill) that
+	// has not yet been unavailable long enough to be considered permanently stuck.
+	recentlyUnavailableCapiProvider := capiProviderDeploymentWithAvailableCondition(controlPlaneNamespace, corev1.ConditionFalse, time.Minute)
+
+	testCases := []struct {
+		name                      string
+		hostedCluster             *hyperv1.HostedCluster
+		azureMachines             []capiazure.AzureMachine
+		capiProviderDeployment    *appsv1.Deployment // nil means the capi-provider deployment does not exist
+		expectedFinalizersRemoved bool
+		expectedError             bool
+	}{
+		{
+			name: "When ManagedIdentities is nil it should return early without modifying machines",
+			hostedCluster: &hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Platform: hyperv1.PlatformSpec{
+						Azure: &hyperv1.AzurePlatformSpec{
+							AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{},
+						},
+					},
+				},
+			},
+			azureMachines: []capiazure.AzureMachine{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "machine-1",
+						Namespace:         controlPlaneNamespace,
+						Finalizers:        []string{capiazure.MachineFinalizer},
+						DeletionTimestamp: &staleDeletionTimestamp,
+					},
+					Status: capiazure.AzureMachineStatus{
+						Conditions: deletionFailedConditions,
+					},
+				},
+			},
+			capiProviderDeployment:    healthyCapiProvider,
+			expectedFinalizersRemoved: false,
+			expectedError:             false,
+		},
+		{
+			name:                      "When there are no machines it should succeed",
+			hostedCluster:             managedIdentitiesHC,
+			azureMachines:             []capiazure.AzureMachine{},
+			capiProviderDeployment:    healthyCapiProvider,
+			expectedFinalizersRemoved: false,
+			expectedError:             false,
+		},
+		{
+			name:          "When a machine has a stale DeletionTimestamp with DeletionFailed condition it should remove finalizers",
+			hostedCluster: managedIdentitiesHC,
+			azureMachines: []capiazure.AzureMachine{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "machine-1",
+						Namespace:         controlPlaneNamespace,
+						Finalizers:        []string{capiazure.MachineFinalizer},
+						DeletionTimestamp: &staleDeletionTimestamp,
+					},
+					Status: capiazure.AzureMachineStatus{
+						Conditions: deletionFailedConditions,
+					},
+				},
+			},
+			capiProviderDeployment:    healthyCapiProvider,
+			expectedFinalizersRemoved: true,
+			expectedError:             false,
+		},
+		{
+			name:          "When a machine has a recent DeletionTimestamp with DeletionFailed condition it should not remove finalizers",
+			hostedCluster: managedIdentitiesHC,
+			azureMachines: []capiazure.AzureMachine{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "machine-1",
+						Namespace:         controlPlaneNamespace,
+						Finalizers:        []string{capiazure.MachineFinalizer},
+						DeletionTimestamp: &recentDeletionTimestamp,
+					},
+					Status: capiazure.AzureMachineStatus{
+						Conditions: deletionFailedConditions,
+					},
+				},
+			},
+			capiProviderDeployment:    healthyCapiProvider,
+			expectedFinalizersRemoved: false,
+			expectedError:             false,
+		},
+		{
+			name:          "When a machine has a stale DeletionTimestamp without DeletionFailed condition and capi-provider is healthy it should not remove finalizers",
+			hostedCluster: managedIdentitiesHC,
+			azureMachines: []capiazure.AzureMachine{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "machine-1",
+						Namespace:         controlPlaneNamespace,
+						Finalizers:        []string{capiazure.MachineFinalizer},
+						DeletionTimestamp: &staleDeletionTimestamp,
+					},
+					Status: capiazure.AzureMachineStatus{
+						Conditions: capiv1.Conditions{
+							{
+								Type:   capiv1.ReadyCondition,
+								Status: corev1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			capiProviderDeployment:    healthyCapiProvider,
+			expectedFinalizersRemoved: false,
+			expectedError:             false,
+		},
+		{
+			name:          "When a machine is not pending deletion it should not remove finalizers regardless of conditions",
+			hostedCluster: managedIdentitiesHC,
+			azureMachines: []capiazure.AzureMachine{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "machine-1",
+						Namespace:  controlPlaneNamespace,
+						Finalizers: []string{capiazure.MachineFinalizer},
+					},
+					Status: capiazure.AzureMachineStatus{
+						Conditions: deletionFailedConditions,
+					},
+				},
+			},
+			capiProviderDeployment:    healthyCapiProvider,
+			expectedFinalizersRemoved: false,
+			expectedError:             false,
+		},
+		{
+			name:          "When a machine has a stale DeletionTimestamp without DeletionFailed condition and capi-provider has been unavailable beyond the threshold it should remove finalizers",
+			hostedCluster: managedIdentitiesHC,
+			azureMachines: []capiazure.AzureMachine{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "machine-1",
+						Namespace:         controlPlaneNamespace,
+						Finalizers:        []string{capiazure.MachineFinalizer},
+						DeletionTimestamp: &staleDeletionTimestamp,
+					},
+					Status: capiazure.AzureMachineStatus{
+						Conditions: capiv1.Conditions{
+							{
+								Type:   capiv1.ReadyCondition,
+								Status: corev1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			capiProviderDeployment:    staleUnavailableCapiProvider,
+			expectedFinalizersRemoved: true,
+			expectedError:             false,
+		},
+		{
+			name:          "When a machine has a stale DeletionTimestamp without DeletionFailed condition and capi-provider has only recently become unavailable it should not remove finalizers",
+			hostedCluster: managedIdentitiesHC,
+			azureMachines: []capiazure.AzureMachine{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "machine-1",
+						Namespace:         controlPlaneNamespace,
+						Finalizers:        []string{capiazure.MachineFinalizer},
+						DeletionTimestamp: &staleDeletionTimestamp,
+					},
+					Status: capiazure.AzureMachineStatus{
+						Conditions: capiv1.Conditions{
+							{
+								Type:   capiv1.ReadyCondition,
+								Status: corev1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			capiProviderDeployment:    recentlyUnavailableCapiProvider,
+			expectedFinalizersRemoved: false,
+			expectedError:             false,
+		},
+		{
+			name:          "When a machine has a recent DeletionTimestamp and capi-provider has been unavailable beyond the threshold it should not remove finalizers",
+			hostedCluster: managedIdentitiesHC,
+			azureMachines: []capiazure.AzureMachine{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "machine-1",
+						Namespace:         controlPlaneNamespace,
+						Finalizers:        []string{capiazure.MachineFinalizer},
+						DeletionTimestamp: &recentDeletionTimestamp,
+					},
+					Status: capiazure.AzureMachineStatus{
+						Conditions: capiv1.Conditions{
+							{
+								Type:   capiv1.ReadyCondition,
+								Status: corev1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			capiProviderDeployment:    staleUnavailableCapiProvider,
+			expectedFinalizersRemoved: false,
+			expectedError:             false,
+		},
+		{
+			name:          "When the capi-provider deployment does not exist and a machine has a stale DeletionTimestamp it should remove finalizers",
+			hostedCluster: managedIdentitiesHC,
+			azureMachines: []capiazure.AzureMachine{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "machine-1",
+						Namespace:         controlPlaneNamespace,
+						Finalizers:        []string{capiazure.MachineFinalizer},
+						DeletionTimestamp: &staleDeletionTimestamp,
+					},
+					Status: capiazure.AzureMachineStatus{
+						Conditions: capiv1.Conditions{
+							{
+								Type:   capiv1.ReadyCondition,
+								Status: corev1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			capiProviderDeployment:    nil,
+			expectedFinalizersRemoved: true,
+			expectedError:             false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := NewWithT(t)
+			ctx := context.Background()
+
+			objects := make([]client.Object, len(tc.azureMachines))
+			for i := range tc.azureMachines {
+				objects[i] = &tc.azureMachines[i]
+			}
+
+			if tc.capiProviderDeployment != nil {
+				// Deep-copy: several subtests share the same *Deployment value and run in
+				// parallel, but fake.ClientBuilder.Build() mutates the objects it's given
+				// (e.g. ResourceVersion), so sharing the pointer would race.
+				objects = append(objects, tc.capiProviderDeployment.DeepCopy())
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(api.Scheme).
+				WithObjects(objects...).
+				WithStatusSubresource(objects...).
+				Build()
+
+			azure := Azure{}
+
+			err := azure.DeleteOrphanedMachines(ctx, fakeClient, tc.hostedCluster, controlPlaneNamespace)
+
+			if tc.expectedError {
+				g.Expect(err).To(HaveOccurred())
+			} else {
+				g.Expect(err).ToNot(HaveOccurred())
+			}
+
+			azureMachineList := &capiazure.AzureMachineList{}
+			g.Expect(fakeClient.List(ctx, azureMachineList, client.InNamespace(controlPlaneNamespace))).To(Succeed())
+
+			if tc.expectedFinalizersRemoved {
+				for _, machine := range azureMachineList.Items {
+					if !machine.DeletionTimestamp.IsZero() {
+						g.Expect(machine.Finalizers).To(BeEmpty(), "finalizers should be removed for machines with DeletionFailed condition")
+					}
+				}
+			} else {
+				for _, machine := range azureMachineList.Items {
+					g.Expect(machine.Finalizers).To(Equal(tc.azureMachines[0].Finalizers), "finalizers should not be modified")
+				}
+			}
+		})
+	}
+}
+
+// capiProviderDeploymentWithAvailableCondition builds a capi-provider Deployment whose
+// Available condition has the given status and became that way transitionedAgo in the past.
+func capiProviderDeploymentWithAvailableCondition(controlPlaneNamespace string, status corev1.ConditionStatus, transitionedAgo time.Duration) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "capi-provider",
+			Namespace: controlPlaneNamespace,
+		},
+		Status: appsv1.DeploymentStatus{
+			Conditions: []appsv1.DeploymentCondition{
+				{
+					Type:               appsv1.DeploymentAvailable,
+					Status:             status,
+					LastTransitionTime: metav1.NewTime(time.Now().Add(-transitionedAgo)),
+				},
+			},
+		},
+	}
+}
+
+func TestDeleteOrphanedMachines_CapiProviderLookupError(t *testing.T) {
+	g := NewWithT(t)
+	ctx := context.Background()
+	controlPlaneNamespace := "test-cp-namespace"
+
+	hc := &hyperv1.HostedCluster{
+		Spec: hyperv1.HostedClusterSpec{
+			Platform: hyperv1.PlatformSpec{
+				Azure: &hyperv1.AzurePlatformSpec{
+					AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{
+						ManagedIdentities: &hyperv1.AzureResourceManagedIdentities{},
+					},
+				},
+			},
+		},
+	}
+
+	staleDeletionTimestamp := metav1.NewTime(time.Now().Add(-(deletionFailedThreshold + time.Minute)))
+	azureMachine := &capiazure.AzureMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "machine-1",
+			Namespace:         controlPlaneNamespace,
+			Finalizers:        []string{capiazure.MachineFinalizer},
+			DeletionTimestamp: &staleDeletionTimestamp,
+		},
+	}
+
+	getErr := fmt.Errorf("injected get failure")
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(api.Scheme).
+		WithObjects(azureMachine).
+		WithStatusSubresource(azureMachine).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*appsv1.Deployment); ok {
+					return getErr
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	azure := Azure{}
+	err := azure.DeleteOrphanedMachines(ctx, fakeClient, hc, controlPlaneNamespace)
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("failed to determine capi-provider availability"))
+
+	gotMachine := &capiazure.AzureMachine{}
+	g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(azureMachine), gotMachine)).To(Succeed())
+	g.Expect(gotMachine.Finalizers).To(Equal(azureMachine.Finalizers), "finalizers should not be modified when the capi-provider lookup fails")
+}
+
+func buildAzureHostedControlPlane(tlsProfile *configv1.TLSSecurityProfile) *hyperv1.HostedControlPlane {
+	return &hyperv1.HostedControlPlane{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster",
+			Namespace: "test-namespace",
+		},
+		Spec: hyperv1.HostedControlPlaneSpec{
+			Configuration: &hyperv1.ClusterConfiguration{
+				APIServer: &configv1.APIServerSpec{
+					TLSSecurityProfile: tlsProfile,
+				},
+			},
+		},
+	}
+}
+
+func TestCAPIProviderDeploymentSpec(t *testing.T) {
+	defaultArgs := []string{
+		"--namespace=$(MY_NAMESPACE)",
+		"--leader-elect=true",
+		"--feature-gates=MachinePool=false,ASOAPI=false",
+		"--disable-controllers-or-webhooks=DisableASOSecretController",
+	}
+
+	defaultImage := "test-capi-image"
+
+	customTLSProfile := &configv1.TLSSecurityProfile{
+		Type: configv1.TLSProfileCustomType,
+		Custom: &configv1.CustomTLSProfile{
+			TLSProfileSpec: configv1.TLSProfileSpec{
+				MinTLSVersion: configv1.VersionTLS12,
+				Ciphers: []string{
+					"ECDHE-ECDSA-AES128-GCM-SHA256",
+					"ECDHE-RSA-AES128-GCM-SHA256",
+				},
+			},
+		},
+	}
+
+	testCases := []struct {
+		name           string
+		hcp            *hyperv1.HostedControlPlane
+		payloadVersion *semver.Version
+		expectedImage  string
+		expectedArgs   []string
+	}{
+		{
+			name:           "When HostedControlPlane is nil it should not append TLS args",
+			payloadVersion: ptr.To(semver.MustParse("4.23.0")),
+			expectedImage:  defaultImage,
+			expectedArgs:   defaultArgs,
+		},
+		{
+			name: "When version is 4.22 and HCP has TLS profile it should not append TLS args",
+			hcp: buildAzureHostedControlPlane(&configv1.TLSSecurityProfile{
+				Type: configv1.TLSProfileModernType,
+			}),
+			payloadVersion: ptr.To(semver.MustParse("4.22.0")),
+			expectedImage:  defaultImage,
+			expectedArgs:   defaultArgs,
+		},
+		{
+			name: "When version is 4.23 and HCP has Modern TLS profile it should append min-version only",
+			hcp: buildAzureHostedControlPlane(&configv1.TLSSecurityProfile{
+				Type: configv1.TLSProfileModernType,
+			}),
+			payloadVersion: ptr.To(semver.MustParse("4.23.0")),
+			expectedImage:  defaultImage,
+			expectedArgs: append(defaultArgs,
+				"--tls-min-version=VersionTLS13",
+			),
+		},
+		{
+			name:           "When version is 5.0 and HCP has custom TLS profile it should append custom TLS args",
+			hcp:            buildAzureHostedControlPlane(customTLSProfile),
+			payloadVersion: ptr.To(semver.MustParse("5.0.0")),
+			expectedImage:  defaultImage,
+			expectedArgs: append(defaultArgs,
+				"--tls-min-version=VersionTLS12",
+				"--tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+			),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			platform := Azure{
+				capiProviderImage: tc.expectedImage,
+				payloadVersion:    tc.payloadVersion,
+			}
+			spec, err := platform.CAPIProviderDeploymentSpec(&hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+					},
+				},
+			}, tc.hcp)
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if spec == nil {
+				t.Fatal("expected deployment spec, got nil")
+			}
+			if len(spec.Template.Spec.Containers) == 0 {
+				t.Fatal("expected at least 1 container, got 0")
+			}
+
+			var managerContainer *corev1.Container
+			for i := range spec.Template.Spec.Containers {
+				if spec.Template.Spec.Containers[i].Name == "manager" {
+					managerContainer = &spec.Template.Spec.Containers[i]
+					break
+				}
+			}
+			if managerContainer == nil {
+				t.Fatal("manager container not found")
+			}
+
+			if managerContainer.Image != tc.expectedImage {
+				t.Errorf("expected image %s, got %s", tc.expectedImage, managerContainer.Image)
+			}
+
+			if diff := cmp.Diff(managerContainer.Args, tc.expectedArgs); diff != "" {
+				t.Errorf("args differ (-got +want):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestHasDeletionFailedCondition(t *testing.T) {
+	testCases := []struct {
+		name     string
+		machine  capiazure.AzureMachine
+		expected bool
+	}{
+		{
+			name: "When Ready is False with DeletionFailed reason, it should return true",
+			machine: capiazure.AzureMachine{
+				Status: capiazure.AzureMachineStatus{
+					Conditions: capiv1.Conditions{
+						{
+							Type:   capiv1.ReadyCondition,
+							Status: corev1.ConditionFalse,
+							Reason: capiazure.DeletionFailedReason,
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "When Ready is True, it should return false",
+			machine: capiazure.AzureMachine{
+				Status: capiazure.AzureMachineStatus{
+					Conditions: capiv1.Conditions{
+						{
+							Type:   capiv1.ReadyCondition,
+							Status: corev1.ConditionTrue,
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "When Ready is False with a different reason, it should return false",
+			machine: capiazure.AzureMachine{
+				Status: capiazure.AzureMachineStatus{
+					Conditions: capiv1.Conditions{
+						{
+							Type:   capiv1.ReadyCondition,
+							Status: corev1.ConditionFalse,
+							Reason: "SomeOtherReason",
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name:     "When there are no conditions, it should return false",
+			machine:  capiazure.AzureMachine{},
+			expected: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+			g.Expect(hasDeletionFailedCondition(&tc.machine)).To(Equal(tc.expected))
 		})
 	}
 }

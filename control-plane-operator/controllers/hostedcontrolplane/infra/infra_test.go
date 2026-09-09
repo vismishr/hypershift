@@ -11,9 +11,9 @@ import (
 	"github.com/openshift/hypershift/support/api"
 	"github.com/openshift/hypershift/support/config"
 	"github.com/openshift/hypershift/support/events"
+	"github.com/openshift/hypershift/support/netutil"
 	"github.com/openshift/hypershift/support/testutil"
 	"github.com/openshift/hypershift/support/upsert"
-	"github.com/openshift/hypershift/support/util"
 
 	routev1 "github.com/openshift/api/route/v1"
 
@@ -34,6 +34,7 @@ const (
 	testIngressDomain    = "apps.example.com"
 	testKASHostname      = "api.test.example.com"
 	testOAuthHostname    = "oauth.test.example.com"
+	testOAuthLBHostname  = "oauth.test.elb.amazonaws.com"
 	testKonnectivityHost = "konnectivity.test.example.com"
 )
 
@@ -91,6 +92,15 @@ func withAWSEndpointAccess(hcp *hyperv1.HostedControlPlane, access hyperv1.AWSEn
 	return hcp
 }
 
+// withAzureTopology sets the Azure topology type on the HCP.
+func withAzureTopology(hcp *hyperv1.HostedControlPlane, topology hyperv1.AzureTopologyType) *hyperv1.HostedControlPlane {
+	if hcp.Spec.Platform.Azure == nil {
+		hcp.Spec.Platform.Azure = &hyperv1.AzurePlatformSpec{}
+	}
+	hcp.Spec.Platform.Azure.Topology = topology
+	return hcp
+}
+
 // withServices sets the service publishing strategies on the HCP.
 func withServices(hcp *hyperv1.HostedControlPlane, services []hyperv1.ServicePublishingStrategyMapping) *hyperv1.HostedControlPlane {
 	hcp.Spec.Services = services
@@ -108,6 +118,43 @@ func allServicesRouteWithHostnames() []hyperv1.ServicePublishingStrategyMapping 
 				Route: &hyperv1.RoutePublishingStrategy{
 					Hostname: testKASHostname,
 				},
+			},
+		},
+		{
+			Service: hyperv1.Konnectivity,
+			ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{
+				Type: hyperv1.Route,
+				Route: &hyperv1.RoutePublishingStrategy{
+					Hostname: testKonnectivityHost,
+				},
+			},
+		},
+		{
+			Service: hyperv1.OAuthServer,
+			ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{
+				Type: hyperv1.Route,
+				Route: &hyperv1.RoutePublishingStrategy{
+					Hostname: testOAuthHostname,
+				},
+			},
+		},
+		{
+			Service: hyperv1.Ignition,
+			ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{
+				Type: hyperv1.Route,
+			},
+		},
+	}
+}
+
+// allServicesRouteNoKASHostname creates service publishing strategies with all services using Route type,
+// but without a hostname for APIServer (simulates Private cluster without external DNS).
+func allServicesRouteNoKASHostname() []hyperv1.ServicePublishingStrategyMapping {
+	return []hyperv1.ServicePublishingStrategyMapping{
+		{
+			Service: hyperv1.APIServer,
+			ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{
+				Type: hyperv1.Route,
 			},
 		},
 		{
@@ -163,6 +210,43 @@ func kasServiceLoadBalancerOthersRoute() []hyperv1.ServicePublishingStrategyMapp
 				Route: &hyperv1.RoutePublishingStrategy{
 					Hostname: testOAuthHostname,
 				},
+			},
+		},
+		{
+			Service: hyperv1.Ignition,
+			ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{
+				Type: hyperv1.Route,
+			},
+		},
+	}
+}
+
+// oauthServiceLoadBalancerOthersRoute creates service publishing strategies with LoadBalancer for OAuthServer
+// and Route for others (APIServer, Konnectivity, Ignition).
+func oauthServiceLoadBalancerOthersRoute() []hyperv1.ServicePublishingStrategyMapping {
+	return []hyperv1.ServicePublishingStrategyMapping{
+		{
+			Service: hyperv1.APIServer,
+			ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{
+				Type: hyperv1.Route,
+				Route: &hyperv1.RoutePublishingStrategy{
+					Hostname: testKASHostname,
+				},
+			},
+		},
+		{
+			Service: hyperv1.Konnectivity,
+			ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{
+				Type: hyperv1.Route,
+				Route: &hyperv1.RoutePublishingStrategy{
+					Hostname: testKonnectivityHost,
+				},
+			},
+		},
+		{
+			Service: hyperv1.OAuthServer,
+			ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{
+				Type: hyperv1.LoadBalancer,
 			},
 		},
 		{
@@ -272,7 +356,7 @@ func TestReconcileInfrastructure(t *testing.T) {
 		expectedStatus *InfrastructureStatus
 	}{
 		{
-			name: "AWS_Public_Route",
+			name: "When AWS public cluster uses Route, it should configure external router",
 			hcp: withServices(
 				withAWSEndpointAccess(baseAWSHCP(), hyperv1.Public),
 				allServicesRouteWithHostnames(),
@@ -295,7 +379,7 @@ func TestReconcileInfrastructure(t *testing.T) {
 			},
 		},
 		{
-			name: "AWS_Private_Route",
+			name: "When AWS private cluster uses Route, it should configure internal router",
 			hcp: withServices(
 				withAWSEndpointAccess(baseAWSHCP(), hyperv1.Private),
 				allServicesRouteWithHostnames(),
@@ -319,7 +403,7 @@ func TestReconcileInfrastructure(t *testing.T) {
 			},
 		},
 		{
-			name: "AWS_PublicAndPrivate_Route",
+			name: "When AWS public and private cluster uses Route, it should configure both routers",
 			hcp: withServices(
 				withAWSEndpointAccess(baseAWSHCP(), hyperv1.PublicAndPrivate),
 				allServicesRouteWithHostnames(),
@@ -344,7 +428,7 @@ func TestReconcileInfrastructure(t *testing.T) {
 		{
 			// With LabelHCPRoutes logic: Public + KAS LoadBalancer = routes NOT labeled,
 			// so no external HCP router is needed.
-			name: "AWS_Public_KAS_LoadBalancer",
+			name: "When AWS public cluster uses KAS LoadBalancer, it should not need external router",
 			hcp: withServices(
 				withAWSEndpointAccess(baseAWSHCP(), hyperv1.Public),
 				kasServiceLoadBalancerOthersRoute(),
@@ -367,7 +451,7 @@ func TestReconcileInfrastructure(t *testing.T) {
 			},
 		},
 		{
-			name: "AWS_Private_KAS_LoadBalancer",
+			name: "When AWS private cluster uses KAS LoadBalancer, it should configure internal router",
 			hcp: withServices(
 				withAWSEndpointAccess(baseAWSHCP(), hyperv1.Private),
 				kasServiceLoadBalancerOthersRoute(),
@@ -390,7 +474,7 @@ func TestReconcileInfrastructure(t *testing.T) {
 			},
 		},
 		{
-			name: "AWS_PublicAndPrivate_KAS_LoadBalancer",
+			name: "When AWS public and private cluster uses KAS LoadBalancer, it should configure internal router only",
 			hcp: withServices(
 				withAWSEndpointAccess(baseAWSHCP(), hyperv1.PublicAndPrivate),
 				kasServiceLoadBalancerOthersRoute(),
@@ -416,6 +500,14 @@ func TestReconcileInfrastructure(t *testing.T) {
 		},
 		// Azure self-managed test cases
 		{
+			name: "When Azure Private cluster has Route strategy without hostname, it should only need an internal router",
+			hcp: withServices(
+				withAzureTopology(baseAzureHCP(), hyperv1.AzureTopologyPrivate),
+				allServicesRouteNoKASHostname(),
+			),
+			expectError: false,
+		},
+		{
 			name: "When Azure self-managed cluster has KAS Route with hostname, it should need an external router",
 			hcp: withServices(
 				baseAzureHCP(),
@@ -438,13 +530,68 @@ func TestReconcileInfrastructure(t *testing.T) {
 				ExternalHCPRouterHost: testRouterLBHostname,
 			},
 		},
+		{
+			name: "When Azure private cluster uses KAS LoadBalancer, it should configure internal router",
+			hcp: withServices(
+				withAzureTopology(baseAzureHCP(), hyperv1.AzureTopologyPrivate),
+				kasServiceLoadBalancerOthersRoute(),
+			),
+			expectError: false,
+			// For Azure Private with LB:
+			// - APIHost from private KAS LB (kube-apiserver-private)
+			// - APIPort is 7443 (Azure uses different port to avoid collision)
+			// - Internal router needed for private HCP
+			expectedStatus: &InfrastructureStatus{
+				APIHost:               testKASLBHostname,
+				APIPort:               config.KASSVCLBAzurePort,
+				OAuthEnabled:          true,
+				OAuthHost:             testOAuthHostname,
+				OAuthPort:             443,
+				KonnectivityHost:      testKonnectivityHost,
+				KonnectivityPort:      443,
+				NeedInternalRouter:    true,
+				InternalHCPRouterHost: testInternalRouterLBHost,
+				NeedExternalRouter:    false,
+			},
+		},
+		{
+			name: "When Azure private cluster uses OAuth LoadBalancer, it should configure internal router",
+			hcp: withServices(
+				withAzureTopology(baseAzureHCP(), hyperv1.AzureTopologyPrivate),
+				oauthServiceLoadBalancerOthersRoute(),
+			),
+			expectError: false,
+			// For Azure Private with OAuth LB:
+			// - APIHost comes from KAS Route hostname
+			// - OAuthHost comes from OAuth LB service
+			// - Internal router needed for private HCP (KAS uses Route with hostname)
+			// - External router NOT needed (private)
+			expectedStatus: &InfrastructureStatus{
+				APIHost:               testKASHostname,
+				APIPort:               443,
+				OAuthEnabled:          true,
+				OAuthHost:             testOAuthLBHostname,
+				OAuthPort:             443,
+				KonnectivityHost:      testKonnectivityHost,
+				KonnectivityPort:      443,
+				NeedInternalRouter:    true,
+				InternalHCPRouterHost: testInternalRouterLBHost,
+				NeedExternalRouter:    false,
+			},
+		},
 		// ARO HCP test cases - use shared ingress
 		{
-			name: "ARO_Route_SharedIngress",
-			hcp: withServices(
-				baseAzureHCP(),
-				allServicesRouteWithHostnames(),
-			),
+			name: "When ARO cluster uses shared ingress with annotation fallback, it should use direct hostname without routers",
+			hcp: func() *hyperv1.HostedControlPlane {
+				hcp := withServices(baseAzureHCP(), allServicesRouteWithHostnames())
+				hcp.Annotations = map[string]string{
+					hyperv1.SwiftPodNetworkInstanceAnnotation: "swift-network-instance",
+				}
+				hcp.Spec.Platform.Azure.AzureAuthenticationConfig = hyperv1.AzureAuthenticationConfiguration{
+					AzureAuthenticationConfigType: hyperv1.AzureAuthenticationTypeManagedIdentities,
+				}
+				return hcp
+			}(),
 			setupEnv: func(t *testing.T) {
 				t.Setenv("MANAGED_SERVICE", hyperv1.AroHCP)
 			},
@@ -466,23 +613,58 @@ func TestReconcileInfrastructure(t *testing.T) {
 			},
 		},
 		{
-			name: "ARO_Route_SharedIngress_And_Swift",
+			name: "When ARO cluster uses Swift with public and private topology, it should use shared ingress",
+			hcp: func() *hyperv1.HostedControlPlane {
+				hcp := withServices(baseAzureHCP(), allServicesRouteWithHostnames())
+				hcp.Spec.Platform.Azure.Topology = hyperv1.AzureTopologyPublicAndPrivate
+				hcp.Spec.Platform.Azure.Private = hyperv1.AzurePrivateSpec{
+					Type: hyperv1.AzurePrivateTypeSwift,
+					Swift: hyperv1.AzureSwiftSpec{
+						PodNetworkInstance: "test-pni",
+					},
+				}
+				hcp.Spec.Platform.Azure.AzureAuthenticationConfig = hyperv1.AzureAuthenticationConfiguration{
+					AzureAuthenticationConfigType: hyperv1.AzureAuthenticationTypeManagedIdentities,
+				}
+				return hcp
+			}(),
+			expectError: false,
+			// New path: Swift detected via Private.Type=Swift API field with PublicAndPrivate topology.
+			// shared ingress for public access, internal router for private access.
+			expectedStatus: &InfrastructureStatus{
+				APIHost:            testKASHostname,
+				APIPort:            443,
+				OAuthEnabled:       true,
+				OAuthHost:          testOAuthHostname,
+				OAuthPort:          443,
+				KonnectivityHost:   testKonnectivityHost,
+				KonnectivityPort:   443,
+				NeedInternalRouter: false,
+				NeedExternalRouter: false,
+			},
+		},
+		{
+			name: "When ARO cluster uses Swift with private topology, it should not need routers",
 			hcp: func() *hyperv1.HostedControlPlane {
 				hcp := withServices(baseAzureHCP(), allServicesRouteWithHostnames())
 				hcp.Annotations = map[string]string{
 					hyperv1.SwiftPodNetworkInstanceAnnotation: "swift-network-instance",
 				}
+				hcp.Spec.Platform.Azure.Topology = hyperv1.AzureTopologyPrivate
+				hcp.Spec.Platform.Azure.Private = hyperv1.AzurePrivateSpec{
+					Type: hyperv1.AzurePrivateTypeSwift,
+					Swift: hyperv1.AzureSwiftSpec{
+						PodNetworkInstance: "swift-network-instance",
+					},
+				}
+				hcp.Spec.Platform.Azure.AzureAuthenticationConfig = hyperv1.AzureAuthenticationConfiguration{
+					AzureAuthenticationConfigType: hyperv1.AzureAuthenticationTypeManagedIdentities,
+				}
 				return hcp
 			}(),
-			setupEnv: func(t *testing.T) {
-				t.Setenv("MANAGED_SERVICE", hyperv1.AroHCP)
-			},
 			expectError: false,
-			// For ARO with Swift:
-			// - Swift handles pod networking, so no router services are needed
-			// - APIHost comes from shared ingress (KasRouteHostname)
-			// - Port is 443 (ExternalDNSLBPort)
-			// - Konnectivity (and ignition see v2/ignitionserver) Routes use hypershift.local, kas and auth use both hypershift.local and external routes
+			// Swift detected via Private.Type=Swift API field with Private topology.
+			// No shared ingress needed, internal router needed.
 			expectedStatus: &InfrastructureStatus{
 				APIHost:            testKASHostname,
 				APIPort:            443,
@@ -500,7 +682,7 @@ func TestReconcileInfrastructure(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			ctx := context.Background()
+			ctx := t.Context()
 
 			// Run optional environment setup
 			if tc.setupEnv != nil {
@@ -580,14 +762,24 @@ func TestReconcileInfrastructure(t *testing.T) {
 // It unconditionally tries to provision all possible services/routes, ignoring "not found" errors.
 func simulateInfraProvisioning(ctx context.Context, c client.Client, hcp *hyperv1.HostedControlPlane, externalRouterLBHost, internalRouterLBHost, kasLBHost string) error {
 	// List of all LoadBalancer services that might need provisioning
-	lbServices := []struct {
+	type lbService struct {
 		svc      *corev1.Service
 		hostname string
-	}{
-		{manifests.RouterPublicService(hcp.Namespace), externalRouterLBHost},
-		{manifests.PrivateRouterService(hcp.Namespace), internalRouterLBHost},
+	}
+	lbServices := []lbService{
 		{manifests.KubeAPIServerService(hcp.Namespace), kasLBHost},
 		{manifests.KubeAPIServerPrivateService(hcp.Namespace), kasLBHost},
+		{manifests.KubeAPIServerServiceAzureLB(hcp.Namespace), kasLBHost},
+		{manifests.OauthServerService(hcp.Namespace), testOAuthLBHostname},
+	}
+
+	// If not using Swift or shared ingress, provision the public and private router services as LB services
+	// Otherwise, only private-router service is created as ClusterIP service.
+	if !netutil.UseSwiftNetworkingHCP(hcp) && !netutil.UseSharedIngressHCP(hcp) {
+		lbServices = append(lbServices, []lbService{
+			{manifests.RouterPublicService(hcp.Namespace), externalRouterLBHost},
+			{manifests.PrivateRouterService(hcp.Namespace), internalRouterLBHost},
+		}...)
 	}
 
 	for _, lb := range lbServices {
@@ -617,6 +809,7 @@ func simulateInfraProvisioning(ctx context.Context, c client.Client, hcp *hyperv
 }
 
 func TestReconcileInfrastructure_ErrorCases(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name string
 		hcp  *hyperv1.HostedControlPlane
@@ -713,6 +906,7 @@ func TestReconcileInfrastructure_ErrorCases(t *testing.T) {
 }
 
 func TestReconcileInfrastructure_WhenTransitioningFromPublicToPrivate_ItShouldCleanUpPublicResources(t *testing.T) {
+	t.Parallel()
 	g := NewGomegaWithT(t)
 
 	// Start with Public configuration
@@ -767,6 +961,7 @@ func TestReconcileInfrastructure_WhenTransitioningFromPublicToPrivate_ItShouldCl
 }
 
 func TestReconcileInfrastructure_WhenTransitioningFromPrivateToPublic_ItShouldCleanUpPrivateResources(t *testing.T) {
+	t.Parallel()
 	g := NewGomegaWithT(t)
 
 	// Start with Private configuration
@@ -823,6 +1018,7 @@ func TestReconcileInfrastructure_WhenTransitioningFromPrivateToPublic_ItShouldCl
 // Tests moved from hostedcontrolplane_controller_test.go
 
 func TestReconcileOAuthService(t *testing.T) {
+	t.Parallel()
 	targetNamespace := "test"
 	apiPort := int32(config.KASSVCPort)
 	hostname := "test.example.com"
@@ -842,6 +1038,9 @@ func TestReconcileOAuthService(t *testing.T) {
 				Namespace:       targetNamespace,
 				Name:            manifests.OauthServerService(targetNamespace).Name,
 				OwnerReferences: []metav1.OwnerReference{ownerRef},
+				Labels: map[string]string{
+					"app": "oauth-openshift",
+				},
 			},
 			Spec: corev1.ServiceSpec{
 				Type:           corev1.ServiceTypeClusterIP,
@@ -919,7 +1118,7 @@ func TestReconcileOAuthService(t *testing.T) {
 		expectedRoutes   []routev1.Route
 	}{
 		{
-			name:           "Route strategy, Public",
+			name:           "When public cluster uses OAuth Route, it should create ClusterIP service and public route",
 			endpointAccess: hyperv1.Public,
 			oauthPublishingStrategy: hyperv1.ServicePublishingStrategy{
 				Type: hyperv1.Route,
@@ -937,7 +1136,7 @@ func TestReconcileOAuthService(t *testing.T) {
 			},
 		},
 		{
-			name:           "Route strategy, PublicPrivate",
+			name:           "When public and private cluster uses OAuth Route, it should create both public and internal routes",
 			endpointAccess: hyperv1.PublicAndPrivate,
 			oauthPublishingStrategy: hyperv1.ServicePublishingStrategy{
 				Type: hyperv1.Route,
@@ -957,7 +1156,7 @@ func TestReconcileOAuthService(t *testing.T) {
 			},
 		},
 		{
-			name:           "Route strategy, PublicPrivate, no hostname",
+			name:           "When public and private cluster uses OAuth Route without hostname, it should create unlabeled external route",
 			endpointAccess: hyperv1.PublicAndPrivate,
 			oauthPublishingStrategy: hyperv1.ServicePublishingStrategy{
 				Type: hyperv1.Route,
@@ -978,7 +1177,7 @@ func TestReconcileOAuthService(t *testing.T) {
 			},
 		},
 		{
-			name:           "Route strategy, Private",
+			name:           "When private cluster uses OAuth Route, it should create internal route only",
 			endpointAccess: hyperv1.Private,
 			oauthPublishingStrategy: hyperv1.ServicePublishingStrategy{
 				Type:  hyperv1.Route,
@@ -1034,8 +1233,15 @@ func TestReconcileOAuthService(t *testing.T) {
 			if err := fakeClient.List(ctx, &actualServices); err != nil {
 				t.Fatalf("failed to list services: %v", err)
 			}
+			if actualServices.Items == nil {
+				actualServices.Items = []corev1.Service{}
+			}
 
-			if diff := testutil.MarshalYamlAndDiff(&actualServices, &corev1.ServiceList{Items: tc.expectedServices}, t); diff != "" {
+			expectedServices := tc.expectedServices
+			if expectedServices == nil {
+				expectedServices = []corev1.Service{}
+			}
+			if diff := testutil.MarshalYamlAndDiff(&actualServices, &corev1.ServiceList{Items: expectedServices}, t); diff != "" {
 				t.Errorf("actual services differ from expected: %s", diff)
 			}
 
@@ -1043,7 +1249,14 @@ func TestReconcileOAuthService(t *testing.T) {
 			if err := fakeClient.List(ctx, &actualRoutes); err != nil {
 				t.Fatalf("failed to list routes: %v", err)
 			}
-			if diff := testutil.MarshalYamlAndDiff(&actualRoutes, &routev1.RouteList{Items: tc.expectedRoutes}, t); diff != "" {
+			if actualRoutes.Items == nil {
+				actualRoutes.Items = []routev1.Route{}
+			}
+			expectedRoutes := tc.expectedRoutes
+			if expectedRoutes == nil {
+				expectedRoutes = []routev1.Route{}
+			}
+			if diff := testutil.MarshalYamlAndDiff(&actualRoutes, &routev1.RouteList{Items: expectedRoutes}, t); diff != "" {
 				t.Errorf("actual routes differ from expected: %s", diff)
 			}
 		})
@@ -1051,6 +1264,7 @@ func TestReconcileOAuthService(t *testing.T) {
 }
 
 func TestReconcileAPIServerService(t *testing.T) {
+	t.Parallel()
 	targetNamespace := "test"
 	apiPort := int32(config.KASSVCPort)
 	kasPort := "client"
@@ -1114,6 +1328,7 @@ func TestReconcileAPIServerService(t *testing.T) {
 	}
 	withCrossZoneAnnotation := func(svc *corev1.Service) {
 		svc.Annotations["service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled"] = "true"
+		svc.Annotations["service.beta.kubernetes.io/aws-load-balancer-attributes"] = "load_balancing.cross_zone.enabled=true"
 	}
 	withLoadBalancerSourceRanges := func(svc *corev1.Service) {
 		svc.Spec.LoadBalancerSourceRanges = allowCIDRString
@@ -1146,7 +1361,7 @@ func TestReconcileAPIServerService(t *testing.T) {
 			Labels: map[string]string{
 				"hypershift.openshift.io/hosted-control-plane": targetNamespace,
 				hyperv1.RouteVisibilityLabel:                   string(hyperv1.RouteVisibilityPrivate),
-				util.InternalRouteLabel:                        "true",
+				netutil.InternalRouteLabel:                     "true",
 			},
 			OwnerReferences: []metav1.OwnerReference{ownerRef},
 		},
@@ -1188,12 +1403,13 @@ func TestReconcileAPIServerService(t *testing.T) {
 		name                  string
 		endpointAccess        hyperv1.AWSEndpointAccessType
 		apiPublishingStrategy hyperv1.ServicePublishingStrategy
+		existingObjects       []client.Object
 
 		expectedServices []corev1.Service
 		expectedRoutes   []routev1.Route
 	}{
 		{
-			name:           "LB strategy, public",
+			name:           "When public cluster uses LoadBalancer, it should create public LB service",
 			endpointAccess: hyperv1.Public,
 			apiPublishingStrategy: hyperv1.ServicePublishingStrategy{
 				Type: hyperv1.LoadBalancer,
@@ -1207,7 +1423,7 @@ func TestReconcileAPIServerService(t *testing.T) {
 			},
 		},
 		{
-			name:           "LB strategy, publicPrivate",
+			name:           "When public and private cluster uses LoadBalancer, it should create both public and private LB services",
 			endpointAccess: hyperv1.PublicAndPrivate,
 			apiPublishingStrategy: hyperv1.ServicePublishingStrategy{
 				Type: hyperv1.LoadBalancer,
@@ -1222,7 +1438,7 @@ func TestReconcileAPIServerService(t *testing.T) {
 			},
 		},
 		{
-			name:           "LB strategy, private",
+			name:           "When private cluster uses LoadBalancer, it should create ClusterIP and private LB services",
 			endpointAccess: hyperv1.Private,
 			apiPublishingStrategy: hyperv1.ServicePublishingStrategy{
 				Type: hyperv1.LoadBalancer,
@@ -1240,7 +1456,7 @@ func TestReconcileAPIServerService(t *testing.T) {
 			},
 		},
 		{
-			name:           "Route strategy, public",
+			name:           "When public cluster uses Route, it should create ClusterIP service and routes",
 			endpointAccess: hyperv1.Public,
 			apiPublishingStrategy: hyperv1.ServicePublishingStrategy{
 				Type: hyperv1.Route,
@@ -1253,6 +1469,7 @@ func TestReconcileAPIServerService(t *testing.T) {
 				kasPublicService(func(s *corev1.Service) {
 					s.Spec.Type = corev1.ServiceTypeClusterIP
 					delete(s.Annotations, "external-dns.alpha.kubernetes.io/hostname")
+					delete(s.Annotations, "service.beta.kubernetes.io/aws-load-balancer-type")
 				}),
 			},
 			expectedRoutes: []routev1.Route{
@@ -1261,7 +1478,7 @@ func TestReconcileAPIServerService(t *testing.T) {
 			},
 		},
 		{
-			name:           "Route strategy, publicPrivate",
+			name:           "When public and private cluster uses Route, it should create ClusterIP service and routes",
 			endpointAccess: hyperv1.PublicAndPrivate,
 			apiPublishingStrategy: hyperv1.ServicePublishingStrategy{
 				Type: hyperv1.Route,
@@ -1274,6 +1491,7 @@ func TestReconcileAPIServerService(t *testing.T) {
 				kasPublicService(func(s *corev1.Service) {
 					s.Spec.Type = corev1.ServiceTypeClusterIP
 					delete(s.Annotations, "external-dns.alpha.kubernetes.io/hostname")
+					delete(s.Annotations, "service.beta.kubernetes.io/aws-load-balancer-type")
 				}),
 			},
 			expectedRoutes: []routev1.Route{
@@ -1282,7 +1500,7 @@ func TestReconcileAPIServerService(t *testing.T) {
 			},
 		},
 		{
-			name:           "Route strategy, private",
+			name:           "When private cluster uses Route, it should create ClusterIP service and private routes",
 			endpointAccess: hyperv1.Private,
 			apiPublishingStrategy: hyperv1.ServicePublishingStrategy{
 				Type: hyperv1.Route,
@@ -1295,11 +1513,34 @@ func TestReconcileAPIServerService(t *testing.T) {
 				kasPublicService(func(s *corev1.Service) {
 					s.Spec.Type = corev1.ServiceTypeClusterIP
 					delete(s.Annotations, "external-dns.alpha.kubernetes.io/hostname")
+					delete(s.Annotations, "service.beta.kubernetes.io/aws-load-balancer-type")
 				}),
 			},
 			expectedRoutes: []routev1.Route{
 				kasInternalRoute,
 				kasExternalPrivateRoute,
+			},
+		},
+		{
+			name:           "When Route strategy is private with no hostname, it should delete obsolete routes and create only internal route",
+			endpointAccess: hyperv1.Private,
+			apiPublishingStrategy: hyperv1.ServicePublishingStrategy{
+				Type: hyperv1.Route,
+			},
+			existingObjects: []client.Object{
+				manifests.KubeAPIServerExternalPublicRoute(targetNamespace),
+				manifests.KubeAPIServerExternalPrivateRoute(targetNamespace),
+			},
+
+			expectedServices: []corev1.Service{
+				kasPublicService(func(s *corev1.Service) {
+					s.Spec.Type = corev1.ServiceTypeClusterIP
+					delete(s.Annotations, "external-dns.alpha.kubernetes.io/hostname")
+					delete(s.Annotations, "service.beta.kubernetes.io/aws-load-balancer-type")
+				}),
+			},
+			expectedRoutes: []routev1.Route{
+				kasInternalRoute,
 			},
 		},
 	}
@@ -1332,7 +1573,11 @@ func TestReconcileAPIServerService(t *testing.T) {
 
 			ctx := context.Background()
 
-			fakeClient := fake.NewClientBuilder().WithScheme(api.Scheme).Build()
+			clientBuilder := fake.NewClientBuilder().WithScheme(api.Scheme)
+			if len(tc.existingObjects) > 0 {
+				clientBuilder = clientBuilder.WithObjects(tc.existingObjects...)
+			}
+			fakeClient := clientBuilder.Build()
 			r := NewReconciler(fakeClient, testIngressDomain)
 
 			if err := r.reconcileAPIServerService(ctx, hcp, controllerutil.CreateOrUpdate); err != nil {
@@ -1343,8 +1588,15 @@ func TestReconcileAPIServerService(t *testing.T) {
 			if err := fakeClient.List(ctx, &actualServices); err != nil {
 				t.Fatalf("failed to list services: %v", err)
 			}
+			if actualServices.Items == nil {
+				actualServices.Items = []corev1.Service{}
+			}
 
-			if diff := testutil.MarshalYamlAndDiff(&actualServices, &corev1.ServiceList{Items: tc.expectedServices}, t); diff != "" {
+			expectedServices := tc.expectedServices
+			if expectedServices == nil {
+				expectedServices = []corev1.Service{}
+			}
+			if diff := testutil.MarshalYamlAndDiff(&actualServices, &corev1.ServiceList{Items: expectedServices}, t); diff != "" {
 				t.Errorf("actual services differ from expected: %s", diff)
 			}
 
@@ -1352,7 +1604,14 @@ func TestReconcileAPIServerService(t *testing.T) {
 			if err := fakeClient.List(ctx, &actualRoutes); err != nil {
 				t.Fatalf("failed to list routes: %v", err)
 			}
-			if diff := testutil.MarshalYamlAndDiff(&actualRoutes, &routev1.RouteList{Items: tc.expectedRoutes}, t); diff != "" {
+			if actualRoutes.Items == nil {
+				actualRoutes.Items = []routev1.Route{}
+			}
+			expectedRoutes := tc.expectedRoutes
+			if expectedRoutes == nil {
+				expectedRoutes = []routev1.Route{}
+			}
+			if diff := testutil.MarshalYamlAndDiff(&actualRoutes, &routev1.RouteList{Items: expectedRoutes}, t); diff != "" {
 				t.Errorf("actual routes differ from expected: %s", diff)
 			}
 		})
@@ -1367,7 +1626,8 @@ func TestReconcileHCPRouterServices(t *testing.T) {
 				Name:      "router",
 				Namespace: namespace,
 				Annotations: map[string]string{
-					"service.beta.kubernetes.io/aws-load-balancer-type": "nlb",
+					"service.beta.kubernetes.io/aws-load-balancer-type":   "nlb",
+					"service.beta.kubernetes.io/aws-load-balancer-scheme": "internet-facing",
 				},
 				Labels: map[string]string{"app": "private-router"},
 			},
@@ -1389,10 +1649,12 @@ func TestReconcileHCPRouterServices(t *testing.T) {
 		return publicService(append(m, func(s *corev1.Service) {
 			s.Name = "private-router"
 			s.Annotations["service.beta.kubernetes.io/aws-load-balancer-internal"] = "true"
+			delete(s.Annotations, "service.beta.kubernetes.io/aws-load-balancer-scheme")
 		})...)
 	}
 	withCrossZoneAnnotation := func(svc *corev1.Service) {
 		svc.Annotations["service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled"] = "true"
+		svc.Annotations["service.beta.kubernetes.io/aws-load-balancer-attributes"] = "load_balancing.cross_zone.enabled=true"
 	}
 	tests := []struct {
 		name                         string
@@ -1404,7 +1666,7 @@ func TestReconcileHCPRouterServices(t *testing.T) {
 		hcpModifier                  func(*hyperv1.HostedControlPlane)
 	}{
 		{
-			name:                         "Public HCP gets public LB only",
+			name:                         "When public HCP uses Route, it should create public router LB service",
 			endpointAccess:               hyperv1.Public,
 			exposeAPIServerThroughRouter: true,
 			expectedServices: []corev1.Service{
@@ -1412,7 +1674,7 @@ func TestReconcileHCPRouterServices(t *testing.T) {
 			},
 		},
 		{
-			name:                         "PublicPrivate gets public and private LB",
+			name:                         "When public and private HCP uses Route, it should create both router LB services",
 			endpointAccess:               hyperv1.PublicAndPrivate,
 			exposeAPIServerThroughRouter: true,
 			expectedServices: []corev1.Service{
@@ -1421,7 +1683,7 @@ func TestReconcileHCPRouterServices(t *testing.T) {
 			},
 		},
 		{
-			name:                         "Private gets private LB only",
+			name:                         "When private HCP uses Route, it should create private router LB service only",
 			endpointAccess:               hyperv1.Private,
 			exposeAPIServerThroughRouter: true,
 			expectedServices: []corev1.Service{
@@ -1429,7 +1691,7 @@ func TestReconcileHCPRouterServices(t *testing.T) {
 			},
 		},
 		{
-			name:                         "Public LB gets removed when switching to Private",
+			name:                         "When switching to private, it should remove public router LB service",
 			endpointAccess:               hyperv1.Private,
 			exposeAPIServerThroughRouter: true,
 			existingObjects:              []client.Object{publicService(), privateService()},
@@ -1438,7 +1700,7 @@ func TestReconcileHCPRouterServices(t *testing.T) {
 			},
 		},
 		{
-			name:                         "Private LB gets removed when switching to Public",
+			name:                         "When switching to public, it should remove private router LB service",
 			endpointAccess:               hyperv1.Public,
 			exposeAPIServerThroughRouter: true,
 			existingObjects:              []client.Object{privateService()},
@@ -1447,7 +1709,7 @@ func TestReconcileHCPRouterServices(t *testing.T) {
 			},
 		},
 		{
-			name:                         "Public LB gets removed when PublicAndPrivate but not using Route",
+			name:                         "When public and private cluster not using Route, it should remove public router LB service",
 			endpointAccess:               hyperv1.PublicAndPrivate,
 			exposeAPIServerThroughRouter: false,
 			existingObjects:              []client.Object{publicService()},
@@ -1456,22 +1718,130 @@ func TestReconcileHCPRouterServices(t *testing.T) {
 			},
 		},
 		{
-			name:                         "No LB created when public and not using Route",
+			name:                         "When public cluster not using Route, it should not create router LB services",
 			endpointAccess:               hyperv1.Public,
 			exposeAPIServerThroughRouter: false,
 			expectedServices:             nil,
 		},
 		{
-			name:                         "When ARO is enabled it should not create any services",
+			name:                         "When ARO with Swift annotation fallback it should create only a ClusterIP private router service",
 			endpointAccess:               hyperv1.Public,
 			exposeAPIServerThroughRouter: true,
-			expectedServices:             nil,
+			expectedServices: []corev1.Service{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "private-router",
+						Namespace: namespace,
+						Labels:    map[string]string{"app": "private-router"},
+					},
+					Spec: corev1.ServiceSpec{
+						Type:     corev1.ServiceTypeClusterIP,
+						Selector: map[string]string{"app": "private-router"},
+						Ports: []corev1.ServicePort{
+							{
+								Name:       "https",
+								Port:       443,
+								TargetPort: intstr.FromString("https"),
+								Protocol:   corev1.ProtocolTCP,
+							},
+						},
+					},
+				},
+			},
 			setupEnv: func(t *testing.T) {
 				t.Setenv("MANAGED_SERVICE", hyperv1.AroHCP)
 			},
 			hcpModifier: func(hcp *hyperv1.HostedControlPlane) {
 				hcp.Spec.Platform.Type = hyperv1.AzurePlatform
 				hcp.Spec.Platform.AWS = nil
+				hcp.Annotations = map[string]string{
+					hyperv1.SwiftPodNetworkInstanceAnnotation: "swift-network-instance",
+				}
+			},
+		},
+		{
+			name:                         "When ARO with Swift API fields it should create only a ClusterIP private router service",
+			endpointAccess:               hyperv1.Public,
+			exposeAPIServerThroughRouter: true,
+			expectedServices: []corev1.Service{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "private-router",
+						Namespace: namespace,
+						Labels:    map[string]string{"app": "private-router"},
+					},
+					Spec: corev1.ServiceSpec{
+						Type:     corev1.ServiceTypeClusterIP,
+						Selector: map[string]string{"app": "private-router"},
+						Ports: []corev1.ServicePort{
+							{
+								Name:       "https",
+								Port:       443,
+								TargetPort: intstr.FromString("https"),
+								Protocol:   corev1.ProtocolTCP,
+							},
+						},
+					},
+				},
+			},
+			setupEnv: func(t *testing.T) {
+				t.Setenv("MANAGED_SERVICE", hyperv1.AroHCP)
+			},
+			hcpModifier: func(hcp *hyperv1.HostedControlPlane) {
+				hcp.Spec.Platform.Type = hyperv1.AzurePlatform
+				hcp.Spec.Platform.AWS = nil
+				hcp.Spec.Platform.Azure = &hyperv1.AzurePlatformSpec{
+					Private: hyperv1.AzurePrivateSpec{
+						Type: hyperv1.AzurePrivateTypeSwift,
+						Swift: hyperv1.AzureSwiftSpec{
+							PodNetworkInstance: "test-pni",
+						},
+					},
+				}
+			},
+		},
+		{
+			name:                         "When ARO with both Swift annotation and API fields it should create only a ClusterIP private router service",
+			endpointAccess:               hyperv1.Public,
+			exposeAPIServerThroughRouter: true,
+			expectedServices: []corev1.Service{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "private-router",
+						Namespace: namespace,
+						Labels:    map[string]string{"app": "private-router"},
+					},
+					Spec: corev1.ServiceSpec{
+						Type:     corev1.ServiceTypeClusterIP,
+						Selector: map[string]string{"app": "private-router"},
+						Ports: []corev1.ServicePort{
+							{
+								Name:       "https",
+								Port:       443,
+								TargetPort: intstr.FromString("https"),
+								Protocol:   corev1.ProtocolTCP,
+							},
+						},
+					},
+				},
+			},
+			setupEnv: func(t *testing.T) {
+				t.Setenv("MANAGED_SERVICE", hyperv1.AroHCP)
+			},
+			hcpModifier: func(hcp *hyperv1.HostedControlPlane) {
+				hcp.Spec.Platform.Type = hyperv1.AzurePlatform
+				hcp.Spec.Platform.AWS = nil
+				hcp.Annotations = map[string]string{
+					hyperv1.SwiftPodNetworkInstanceAnnotation: "swift-network-instance",
+				}
+				hcp.Spec.Platform.Azure = &hyperv1.AzurePlatformSpec{
+					Private: hyperv1.AzurePrivateSpec{
+						Type: hyperv1.AzurePrivateTypeSwift,
+						Swift: hyperv1.AzureSwiftSpec{
+							PodNetworkInstance: "swift-network-instance",
+						},
+					},
+				}
 			},
 		},
 	}
@@ -1524,7 +1894,14 @@ func TestReconcileHCPRouterServices(t *testing.T) {
 			if err := c.List(ctx, &services); err != nil {
 				t.Fatalf("failed to list services: %v", err)
 			}
-			if diff := testutil.MarshalYamlAndDiff(&services, &corev1.ServiceList{Items: tc.expectedServices}, t); diff != "" {
+			expectedServices := tc.expectedServices
+			if expectedServices == nil {
+				expectedServices = []corev1.Service{}
+			}
+			if services.Items == nil {
+				services.Items = []corev1.Service{}
+			}
+			if diff := testutil.MarshalYamlAndDiff(&services, &corev1.ServiceList{Items: expectedServices}, t); diff != "" {
 				t.Errorf("actual services differ from expected: %s", diff)
 			}
 		})
@@ -1542,6 +1919,7 @@ func (c *fakeMessageCollector) ErrorMessages(resource client.Object) ([]string, 
 var _ events.MessageCollector = &fakeMessageCollector{}
 
 func TestReconcileRouterServiceStatus(t *testing.T) {
+	t.Parallel()
 	const namespace = "test-ns"
 	const svcName = "test"
 	tests := []struct {
@@ -1551,17 +1929,17 @@ func TestReconcileRouterServiceStatus(t *testing.T) {
 		expectMsg    bool
 	}{
 		{
-			name: "Non-existent service",
+			name: "When service does not exist, it should return empty host",
 		},
 		{
-			name: "Service that has not been provisioned",
+			name: "When service is not provisioned, it should return event message",
 			svc: &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: namespace},
 			},
 			expectMsg: true,
 		},
 		{
-			name: "Service with host populated",
+			name: "When service has hostname ingress, it should return hostname",
 			svc: &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: namespace},
 				Status: corev1.ServiceStatus{
@@ -1577,7 +1955,7 @@ func TestReconcileRouterServiceStatus(t *testing.T) {
 			expectedHost: "test.host",
 		},
 		{
-			name: "Service with IP populated",
+			name: "When service has IP ingress, it should return IP address",
 			svc: &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: namespace},
 				Status: corev1.ServiceStatus{
@@ -1640,7 +2018,7 @@ func TestReconcileInternalRouterServiceStatus(t *testing.T) {
 		wantMsg    string
 	}{
 		{
-			name: "When ARO swift is enabled it should not need internal router",
+			name: "When ARO swift is enabled via annotation fallback, it should not need internal router",
 			setup: func(t *testing.T) {
 				t.Setenv("MANAGED_SERVICE", hyperv1.AroHCP)
 			},
@@ -1657,6 +2035,63 @@ func TestReconcileInternalRouterServiceStatus(t *testing.T) {
 						Type: hyperv1.AzurePlatform,
 						Azure: &hyperv1.AzurePlatformSpec{
 							Location: "eastus",
+						},
+					},
+				},
+			},
+			wantNeeded: false,
+		},
+		{
+			name: "When ARO swift is enabled via API field, it should not need internal router",
+			setup: func(t *testing.T) {
+				t.Setenv("MANAGED_SERVICE", hyperv1.AroHCP)
+			},
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-namespace",
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+						Azure: &hyperv1.AzurePlatformSpec{
+							Location: "eastus",
+							Private: hyperv1.AzurePrivateSpec{
+								Type: hyperv1.AzurePrivateTypeSwift,
+								Swift: hyperv1.AzureSwiftSpec{
+									PodNetworkInstance: "swift-network-instance",
+								},
+							},
+						},
+					},
+				},
+			},
+			wantNeeded: false,
+		},
+		{
+			name: "When ARO swift is enabled via both annotation and API field, it should not need internal router",
+			setup: func(t *testing.T) {
+				t.Setenv("MANAGED_SERVICE", hyperv1.AroHCP)
+			},
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-namespace",
+					Annotations: map[string]string{
+						hyperv1.SwiftPodNetworkInstanceAnnotation: "swift-network-instance",
+					},
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+						Azure: &hyperv1.AzurePlatformSpec{
+							Location: "eastus",
+							Private: hyperv1.AzurePrivateSpec{
+								Type: hyperv1.AzurePrivateTypeSwift,
+								Swift: hyperv1.AzureSwiftSpec{
+									PodNetworkInstance: "swift-network-instance",
+								},
+							},
 						},
 					},
 				},
@@ -1687,6 +2122,99 @@ func TestReconcileInternalRouterServiceStatus(t *testing.T) {
 			if msg != tc.wantMsg {
 				t.Fatalf("unexpected message, got %q want %q", msg, tc.wantMsg)
 			}
+		})
+	}
+}
+
+func TestReconcileOAuthService_AzureLoadBalancer(t *testing.T) {
+	t.Parallel()
+	targetNamespace := "test"
+	apiPort := int32(config.KASSVCPort)
+	ipFamilyPolicy := corev1.IPFamilyPolicyPreferDualStack
+
+	ownerRef := metav1.OwnerReference{
+		APIVersion:         "hypershift.openshift.io/v1beta1",
+		Kind:               "HostedControlPlane",
+		Name:               "test",
+		Controller:         ptr.To(true),
+		BlockOwnerDeletion: ptr.To(true),
+	}
+
+	testsCases := []struct {
+		name     string
+		topology hyperv1.AzureTopologyType
+		wantILB  bool
+	}{
+		{
+			name:     "When Azure public cluster uses OAuth LB, it should create LB service without ILB annotation",
+			topology: hyperv1.AzureTopologyPublic,
+			wantILB:  false,
+		},
+		{
+			name:     "When Azure private cluster uses OAuth LB, it should create LB service with ILB annotation",
+			topology: hyperv1.AzureTopologyPrivate,
+			wantILB:  true,
+		},
+	}
+
+	for _, tc := range testsCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			hcp := &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: targetNamespace,
+					Name:      "test",
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Networking: hyperv1.ClusterNetworking{
+						APIServer: &hyperv1.APIServerNetworking{
+							Port: &apiPort,
+						},
+					},
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+						Azure: &hyperv1.AzurePlatformSpec{
+							Topology: tc.topology,
+						},
+					},
+					Services: []hyperv1.ServicePublishingStrategyMapping{{
+						Service: hyperv1.OAuthServer,
+						ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{
+							Type: hyperv1.LoadBalancer,
+						},
+					}},
+				},
+			}
+
+			fakeClient := fake.NewClientBuilder().WithScheme(api.Scheme).Build()
+			r := NewReconciler(fakeClient, testIngressDomain)
+
+			err := r.reconcileOAuthServerService(t.Context(), hcp, controllerutil.CreateOrUpdate)
+			g.Expect(err).ToNot(HaveOccurred())
+
+			svc := &corev1.Service{}
+			err = fakeClient.Get(t.Context(), client.ObjectKeyFromObject(manifests.OauthServerService(targetNamespace)), svc)
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(svc.Spec.Type).To(Equal(corev1.ServiceTypeLoadBalancer))
+			g.Expect(svc.Spec.IPFamilyPolicy).To(Equal(&ipFamilyPolicy))
+			g.Expect(svc.OwnerReferences).To(ContainElement(ownerRef))
+
+			if tc.wantILB {
+				g.Expect(svc.Annotations).To(HaveKeyWithValue(
+					"service.beta.kubernetes.io/azure-load-balancer-internal", "true",
+				))
+			} else {
+				g.Expect(svc.Annotations).ToNot(HaveKey(
+					"service.beta.kubernetes.io/azure-load-balancer-internal",
+				))
+			}
+
+			// LB strategy should not create any routes
+			var routes routev1.RouteList
+			err = fakeClient.List(t.Context(), &routes, client.InNamespace(targetNamespace))
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(routes.Items).To(BeEmpty())
 		})
 	}
 }

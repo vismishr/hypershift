@@ -6,7 +6,7 @@ import (
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	assets "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/assets"
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/podspec"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -22,6 +22,9 @@ type WorkloadProvider[T client.Object] interface {
 	NewObject() T
 	// LoadManifest know how to load the correct workload manifest and return a workload object of the correct type.
 	LoadManifest(componentName string) (T, error)
+	// LoadManifestTemplated loads the workload manifest with optional template rendering.
+	// When templateData is nil, it falls through to LoadManifest.
+	LoadManifestTemplated(componentName string, templateData map[string]string) (T, error)
 
 	// PodTemplateSpec knows how to extract corev1.PodTemplateSpec field from the given workload object.
 	PodTemplateSpec(object T) *corev1.PodTemplateSpec
@@ -78,6 +81,22 @@ func (d *deploymentProvider) LoadManifest(componentName string) (*appsv1.Deploym
 	return assets.LoadDeploymentManifest(componentName)
 }
 
+// LoadManifestTemplated implements WorkloadProvider.
+func (d *deploymentProvider) LoadManifestTemplated(componentName string, templateData map[string]string) (*appsv1.Deployment, error) {
+	if templateData == nil {
+		return d.LoadManifest(componentName)
+	}
+	obj, _, err := assets.LoadManifestTemplated(componentName, "deployment.yaml", templateData)
+	if err != nil {
+		return nil, err
+	}
+	deploy, ok := obj.(*appsv1.Deployment)
+	if !ok {
+		return nil, fmt.Errorf("expected Deployment but got %T", obj)
+	}
+	return deploy, nil
+}
+
 // PodTemplateSpec implements WorkloadProvider.
 func (d *deploymentProvider) PodTemplateSpec(object *appsv1.Deployment) *corev1.PodTemplateSpec {
 	return &object.Spec.Template
@@ -111,7 +130,7 @@ func (d *deploymentProvider) IsAvailable(object *appsv1.Deployment) (status meta
 
 // IsReady implements WorkloadProvider.
 func (d *deploymentProvider) IsReady(object *appsv1.Deployment) (status metav1.ConditionStatus, reason string, message string) {
-	if util.IsDeploymentReady(context.TODO(), object) {
+	if podspec.IsDeploymentReady(context.TODO(), object) {
 		status = metav1.ConditionTrue
 		reason = hyperv1.AsExpectedReason
 		message = fmt.Sprintf("Deployment %s successfully rolled out", object.Name)

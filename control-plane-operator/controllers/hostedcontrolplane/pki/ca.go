@@ -53,6 +53,10 @@ func ReconcileHCCOSigner(secret *corev1.Secret, ownerRef config.OwnerRef) error 
 	return reconcileSelfSignedCA(secret, ownerRef, "hcco-signer", "openshift")
 }
 
+func ReconcileKASBootstrapContainerSigner(secret *corev1.Secret, ownerRef config.OwnerRef) error {
+	return reconcileSelfSignedCA(secret, ownerRef, "kas-bootstrap-container-signer", "openshift")
+}
+
 func ReconcileKubeCSRSigner(secret *corev1.Secret, ownerRef config.OwnerRef) error {
 	return reconcileSelfSignedCA(secret, ownerRef, "kube-csr-signer", "openshift")
 }
@@ -114,6 +118,6 @@ func ReconcileRootCAConfigMap(cm *corev1.ConfigMap, ownerRef config.OwnerRef, ro
 	return reconcileAggregateCA(cm, ownerRef, sources...)
 }
 
-func ReconcileKonnectivityConfigMap(cm *corev1.ConfigMap, ownerRef config.OwnerRef, konnectivityCA *corev1.Secret) error {
-	return reconcileAggregateCA(cm, ownerRef, konnectivityCA)
+func ReconcileKonnectivityConfigMap(cm *corev1.ConfigMap, ownerRef config.OwnerRef, signers ...*corev1.Secret) error {
+	return reconcileAggregateCA(cm, ownerRef, signers...)
 }

@@ -9,8 +9,10 @@ import (
 
 	"github.com/openshift/hypershift/cmd/util"
 	"github.com/openshift/hypershift/support/awsapi"
+	supportawsutil "github.com/openshift/hypershift/support/awsutil"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsretry "github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/smithy-go"
@@ -130,13 +132,7 @@ func (o *CreateInfraOptions) CreateVPCS3Endpoint(ctx context.Context, l logr.Log
 		l.Info("Found existing s3 VPC endpoint", "id", existingEndpoint)
 		return nil
 	}
-	isRetriable := func(err error) bool {
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) {
-			return strings.EqualFold(apiErr.ErrorCode(), invalidRouteTableID)
-		}
-		return false
-	}
+	isRetriable := isRetriableVPCEndpointError
 	if err = retry.OnError(retryBackoff, isRetriable, func() error {
 		result, err := client.CreateVpcEndpoint(ctx, &ec2.CreateVpcEndpointInput{
 			VpcId:             aws.String(vpcID),
@@ -372,33 +368,14 @@ func (o *CreateInfraOptions) CreateNATGateway(ctx context.Context, l logr.Logger
 	}
 
 	eipResult, err := client.AllocateAddress(ctx, &ec2.AllocateAddressInput{
-		Domain: ec2types.DomainTypeVpc,
+		Domain:            ec2types.DomainTypeVpc,
+		TagSpecifications: o.ec2TagSpecifications("elastic-ip", fmt.Sprintf("%s-eip-%s", o.InfraID, availabilityZone)),
 	})
 	if err != nil {
 		return "", fmt.Errorf("cannot allocate EIP for NAT gateway: %w", err)
 	}
 	allocationID := aws.ToString(eipResult.AllocationId)
 	l.Info("Created elastic IP for NAT gateway", "id", allocationID)
-
-	// NOTE: there's a potential to leak EIP addresses if the following tag operation fails, since we have no way of
-	// recognizing the EIP as belonging to the cluster
-	isRetriable := func(err error) bool {
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) {
-			return strings.EqualFold(apiErr.ErrorCode(), invalidElasticIPNotFound)
-		}
-		return false
-	}
-	err = retry.OnError(retryBackoff, isRetriable, func() error {
-		_, err = client.CreateTags(ctx, &ec2.CreateTagsInput{
-			Resources: []string{allocationID},
-			Tags:      append(ec2Tags(o.InfraID, fmt.Sprintf("%s-eip-%s", o.InfraID, availabilityZone)), o.additionalEC2Tags...),
-		})
-		return err
-	})
-	if err != nil {
-		return "", fmt.Errorf("cannot tag NAT gateway EIP: %w", err)
-	}
 
 	isNATGatewayRetriable := func(err error) bool {
 		var apiErr smithy.APIError
@@ -641,7 +618,7 @@ func (o *CreateInfraOptions) ec2TagSpecifications(resourceType, name string) []e
 	return []ec2types.TagSpecification{
 		{
 			ResourceType: ec2types.ResourceType(resourceType),
-			Tags:         append(ec2Tags(o.InfraID, name), o.additionalEC2Tags...),
+			Tags:         append(ec2Tags(o.InfraID, o.Name, name), o.additionalEC2Tags...),
 		},
 	}
 }
@@ -680,12 +657,24 @@ func clusterTag(infraID string) string {
 	return fmt.Sprintf("kubernetes.io/cluster/%s", infraID)
 }
 
-func ec2Tags(infraID, name string) []ec2types.Tag {
+func ec2Tags(infraID, clusterName, name string) []ec2types.Tag {
 	tags := []ec2types.Tag{
 		{
 			Key:   aws.String(clusterTag(infraID)),
 			Value: aws.String(clusterTagValue),
 		},
+	}
+	if len(infraID) > 0 {
+		tags = append(tags, ec2types.Tag{
+			Key:   aws.String(supportawsutil.HypershiftInfraIDTagKey),
+			Value: aws.String(infraID),
+		})
+	}
+	if len(clusterName) > 0 {
+		tags = append(tags, ec2types.Tag{
+			Key:   aws.String(supportawsutil.HypershiftClusterNameTagKey),
+			Value: aws.String(clusterName),
+		})
 	}
 	if len(name) > 0 {
 		tags = append(tags, ec2types.Tag{
@@ -694,5 +683,17 @@ func ec2Tags(infraID, name string) []ec2types.Tag {
 		})
 	}
 	return tags
+}
 
+func isRetriableVPCEndpointError(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		code := apiErr.ErrorCode()
+		if strings.EqualFold(code, invalidRouteTableID) {
+			return true
+		}
+		_, isThrottle := awsretry.DefaultThrottleErrorCodes[code]
+		return isThrottle
+	}
+	return false
 }

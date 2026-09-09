@@ -2,17 +2,20 @@ package nodeclass
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
-	hyperkarpenterv1 "github.com/openshift/hypershift/api/karpenter/v1beta1"
+	hyperkarpenterv1 "github.com/openshift/hypershift/api/karpenter/v1"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/nodepool"
 	"github.com/openshift/hypershift/karpenter-operator/controllers/karpenter/assets"
 	supportassets "github.com/openshift/hypershift/support/assets"
 	"github.com/openshift/hypershift/support/config"
+	"github.com/openshift/hypershift/support/k8sutil"
 	karpenterutil "github.com/openshift/hypershift/support/karpenter"
 	"github.com/openshift/hypershift/support/upsert"
 	"github.com/openshift/hypershift/support/util"
@@ -29,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/ptr"
 
@@ -98,6 +102,8 @@ func (r *EC2NodeClassReconciler) SetupWithManager(ctx context.Context, mgr ctrl.
 			},
 		)).
 		Watches(&awskarpenterv1.EC2NodeClass{}, &handler.EnqueueRequestForObject{}).
+		Watches(&admissionv1.ValidatingAdmissionPolicy{}, handler.EnqueueRequestsFromMapFunc(r.mapVAPToOpenShiftEC2NodeClasses)).
+		Watches(&admissionv1.ValidatingAdmissionPolicyBinding{}, handler.EnqueueRequestsFromMapFunc(r.mapVAPBindingToOpenShiftEC2NodeClasses)).
 		// Watch secrets in the management cluster and reconcile all ec2nodeclasses
 		WatchesRawSource(source.Kind[client.Object](managementCluster.GetCache(), &corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.mapToOpenShiftEC2NodeClasses),
@@ -147,13 +153,19 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if !openshiftEC2NodeClass.DeletionTimestamp.IsZero() {
-		exists, err := util.DeleteIfNeeded(ctx, r.guestClient, ec2NodeClass)
+		exists, err := k8sutil.DeleteIfNeeded(ctx, r.guestClient, ec2NodeClass)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if exists {
 			// wait until EC2NodeClass is deleted
 			return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+		}
+
+		// Update ConfigMap to remove this OpenshiftEC2NodeClass's subnets.
+		// This handles the case where other OpenshiftEC2NodeClass resources still exist.
+		if err := r.reconcileKarpenterSubnetsConfigMap(ctx, hcp); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to reconcile karpenter subnets configmap during deletion: %w", err)
 		}
 
 		if controllerutil.ContainsFinalizer(openshiftEC2NodeClass, finalizer) {
@@ -166,7 +178,7 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	if !controllerutil.ContainsFinalizer(hcp, finalizer) {
+	if !controllerutil.ContainsFinalizer(openshiftEC2NodeClass, finalizer) {
 		original := openshiftEC2NodeClass.DeepCopy()
 		controllerutil.AddFinalizer(openshiftEC2NodeClass, finalizer)
 		if err := r.guestClient.Patch(ctx, openshiftEC2NodeClass, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -191,8 +203,12 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileStatus(ctx, ec2NodeClass, openshiftEC2NodeClass); err != nil {
+	if err := r.reconcileStatus(ctx, ec2NodeClass, openshiftEC2NodeClass, hcp); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcileKarpenterSubnetsConfigMap(ctx, hcp); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile karpenter subnets configmap: %w", err)
 	}
 
 	if err := r.reconcileVAP(ctx); err != nil {
@@ -209,10 +225,12 @@ func (r *EC2NodeClassReconciler) reconcileCRDs(ctx context.Context, onlyCreate b
 	errs := []error{}
 	var op controllerutil.OperationResult
 	var err error
-	for _, crd := range []*apiextensionsv1.CustomResourceDefinition{
+	for _, desired := range []*apiextensionsv1.CustomResourceDefinition{
 		crdEC2NodeClass,
 		crdOpenshiftEC2NodeClass,
 	} {
+		// We need to deep copy because Create/CreateOrUpdate mutates the object
+		crd := desired.DeepCopy()
 		if onlyCreate {
 			if err := r.guestClient.Create(ctx, crd); err != nil {
 				if !apierrors.IsAlreadyExists(err) {
@@ -221,6 +239,7 @@ func (r *EC2NodeClassReconciler) reconcileCRDs(ctx context.Context, onlyCreate b
 			}
 		} else {
 			op, err = r.CreateOrUpdate(ctx, r.guestClient, crd, func() error {
+				crd.Spec = desired.Spec
 				return nil
 			})
 			if err != nil {
@@ -266,14 +285,17 @@ func reconcileEC2NodeClass(ctx context.Context, ec2NodeClass *awskarpenterv1.EC2
 	}
 
 	ec2NodeClass.Spec = awskarpenterv1.EC2NodeClassSpec{
-		UserData:                 ptr.To(string(userDataSecret.Data["value"])),
-		AMIFamily:                ptr.To("Custom"),
-		AMISelectorTerms:         amiSelectorTerms,
-		AssociatePublicIPAddress: openshiftEC2NodeClass.Spec.AssociatePublicIPAddress,
-		Tags:                     mergeEC2NodeClassTags(ctx, openshiftEC2NodeClass, hcp),
-		DetailedMonitoring:       openshiftEC2NodeClass.Spec.DetailedMonitoring,
-		BlockDeviceMappings:      openshiftEC2NodeClass.Spec.KarpenterBlockDeviceMapping(),
-		InstanceStorePolicy:      openshiftEC2NodeClass.Spec.KarpenterInstanceStorePolicy(),
+		UserData:                         ptr.To(string(userDataSecret.Data["value"])),
+		AMIFamily:                        ptr.To("Custom"),
+		AMISelectorTerms:                 amiSelectorTerms,
+		AssociatePublicIPAddress:         karpenterAssociatePublicIPAddressFromNodeClassSpec(openshiftEC2NodeClass.Spec),
+		Tags:                             mergeEC2NodeClassTags(ctx, openshiftEC2NodeClass, hcp),
+		DetailedMonitoring:               karpenterDetailedMonitoringFromNodeClassSpec(openshiftEC2NodeClass.Spec),
+		BlockDeviceMappings:              karpenterBlockDeviceMappingFromNodeClassSpec(openshiftEC2NodeClass.Spec),
+		InstanceStorePolicy:              karpenterInstanceStorePolicyFromNodeClassSpec(openshiftEC2NodeClass.Spec),
+		MetadataOptions:                  karpenterMetadataOptionsFromNodeClassSpec(openshiftEC2NodeClass.Spec),
+		CapacityReservationSelectorTerms: karpenterCapacityReservationSelectorTermsFromNodeClassSpec(openshiftEC2NodeClass.Spec),
+		Kubelet:                          karpenterKubeletConfigurationFromNodeClassSpec(openshiftEC2NodeClass.Spec),
 	}
 
 	// Set instance profile from HostedCluster annotation (platform-controlled)
@@ -338,7 +360,7 @@ func reconcileEC2NodeClass(ctx context.Context, ec2NodeClass *awskarpenterv1.EC2
 	return nil
 }
 
-func (r *EC2NodeClassReconciler) reconcileStatus(ctx context.Context, ec2NodeClass *awskarpenterv1.EC2NodeClass, openshiftNodeClass *hyperkarpenterv1.OpenshiftEC2NodeClass) error {
+func (r *EC2NodeClassReconciler) reconcileStatus(ctx context.Context, ec2NodeClass *awskarpenterv1.EC2NodeClass, openshiftNodeClass *hyperkarpenterv1.OpenshiftEC2NodeClass, hcp *hyperv1.HostedControlPlane) error {
 	log := ctrl.LoggerFrom(ctx)
 
 	originalObj := openshiftNodeClass.DeepCopy()
@@ -364,6 +386,27 @@ func (r *EC2NodeClassReconciler) reconcileStatus(ctx context.Context, ec2NodeCla
 	}
 	openshiftNodeClass.Status.Subnets = subnets
 
+	// Sync CapacityReservations from upstream EC2NodeClass.
+	// Upstream karpenter uses lowercase enum values (open, targeted, default, capacity-block,
+	// active, expiring) while our API uses PascalCase (Open, Targeted, Default, CapacityBlock,
+	// Active, Expiring), so we convert here.
+	openshiftNodeClass.Status.CapacityReservations = nil
+	for _, cr := range ec2NodeClass.Status.CapacityReservations {
+		resolved := hyperkarpenterv1.CapacityReservation{
+			AvailabilityZone:      cr.AvailabilityZone,
+			ID:                    cr.ID,
+			InstanceMatchCriteria: upstreamInstanceMatchCriteria(cr.InstanceMatchCriteria),
+			InstanceType:          cr.InstanceType,
+			OwnerID:               cr.OwnerID,
+			ReservationType:       upstreamReservationType(cr.ReservationType),
+			State:                 upstreamReservationState(cr.State),
+		}
+		if cr.EndTime != nil {
+			resolved.EndTime = *cr.EndTime
+		}
+		openshiftNodeClass.Status.CapacityReservations = append(openshiftNodeClass.Status.CapacityReservations, resolved)
+	}
+
 	// Sync conditions from the upstream EC2NodeClass. Use SetStatusCondition so that
 	// conditions managed by the ignition controller are preserved.
 	for _, condition := range ec2NodeClass.Status.Conditions {
@@ -375,9 +418,11 @@ func (r *EC2NodeClassReconciler) reconcileStatus(ctx context.Context, ec2NodeCla
 	// Ready semantic rather than having multiple controllers race to set it.
 	r.computeReadyCondition(openshiftNodeClass)
 
+	setAWSResourceTagConflictCondition(openshiftNodeClass, hcp)
+
 	if !reflect.DeepEqual(originalObj.Status, openshiftNodeClass.Status) {
 		if err := r.guestClient.Status().Patch(ctx, openshiftNodeClass, client.MergeFrom(originalObj)); err != nil {
-			return fmt.Errorf("failed to update status: %v", err)
+			return fmt.Errorf("failed to update status: %w", err)
 		}
 	}
 
@@ -406,6 +451,84 @@ func (r *EC2NodeClassReconciler) computeReadyCondition(openshiftNodeClass *hyper
 			Message:            message,
 		})
 	}
+}
+
+func (r *EC2NodeClassReconciler) reconcileKarpenterSubnetsConfigMap(ctx context.Context, hcp *hyperv1.HostedControlPlane) error {
+	log := ctrl.LoggerFrom(ctx)
+
+	// List all OpenshiftEC2NodeClass resources in guest cluster
+	openshiftEC2NodeClassList := &hyperkarpenterv1.OpenshiftEC2NodeClassList{}
+	if err := r.guestClient.List(ctx, openshiftEC2NodeClassList); err != nil {
+		return fmt.Errorf("failed to list OpenshiftEC2NodeClass: %w", err)
+	}
+
+	subnetIDSet := sets.NewString()
+	for _, nodeClass := range openshiftEC2NodeClassList.Items {
+		// Skip NodeClasses that are being deleted — their subnets should no
+		// longer be propagated to VPC endpoints.
+		if !nodeClass.DeletionTimestamp.IsZero() {
+			continue
+		}
+		for _, subnet := range nodeClass.Status.Subnets {
+			if subnet.ID != "" {
+				subnetIDSet.Insert(subnet.ID)
+			}
+		}
+	}
+
+	subnetIDs := subnetIDSet.List() // Sorted list
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      karpenterutil.KarpenterSubnetsConfigMapName,
+			Namespace: r.Namespace,
+		},
+	}
+
+	// If there are no OpenshiftEC2NodeClass resources with resolved subnets,
+	// delete the ConfigMap (no NodeClasses exist, or none have subnets in status yet).
+	// The ConfigMap is also cleaned up automatically via owner reference when HCP is deleted.
+	if subnetIDSet.Len() == 0 {
+		if _, err := k8sutil.DeleteIfNeeded(ctx, r.managementClient, configMap); err != nil {
+			return fmt.Errorf("failed to delete karpenter subnets configmap: %w", err)
+		}
+		log.Info("Deleted karpenter subnets configmap (no OpenshiftEC2NodeClass resources with resolved subnets)")
+		return nil
+	}
+
+	// Create or update ConfigMap in management cluster
+
+	_, err := r.CreateOrUpdate(ctx, r.managementClient, configMap, func() error {
+		// Set owner reference to HostedControlPlane for automatic cleanup
+		ownerRef := config.OwnerRefFrom(hcp)
+		ownerRef.ApplyTo(configMap)
+
+		if configMap.Labels == nil {
+			configMap.Labels = make(map[string]string)
+		}
+		configMap.Labels["hypershift.openshift.io/managed-by"] = "karpenter"
+		configMap.Labels["hypershift.openshift.io/infra-id"] = hcp.Spec.InfraID
+
+		if configMap.Data == nil {
+			configMap.Data = make(map[string]string)
+		}
+
+		// Store as JSON array
+		subnetIDsJSON, err := json.Marshal(subnetIDs)
+		if err != nil {
+			return fmt.Errorf("failed to marshal subnet IDs: %w", err)
+		}
+		configMap.Data["subnetIDs"] = string(subnetIDsJSON)
+
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to reconcile karpenter subnets configmap: %w", err)
+	}
+
+	log.Info("Reconciled karpenter subnets configmap", "subnetCount", len(subnetIDs))
+	return nil
 }
 
 func (r *EC2NodeClassReconciler) reconcileVAP(ctx context.Context) error {
@@ -557,6 +680,20 @@ func (r *EC2NodeClassReconciler) hcpAnnotationPredicate() predicate.Predicate {
 	}
 }
 
+func (r *EC2NodeClassReconciler) mapVAPToOpenShiftEC2NodeClasses(ctx context.Context, o client.Object) []ctrl.Request {
+	if o.GetName() != "karpenter.ec2nodeclass.hypershift.io" {
+		return nil
+	}
+	return r.mapToOpenShiftEC2NodeClasses(ctx, o)
+}
+
+func (r *EC2NodeClassReconciler) mapVAPBindingToOpenShiftEC2NodeClasses(ctx context.Context, o client.Object) []ctrl.Request {
+	if o.GetName() != "karpenter-binding.ec2nodeclass.hypershift.io" {
+		return nil
+	}
+	return r.mapToOpenShiftEC2NodeClasses(ctx, o)
+}
+
 // mapToOpenShiftEC2NodeClasses maps a request to all OpenshiftEC2NodeClass resources
 func (r *EC2NodeClassReconciler) mapToOpenShiftEC2NodeClasses(ctx context.Context, obj client.Object) []reconcile.Request {
 	openshiftEC2NodeClassList := &hyperkarpenterv1.OpenshiftEC2NodeClassList{}
@@ -579,7 +716,8 @@ func (r *EC2NodeClassReconciler) mapToOpenShiftEC2NodeClasses(ctx context.Contex
 }
 
 // mergeEC2NodeClassTags merges platform tags from HostedControlPlane with OpenshiftEC2NodeClass tags.
-// Platform tags take precedence over nodeclass tags in case of conflicts.
+// By default, platform tags take precedence over nodeclass tags.
+// Platform tags with overridePolicy "Allow" permit nodeclass tags to override them.
 // Tags matching Karpenter's restricted patterns are filtered out to prevent validation errors.
 // Karpenter restricts the patterns because it manages those tags itself, so the result is not "the karpenter-managed tags won't be present",
 // the result is "the tags will still be present and managed by Karpenter"
@@ -587,23 +725,30 @@ func mergeEC2NodeClassTags(ctx context.Context, openshiftEC2NodeClass *hyperkarp
 	log := ctrl.LoggerFrom(ctx)
 	tags := make(map[string]string)
 
-	// First add nodeclass tags
-	for k, v := range openshiftEC2NodeClass.Spec.Tags {
-		tags[k] = v
-	}
-
-	// Then add platform tags (these will override any conflicts)
+	allowOverride := make(map[string]bool)
+	// First add platform tags and track which allow override
 	if hcp.Spec.Platform.AWS != nil {
 		for _, tag := range hcp.Spec.Platform.AWS.ResourceTags {
 			tags[tag.Key] = tag.Value
+			if tag.OverridePolicy == hyperv1.AWSResourceTagOverridePolicyAllow {
+				allowOverride[tag.Key] = true
+			}
 		}
+	}
+
+	// Then add nodeclass tags, only overriding platform tags that explicitly allow it
+	for k, v := range openshiftEC2NodeClass.Spec.Tags {
+		if _, isHCTag := tags[k]; isHCTag && !allowOverride[k] {
+			continue
+		}
+		tags[k] = v
 	}
 
 	// Filter out restricted tags that Karpenter manages automatically
 	filteredTags, removedTags := filterRestrictedTags(tags)
 
 	if len(removedTags) > 0 {
-		log.V(4).Info("Filtered restricted Karpenter tags", "removedTags", removedTags)
+		log.V(4).Info("Filtered restricted Karpenter tags", "removedCount", len(removedTags))
 	}
 
 	// If we were nil coming in, we should be nil going out, test case comparisons care, {} is
@@ -613,6 +758,61 @@ func mergeEC2NodeClassTags(ctx context.Context, openshiftEC2NodeClass *hyperkarp
 	}
 
 	return filteredTags
+}
+
+func setAWSResourceTagConflictCondition(openshiftNodeClass *hyperkarpenterv1.OpenshiftEC2NodeClass, hcp *hyperv1.HostedControlPlane) {
+	if hcp.Spec.Platform.AWS == nil || len(hcp.Spec.Platform.AWS.ResourceTags) == 0 || len(openshiftNodeClass.Spec.Tags) == 0 {
+		meta.RemoveStatusCondition(&openshiftNodeClass.Status.Conditions, hyperv1.NodePoolAWSResourceTagConflictConditionType)
+		return
+	}
+
+	var blocked, overridden int
+	for k, ncVal := range openshiftNodeClass.Spec.Tags {
+		var found bool
+		var hcTag hyperv1.AWSClusterResourceTag
+		for _, t := range hcp.Spec.Platform.AWS.ResourceTags {
+			if t.Key == k {
+				found = true
+				hcTag = t
+				break
+			}
+		}
+		if !found || hcTag.Value == ncVal {
+			continue
+		}
+		if hcTag.OverridePolicy == hyperv1.AWSResourceTagOverridePolicyAllow {
+			overridden++
+		} else {
+			blocked++
+		}
+	}
+
+	if blocked == 0 {
+		msg := "No AWS resource tag conflicts detected"
+		if overridden > 0 {
+			msg = fmt.Sprintf("%d AWS resource tag override(s) applied; nodeclass values used (allowed by HostedCluster)", overridden)
+		}
+		meta.SetStatusCondition(&openshiftNodeClass.Status.Conditions, metav1.Condition{
+			Type:               hyperv1.NodePoolAWSResourceTagConflictConditionType,
+			Status:             metav1.ConditionFalse,
+			Reason:             hyperv1.AWSResourceTagNoConflictReason,
+			Message:            msg,
+			ObservedGeneration: openshiftNodeClass.Generation,
+		})
+		return
+	}
+
+	msg := fmt.Sprintf("%d AWS resource tag conflict(s) detected; HostedCluster values preserved (override not allowed)", blocked)
+	if overridden > 0 {
+		msg += fmt.Sprintf("; %d override(s) applied (allowed by HostedCluster)", overridden)
+	}
+	meta.SetStatusCondition(&openshiftNodeClass.Status.Conditions, metav1.Condition{
+		Type:               hyperv1.NodePoolAWSResourceTagConflictConditionType,
+		Status:             metav1.ConditionTrue,
+		Reason:             hyperv1.AWSResourceTagConflictDetectedReason,
+		Message:            msg,
+		ObservedGeneration: openshiftNodeClass.Generation,
+	})
 }
 
 // filterRestrictedTags removes tags that match Karpenter's restricted tag patterns.
@@ -641,4 +841,32 @@ func filterRestrictedTags(tags map[string]string) (map[string]string, []string) 
 	}
 
 	return filteredTags, removedTags
+}
+
+// upstreamInstanceMatchCriteria converts upstream karpenter's lowercase instanceMatchCriteria
+// values (open, targeted) to our PascalCase API values (Open, Targeted).
+func upstreamInstanceMatchCriteria(value string) hyperkarpenterv1.InstanceMatchCriteria {
+	return hyperkarpenterv1.InstanceMatchCriteria(strings.ToUpper(value[:1]) + value[1:])
+}
+
+// upstreamReservationType converts upstream karpenter's CapacityReservationType
+// values (default, capacity-block) to our PascalCase API values (Default, CapacityBlock).
+func upstreamReservationType(value awskarpenterv1.CapacityReservationType) hyperkarpenterv1.CapacityReservationType {
+	switch value {
+	case awskarpenterv1.CapacityReservationTypeCapacityBlock:
+		return hyperkarpenterv1.CapacityReservationTypeCapacityBlock
+	default:
+		return hyperkarpenterv1.CapacityReservationTypeDefault
+	}
+}
+
+// upstreamReservationState converts upstream karpenter's CapacityReservationState
+// values (active, expiring) to our PascalCase API values (Active, Expiring).
+func upstreamReservationState(value awskarpenterv1.CapacityReservationState) hyperkarpenterv1.CapacityReservationState {
+	switch value {
+	case awskarpenterv1.CapacityReservationStateExpiring:
+		return hyperkarpenterv1.CapacityReservationStateExpiring
+	default:
+		return hyperkarpenterv1.CapacityReservationStateActive
+	}
 }

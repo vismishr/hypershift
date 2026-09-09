@@ -10,17 +10,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/google/uuid"
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests"
-	"github.com/openshift/hypershift/support/util"
+	supportawsutil "github.com/openshift/hypershift/support/awsutil"
+	"github.com/openshift/hypershift/support/podspec"
 	e2eutil "github.com/openshift/hypershift/test/e2e/util"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	capiv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	"k8s.io/apimachinery/pkg/util/wait"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -33,9 +36,6 @@ const (
 
 	// awsNodeTerminationHandlerDeploymentName is the name of the termination handler deployment.
 	awsNodeTerminationHandlerDeploymentName = "aws-node-termination-handler"
-
-	// testSQSQueueName is the SQS queue name used for testing.
-	testSQSQueueName = "agarcial-nth-queue"
 
 	// rebalanceRecommendationTaintKey is the taint key applied by the AWS Node Termination Handler
 	// when it receives an EC2 rebalance recommendation event.
@@ -145,16 +145,30 @@ func (s *SpotTerminationHandlerTest) Run(t *testing.T, nodePool hyperv1.NodePool
 			}
 		}()
 
-		// Step 1: Discover SQS queue URL and add it to the HostedCluster spec
-		sqsClient := e2eutil.GetSQSClient(s.clusterOpts.AWSPlatform.Credentials.AWSCredentialsFile, s.clusterOpts.AWSPlatform.Region)
-		queueURLResult, err := sqsClient.GetQueueUrl(&sqs.GetQueueUrlInput{
-			QueueName: aws.String(testSQSQueueName),
+		// Step 1: Create an SQS queue for testing and add it to the HostedCluster spec
+		sqsClient := e2eutil.GetSQSClient(s.ctx, s.clusterOpts.AWSPlatform.Credentials.AWSCredentialsFile, s.clusterOpts.AWSPlatform.Region)
+		sqsQueueName := s.hostedCluster.Name + "-nth-queue"
+		t.Logf("Creating SQS queue %s", sqsQueueName)
+		sqsTags := e2eutil.E2ETagsFromEnvironment()
+		sqsTags[supportawsutil.HypershiftInfraIDTagKey] = s.hostedCluster.Spec.InfraID
+		sqsTags[supportawsutil.HypershiftClusterNameTagKey] = s.hostedCluster.Name
+		createQueueResult, err := sqsClient.CreateQueue(s.ctx, &sqs.CreateQueueInput{
+			QueueName: aws.String(sqsQueueName),
+			Tags:      sqsTags,
 		})
 		if err != nil {
-			t.Fatalf("failed to get SQS queue URL for queue %s: %v", testSQSQueueName, err)
+			t.Fatalf("failed to create SQS queue %s: %v", sqsQueueName, err)
 		}
-		sqsQueueURL := aws.StringValue(queueURLResult.QueueUrl)
-		t.Logf("Discovered SQS queue URL: %s", sqsQueueURL)
+		sqsQueueURL := aws.ToString(createQueueResult.QueueUrl)
+		t.Logf("Created SQS queue: %s", sqsQueueURL)
+		defer func() {
+			t.Logf("Cleaning up: deleting SQS queue %s", sqsQueueName)
+			if _, err := sqsClient.DeleteQueue(s.ctx, &sqs.DeleteQueueInput{
+				QueueUrl: aws.String(sqsQueueURL),
+			}); err != nil {
+				t.Logf("warning: failed to delete SQS queue: %v", err)
+			}
+		}()
 
 		t.Logf("Adding SQS queue URL to HostedCluster spec %s/%s", s.hostedCluster.Namespace, s.hostedCluster.Name)
 		err = e2eutil.UpdateObject(t, s.ctx, s.mgmtClient, s.hostedCluster, func(obj *hyperv1.HostedCluster) {
@@ -185,7 +199,7 @@ func (s *SpotTerminationHandlerTest) Run(t *testing.T, nodePool hyperv1.NodePool
 					if obj.Spec.Replicas == nil || *obj.Spec.Replicas == 0 {
 						return false, "Deployment has 0 replicas", nil
 					}
-					if ready := util.IsDeploymentReady(s.ctx, obj); !ready {
+					if ready := podspec.IsDeploymentReady(s.ctx, obj); !ready {
 						return false, "Deployment is not ready", nil
 					}
 					return true, "Deployment is ready", nil
@@ -255,7 +269,7 @@ func (s *SpotTerminationHandlerTest) Run(t *testing.T, nodePool hyperv1.NodePool
 			t.Fatalf("failed to marshal rebalance event: %v", err)
 		}
 
-		_, err = sqsClient.SendMessage(&sqs.SendMessageInput{
+		_, err = sqsClient.SendMessage(s.ctx, &sqs.SendMessageInput{
 			QueueUrl:    aws.String(sqsQueueURL),
 			MessageBody: aws.String(string(eventJSON)),
 		})
@@ -264,27 +278,35 @@ func (s *SpotTerminationHandlerTest) Run(t *testing.T, nodePool hyperv1.NodePool
 		}
 		t.Logf("Successfully sent EC2 Rebalance Recommendation event to SQS queue")
 
-		// Step 6: Wait for the node to have the rebalance recommendation taint
-		t.Logf("Waiting for node %s to have taint prefix %s", spotNode.Name, rebalanceRecommendationTaintKey)
-		e2eutil.EventuallyObject(t, s.ctx, fmt.Sprintf("Waiting for node %s to have rebalance recommendation taint", spotNode.Name),
-			func(ctx context.Context) (*corev1.Node, error) {
-				node := &corev1.Node{}
-				err := s.hostedClusterClient.Get(ctx, crclient.ObjectKey{Name: spotNode.Name}, node)
-				return node, err
-			},
-			[]e2eutil.Predicate[*corev1.Node]{
-				func(node *corev1.Node) (bool, string, error) {
-					for _, taint := range node.Spec.Taints {
-						if strings.HasPrefix(taint.Key, rebalanceRecommendationTaintKey) {
-							return true, fmt.Sprintf("Node has taint %s with effect %s", taint.Key, taint.Effect), nil
-						}
-					}
-					return false, "Node does not have aws-node-termination-handler taint", nil
-				},
-			},
-			e2eutil.WithInterval(5*time.Second), e2eutil.WithTimeout(15*time.Minute),
-		)
-		t.Logf("Node %s has the rebalance recommendation taint", spotNode.Name)
+		// Step 6: Wait for the termination handler pipeline to act on the node.
+		// Success is taint-applied or node-deleted; enable-spot has no real spot market, so a missing node unambiguously means the pipeline completed.
+		// We use a plain poll rather than EventuallyObject because the latter treats not-found as a transient error to retry,
+		// which is precisely the terminal state we want to accept.
+		t.Logf("Waiting for node %s to be tainted or remediated (taint key %s)", spotNode.Name, rebalanceRecommendationTaintKey)
+		err = wait.PollUntilContextTimeout(s.ctx, 5*time.Second, 15*time.Minute, true, func(ctx context.Context) (bool, error) {
+			node := &corev1.Node{}
+			getErr := s.hostedClusterClient.Get(ctx, crclient.ObjectKey{Name: spotNode.Name}, node)
+			if apierrors.IsNotFound(getErr) {
+				// The node was deleted after being tainted; the remediation pipeline completed.
+				t.Logf("Node %s no longer exists; termination handler pipeline remediated it (taint applied then Machine deleted)", spotNode.Name)
+				return true, nil
+			}
+			if getErr != nil {
+				// Transient error talking to the guest API server; keep polling.
+				t.Logf("Transient error getting node %s, retrying: %v", spotNode.Name, getErr)
+				return false, nil //nolint:nilerr
+			}
+			for _, taint := range node.Spec.Taints {
+				if taint.Key == rebalanceRecommendationTaintKey {
+					t.Logf("Node %s has rebalance recommendation taint %s with effect %s", spotNode.Name, taint.Key, taint.Effect)
+					return true, nil
+				}
+			}
+			return false, nil
+		})
+		if err != nil {
+			t.Fatalf("timed out waiting for node %s to be tainted or remediated by the termination handler: %v", spotNode.Name, err)
+		}
 
 		// Step 7: Clean up - remove the SQS queue URL from spec
 		t.Logf("Cleaning up: removing SQS queue URL from HostedCluster spec")

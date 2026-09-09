@@ -2,7 +2,7 @@ package conditions
 
 import (
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
-	support "github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/netutil"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -11,24 +11,25 @@ import (
 
 func ExpectedHCConditions(hostedCluster *hyperv1.HostedCluster) map[hyperv1.ConditionType]metav1.ConditionStatus {
 	conditions := map[hyperv1.ConditionType]metav1.ConditionStatus{
-		hyperv1.HostedClusterAvailable:               metav1.ConditionTrue,
-		hyperv1.InfrastructureReady:                  metav1.ConditionTrue,
-		hyperv1.KubeAPIServerAvailable:               metav1.ConditionTrue,
-		hyperv1.IgnitionEndpointAvailable:            metav1.ConditionTrue,
-		hyperv1.EtcdAvailable:                        metav1.ConditionTrue,
-		hyperv1.ValidReleaseInfo:                     metav1.ConditionTrue,
-		hyperv1.ValidHostedClusterConfiguration:      metav1.ConditionTrue,
-		hyperv1.SupportedHostedCluster:               metav1.ConditionTrue,
-		hyperv1.ClusterVersionSucceeding:             metav1.ConditionTrue,
-		hyperv1.ClusterVersionAvailable:              metav1.ConditionTrue,
-		hyperv1.ClusterVersionReleaseAccepted:        metav1.ConditionTrue,
-		hyperv1.ReconciliationActive:                 metav1.ConditionTrue,
-		hyperv1.ReconciliationSucceeded:              metav1.ConditionTrue,
-		hyperv1.ValidHostedControlPlaneConfiguration: metav1.ConditionTrue,
-		hyperv1.ValidReleaseImage:                    metav1.ConditionTrue,
-		hyperv1.PlatformCredentialsFound:             metav1.ConditionTrue,
-		hyperv1.DataPlaneConnectionAvailable:         metav1.ConditionTrue,
-		hyperv1.ControlPlaneConnectionAvailable:      metav1.ConditionTrue,
+		hyperv1.HostedClusterAvailable:                metav1.ConditionTrue,
+		hyperv1.InfrastructureReady:                   metav1.ConditionTrue,
+		hyperv1.KubeAPIServerAvailable:                metav1.ConditionTrue,
+		hyperv1.IgnitionEndpointAvailable:             metav1.ConditionTrue,
+		hyperv1.EtcdAvailable:                         metav1.ConditionTrue,
+		hyperv1.ValidReleaseInfo:                      metav1.ConditionTrue,
+		hyperv1.ValidHostedClusterConfiguration:       metav1.ConditionTrue,
+		hyperv1.SupportedHostedCluster:                metav1.ConditionTrue,
+		hyperv1.ClusterVersionSucceeding:              metav1.ConditionTrue,
+		hyperv1.ClusterVersionAvailable:               metav1.ConditionTrue,
+		hyperv1.ClusterVersionReleaseAccepted:         metav1.ConditionTrue,
+		hyperv1.ReconciliationActive:                  metav1.ConditionTrue,
+		hyperv1.ReconciliationSucceeded:               metav1.ConditionTrue,
+		hyperv1.ConfigOperatorReconciliationSucceeded: metav1.ConditionTrue,
+		hyperv1.ValidHostedControlPlaneConfiguration:  metav1.ConditionTrue,
+		hyperv1.ValidReleaseImage:                     metav1.ConditionTrue,
+		hyperv1.PlatformCredentialsFound:              metav1.ConditionTrue,
+		hyperv1.DataPlaneConnectionAvailable:          metav1.ConditionTrue,
+		hyperv1.ControlPlaneConnectionAvailable:       metav1.ConditionTrue,
 
 		hyperv1.HostedClusterProgressing:  metav1.ConditionFalse,
 		hyperv1.HostedClusterDegraded:     metav1.ConditionFalse,
@@ -58,6 +59,10 @@ func ExpectedHCConditions(hostedCluster *hyperv1.HostedCluster) map[hyperv1.Cond
 		if hostedCluster.Spec.SecretEncryption == nil || hostedCluster.Spec.SecretEncryption.KMS == nil || hostedCluster.Spec.SecretEncryption.KMS.Azure == nil {
 			// Azure KMS is not configured
 			conditions[hyperv1.ValidAzureKMSConfig] = metav1.ConditionUnknown
+		} else if netutil.IsAroHCPByHC(hostedCluster) && hostedCluster.Spec.SecretEncryption.KMS.Azure.KeyVaultAccess == hyperv1.AzureKeyVaultPrivate {
+			// CPO cannot validate a private Key Vault from the management cluster;
+			// access is verified at runtime through the private router.
+			conditions[hyperv1.ValidAzureKMSConfig] = metav1.ConditionUnknown
 		} else {
 			conditions[hyperv1.ValidAzureKMSConfig] = metav1.ConditionTrue
 		}
@@ -67,6 +72,11 @@ func ExpectedHCConditions(hostedCluster *hyperv1.HostedCluster) map[hyperv1.Cond
 
 		// GCP credentials validation - indicates WIF readiness
 		conditions[hyperv1.ValidGCPCredentials] = metav1.ConditionTrue
+
+		// GCP Private Service Connect conditions - both GCP endpoint access modes
+		// (Private and PublicAndPrivate) use PSC, so no EndpointAccess gate is needed.
+		conditions[hyperv1.GCPEndpointAvailable] = metav1.ConditionTrue
+		conditions[hyperv1.GCPServiceAttachmentAvailable] = metav1.ConditionTrue
 
 		// GCP KMS validation - future support for GCP KMS secret encryption
 		// Following the same pattern as AWS and Azure
@@ -88,13 +98,16 @@ func ExpectedHCConditions(hostedCluster *hyperv1.HostedCluster) map[hyperv1.Cond
 			// thus the PVC is RWO and VMs are expected to be non-live-migratable
 			conditions[hyperv1.KubeVirtNodesLiveMigratable] = metav1.ConditionFalse
 		}
+		if hostedCluster.Spec.Platform.Kubevirt != nil && hostedCluster.Spec.Platform.Kubevirt.Credentials != nil {
+			conditions[hyperv1.ValidKubeVirtInfraNetworkPolicyRBAC] = metav1.ConditionTrue
+		}
 	}
 
 	if hostedCluster.Spec.Etcd.ManagementType == hyperv1.Unmanaged {
 		conditions[hyperv1.UnmanagedEtcdAvailable] = metav1.ConditionTrue
 	}
 
-	kasExternalHostname := support.ServiceExternalDNSHostnameByHC(hostedCluster, hyperv1.APIServer)
+	kasExternalHostname := netutil.ServiceExternalDNSHostnameByHC(hostedCluster, hyperv1.APIServer)
 	if kasExternalHostname == "" {
 		// ExternalDNS is not configured
 		conditions[hyperv1.ExternalDNSReachable] = metav1.ConditionUnknown

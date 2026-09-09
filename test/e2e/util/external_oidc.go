@@ -2,10 +2,7 @@ package util
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/gob"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,8 +10,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,12 +23,9 @@ import (
 	configv1 "github.com/openshift/api/config/v1"
 	configv1typedclient "github.com/openshift/client-go/config/clientset/versioned/typed/config/v1"
 
-	kauthnv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kauthnv1typedclient "k8s.io/client-go/kubernetes/typed/authentication/v1"
 	"k8s.io/client-go/rest"
-	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -67,6 +61,10 @@ type ExtOIDCConfig struct {
 	// for oidcProviders.issuer.issuerCertificateAuthority
 	IssuerCAConfigmapName string
 	IssuerCABundleFile    string
+
+	// CustomizeAuthSpec allows tests to modify the baseline auth configuration
+	// The function receives the generated baseline spec and can modify it in place
+	CustomizeAuthSpec func(*configv1.AuthenticationSpec)
 }
 
 func GetExtOIDCConfig(provider, cliClientID, consoleClientID, issuerURL, consoleSecret, issuerCABundleFile, testUsers string) *ExtOIDCConfig {
@@ -103,6 +101,12 @@ func (config *ExtOIDCConfig) GetAuthenticationConfig() *configv1.AuthenticationS
 					},
 				},
 				OIDCClients: []configv1.OIDCClientConfig{
+					{
+						ClientID:           config.CliClientID,
+						ComponentName:      "cli",
+						ComponentNamespace: "openshift-console",
+						ExtraScopes:        []string{"email"},
+					},
 					{
 						ClientID: config.ConsoleClientID,
 						ClientSecret: configv1.SecretNameReference{
@@ -149,11 +153,16 @@ func (config *ExtOIDCConfig) GetAuthenticationConfig() *configv1.AuthenticationS
 		)
 	}
 
+	// Apply custom modifications if provided
+	if config.CustomizeAuthSpec != nil {
+		config.CustomizeAuthSpec(authnSpec)
+	}
+
 	return authnSpec
 }
 
 // ValidateAuthenticationSpec validates the external OIDC configuration and the expected HostedCluster authentication configuration before running the test
-func ValidateAuthenticationSpec(t *testing.T, ctx context.Context, client crclient.Client, hostedCluster *hyperv1.HostedCluster, config *ExtOIDCConfig) {
+func ValidateAuthenticationSpec(t testing.TB, ctx context.Context, client crclient.Client, hostedCluster *hyperv1.HostedCluster, config *ExtOIDCConfig) {
 	g := NewWithT(t)
 
 	// check auth config
@@ -200,7 +209,7 @@ func ValidateAuthenticationSpec(t *testing.T, ctx context.Context, client crclie
 }
 
 // IsExternalOIDCCluster checks if the cluster is using external OIDC.
-func IsExternalOIDCCluster(t *testing.T, ctx context.Context, clientCfg *rest.Config) (bool, error) {
+func IsExternalOIDCCluster(t testing.TB, ctx context.Context, clientCfg *rest.Config) (bool, error) {
 	configv1Client, err := configv1typedclient.NewForConfig(clientCfg)
 	if err != nil {
 		return false, err
@@ -213,17 +222,8 @@ func IsExternalOIDCCluster(t *testing.T, ctx context.Context, clientCfg *rest.Co
 	return authConfig.Spec.Type == configv1.AuthenticationTypeOIDC, nil
 }
 
-// ChangeClientForKeycloakExtOIDC changes the guest client using a keycloak user config
-func ChangeClientForKeycloakExtOIDC(t *testing.T, ctx context.Context, clientCfg *rest.Config, authConfig *ExtOIDCConfig) crclient.Client {
-	g := NewWithT(t)
-	newConfig := ChangeUserForKeycloakExtOIDC(t, ctx, clientCfg, authConfig)
-	client, err := crclient.New(newConfig, crclient.Options{Scheme: scheme})
-	g.Expect(err).NotTo(HaveOccurred(), "could not create guest client using the new config")
-	return client
-}
-
 // ChangeUserForKeycloakExtOIDC changes the user of current CLI session for a Keycloak external OIDC cluster
-func ChangeUserForKeycloakExtOIDC(t *testing.T, ctx context.Context, clientCfg *rest.Config, authConfig *ExtOIDCConfig) *rest.Config {
+func ChangeUserForKeycloakExtOIDC(t testing.TB, ctx context.Context, clientCfg *rest.Config, authConfig *ExtOIDCConfig) *rest.Config {
 	g := NewWithT(t)
 	g.Expect(authConfig).NotTo(BeNil())
 	g.Expect(authConfig.ExternalOIDCProvider).Should(Equal(ProviderKeycloak))
@@ -264,7 +264,10 @@ func ChangeUserForKeycloakExtOIDC(t *testing.T, ctx context.Context, clientCfg *
 		"username":   []string{username},
 	}
 
-	response, err := httpClient.PostForm(requestURL, formData)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, strings.NewReader(formData.Encode()))
+	g.Expect(err).NotTo(HaveOccurred())
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response, err := httpClient.Do(req)
 	g.Expect(err).NotTo(HaveOccurred())
 	defer response.Body.Close()
 	g.Expect(response.StatusCode).To(Equal(http.StatusOK))
@@ -272,78 +275,14 @@ func ChangeUserForKeycloakExtOIDC(t *testing.T, ctx context.Context, clientCfg *
 	body, err := io.ReadAll(response.Body)
 	g.Expect(err).NotTo(HaveOccurred())
 
-	var respMap map[string]interface{}
+	var respMap map[string]any
 	err = json.Unmarshal(body, &respMap)
 	g.Expect(err).NotTo(HaveOccurred())
 	idToken, ok := respMap["id_token"].(string)
 	g.Expect(ok).To(BeTrue(), "id_token not found or not a string")
-	refreshToken, ok := respMap["refresh_token"].(string)
-	g.Expect(ok).To(BeTrue(), "refresh_token not found or not a string")
 
-	tokenCache := fmt.Sprintf(`{"id_token":"%s","refresh_token":"%s"}`, idToken, refreshToken)
-	// The CI job that uses Keycloak external OIDC already sets Keycloak token lifetime proper to run case.
-	// "type Key" is copied from https://github.com/openshift/oc/blob/master/pkg/cli/gettoken/tokencache/tokencache.go
-	// We must keep the def of "type Key" as exactly same as original oc repo so that EncodeToString generates correct output
-	type Key struct {
-		IssuerURL string
-		ClientID  string
-	}
+	userCfg := rest.AnonymousClientConfig(rest.CopyConfig(clientCfg))
+	userCfg.BearerToken = idToken
 
-	key := Key{IssuerURL: authConfig.IssuerURL, ClientID: oidcClientID}
-	s := sha256.New()
-	e := gob.NewEncoder(s)
-	err = e.Encode(&key)
-	g.Expect(err).NotTo(HaveOccurred())
-
-	tokenCacheFile := hex.EncodeToString(s.Sum(nil))
-	rootDir := os.Getenv("SHARED_DIR")
-	tokenCacheDir, err := os.MkdirTemp(rootDir, username)
-	t.Cleanup(func() {
-		_ = os.RemoveAll(tokenCacheDir)
-	})
-	g.Expect(err).NotTo(HaveOccurred())
-	err = os.Mkdir(tokenCacheDir+"/oc", 0700)
-	g.Expect(err).NotTo(HaveOccurred())
-	err = os.WriteFile(filepath.Join(tokenCacheDir, "oc", tokenCacheFile), []byte(tokenCache), 0600)
-	g.Expect(err).NotTo(HaveOccurred())
-
-	clientConfigForExtOIDCUser := GetClientConfigForKeycloakOIDCUser(clientCfg, authConfig, tokenCacheDir)
-	authClient, err := kauthnv1typedclient.NewForConfig(clientConfigForExtOIDCUser)
-	g.Expect(err).NotTo(HaveOccurred())
-
-	selfSubjectReview, err := authClient.SelfSubjectReviews().Create(ctx, &kauthnv1.SelfSubjectReview{}, metav1.CreateOptions{})
-	g.Expect(err).NotTo(HaveOccurred())
-
-	t.Logf("Detected external OIDC cluster using Keycloak as the provider. The user is now %q", selfSubjectReview.Status.UserInfo.Username)
-	return clientConfigForExtOIDCUser
-}
-
-// GetClientConfigForKeycloakOIDCUser gets a client config for an external OIDC cluster
-func GetClientConfigForKeycloakOIDCUser(clientCfg *rest.Config, authConfig *ExtOIDCConfig, tokenCacheDir string) *rest.Config {
-	userClientConfig := rest.AnonymousClientConfig(rest.CopyConfig(clientCfg))
-	args := []string{
-		"get-token",
-		"--issuer-url=" + authConfig.IssuerURL,
-		"--client-id=" + authConfig.CliClientID,
-		"--extra-scopes=email,profile",
-		"--callback-address=127.0.0.1:8080",
-		"--certificate-authority=" + authConfig.IssuerCABundleFile,
-	}
-
-	userClientConfig.ExecProvider = &clientcmdapi.ExecConfig{
-		APIVersion: "client.authentication.k8s.io/v1",
-		Command:    "oc",
-		Args:       args,
-		// We can't use os.Setenv("KUBECACHEDIR", tokenCacheDir), so we use "ExecEnvVar" that ensures each
-		// single user has unique cache path to avoid the parallel running users mess up the same cache path,
-		// because the cache file name is decided by the issuer URL & client ID provided in CLI
-		Env: []clientcmdapi.ExecEnvVar{
-			{Name: "KUBECACHEDIR", Value: tokenCacheDir},
-		},
-		InstallHint:        "Please be sure that oc is defined in $PATH to be executed as credentials exec plugin",
-		InteractiveMode:    clientcmdapi.IfAvailableExecInteractiveMode,
-		ProvideClusterInfo: false,
-	}
-
-	return userClientConfig
+	return userCfg
 }

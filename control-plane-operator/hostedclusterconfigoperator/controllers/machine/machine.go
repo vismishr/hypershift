@@ -18,7 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
-	capiv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -32,7 +32,6 @@ const (
 
 func (r *reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
-	log.Info("Reconciling")
 
 	hcp := &hyperv1.HostedControlPlane{}
 	if err := r.client.Get(ctx, r.hcpKey, hcp); err != nil {
@@ -95,7 +94,7 @@ func (r *reconciler) findKubevirtPassthroughServices(ctx context.Context, hcp *h
 	return kubevirtPassthroughServices, nil
 }
 
-func (r *reconciler) reconcileKubevirtPassthroughService(ctx context.Context, hcp *hyperv1.HostedControlPlane, machineKey types.NamespacedName, cpService *corev1.Service) error {
+func (r *reconciler) reconcileKubevirtPassthroughService(ctx context.Context, _ *hyperv1.HostedControlPlane, machineKey types.NamespacedName, cpService *corev1.Service) error {
 	log := ctrl.LoggerFrom(ctx)
 
 	// If there is a selector endpoints should not be generated
@@ -126,10 +125,24 @@ func (r *reconciler) reconcileKubevirtPassthroughService(ctx context.Context, hc
 			if err != nil {
 				return fmt.Errorf("parsing machine address (%s) in machine %s: %w", machineAddress.Address, machine.Name, err)
 			}
+			if parsedAddr.IsLinkLocalUnicast() {
+				log.Info("Skipping link-local address for EndpointSlice", "address", machineAddress.Address, "machine", machine.Name)
+				continue
+			}
+			// Use only the first address per family. CAPK PR #366 exposes all VMI
+			// interface IPs (for dual-stack CSR approval), including ovn-k8s-mp0
+			// management port IPs that are not routable from the management cluster.
+			// This assumes CAPK reports the pod-network IP first; if CAPK changes
+			// address ordering, this logic must be revisited.
+			// See: OCPBUGS-95615, kubernetes-sigs/cluster-api-provider-kubevirt#366
 			if parsedAddr.Is4() {
-				ipv4MachineAddresses = append(ipv4MachineAddresses, machineAddress.Address)
+				if len(ipv4MachineAddresses) == 0 {
+					ipv4MachineAddresses = append(ipv4MachineAddresses, machineAddress.Address)
+				}
 			} else {
-				ipv6MachineAddresses = append(ipv6MachineAddresses, machineAddress.Address)
+				if len(ipv6MachineAddresses) == 0 {
+					ipv6MachineAddresses = append(ipv6MachineAddresses, machineAddress.Address)
+				}
 			}
 		}
 	}

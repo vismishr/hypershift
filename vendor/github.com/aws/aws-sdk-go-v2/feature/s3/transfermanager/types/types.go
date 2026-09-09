@@ -2,6 +2,7 @@ package types
 
 import (
 	"io"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -143,6 +144,7 @@ const (
 	ChecksumAlgorithmCrc32c                   = "CRC32C"
 	ChecksumAlgorithmSha1                     = "SHA1"
 	ChecksumAlgorithmSha256                   = "SHA256"
+	ChecksumAlgorithmSha512                   = "SHA512"
 )
 
 // ObjectCannedACL defines the canned ACL to apply to the object, see [Canned ACL] in the
@@ -286,6 +288,17 @@ type CompletedPart struct {
 	// [Checking object integrity]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity.html#large-object-checksums
 	ChecksumSHA256 *string
 
+	// The base64-encoded, 512-bit SHA-512 digest of the object. This will only be
+	// present if it was uploaded with the object. When you use an API operation on an
+	// object that was uploaded using multipart uploads, this value may not be a direct
+	// checksum value of the full object. Instead, it's a calculation based on the
+	// checksum values of each individual part. For more information about how
+	// checksums are calculated with multipart uploads, see [Checking object integrity]in the Amazon S3 User
+	// Guide.
+	//
+	// [Checking object integrity]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity.html#large-object-checksums
+	ChecksumSHA512 *string
+
 	// Entity tag returned when the part was uploaded.
 	ETag *string
 
@@ -311,6 +324,7 @@ func (cp CompletedPart) MapCompletedPart() types.CompletedPart {
 		ChecksumCRC32C: cp.ChecksumCRC32C,
 		ChecksumSHA1:   cp.ChecksumSHA1,
 		ChecksumSHA256: cp.ChecksumSHA256,
+		ChecksumSHA512: cp.ChecksumSHA512,
 		ETag:           cp.ETag,
 		PartNumber:     cp.PartNumber,
 	}
@@ -322,6 +336,7 @@ func (cp *CompletedPart) MapFrom(resp *s3.UploadPartOutput, partNum *int32) {
 	cp.ChecksumCRC32C = resp.ChecksumCRC32C
 	cp.ChecksumSHA1 = resp.ChecksumSHA1
 	cp.ChecksumSHA256 = resp.ChecksumSHA256
+	cp.ChecksumSHA512 = resp.ChecksumSHA512
 	cp.ETag = resp.ETag
 	cp.PartNumber = partNum
 }
@@ -344,3 +359,92 @@ const (
 type Metadata struct {
 	values map[interface{}]interface{}
 }
+
+// GetObjectType specifies how transfer manager should perform multipart download
+type GetObjectType string
+
+// Enum values for MultipartDownloadType
+const (
+	GetObjectParts  GetObjectType = "PART"
+	GetObjectRanges               = "RANGE"
+)
+
+// ChecksumMode indicates if the response checksum validation is enabled
+type ChecksumMode string
+
+// Enum values for ChecksumMode
+const (
+	ChecksumModeEnabled ChecksumMode = "ENABLED"
+)
+
+// ReplicationStatus indicates if your request involves a bucket that's either a
+// source or destination in a replication rule
+type ReplicationStatus string
+
+// Enum values for ReplicationStatus
+const (
+	ReplicationStatusComplete  ReplicationStatus = "COMPLETE"
+	ReplicationStatusPending   ReplicationStatus = "PENDING"
+	ReplicationStatusFailed    ReplicationStatus = "FAILED"
+	ReplicationStatusReplica   ReplicationStatus = "REPLICA"
+	ReplicationStatusCompleted ReplicationStatus = "COMPLETED"
+)
+
+// A WriteAtBuffer provides a in memory buffer supporting the io.WriterAt interface
+// Can be used with the s3manager.Downloader to download content to a buffer
+// in memory. Safe to use concurrently.
+type WriteAtBuffer struct {
+	buf []byte
+	m   sync.Mutex
+
+	// GrowthCoeff defines the growth rate of the internal buffer. By
+	// default, the growth rate is 1, where expanding the internal
+	// buffer will allocate only enough capacity to fit the new expected
+	// length.
+	GrowthCoeff float64
+}
+
+// NewWriteAtBuffer creates a WriteAtBuffer with an internal buffer
+// provided by buf.
+func NewWriteAtBuffer(buf []byte) *WriteAtBuffer {
+	return &WriteAtBuffer{buf: buf}
+}
+
+// WriteAt writes a slice of bytes to a buffer starting at the position provided
+// The number of bytes written will be returned, or error. Can overwrite previous
+// written slices if the write ats overlap.
+func (b *WriteAtBuffer) WriteAt(p []byte, pos int64) (n int, err error) {
+	pLen := len(p)
+	expLen := pos + int64(pLen)
+	b.m.Lock()
+	defer b.m.Unlock()
+	if int64(len(b.buf)) < expLen {
+		if int64(cap(b.buf)) < expLen {
+			if b.GrowthCoeff < 1 {
+				b.GrowthCoeff = 1
+			}
+			newBuf := make([]byte, expLen, int64(b.GrowthCoeff*float64(expLen)))
+			copy(newBuf, b.buf)
+			b.buf = newBuf
+		}
+		b.buf = b.buf[:expLen]
+	}
+	copy(b.buf[pos:], p)
+	return pLen, nil
+}
+
+// Bytes returns a slice of bytes written to the buffer.
+func (b *WriteAtBuffer) Bytes() []byte {
+	b.m.Lock()
+	defer b.m.Unlock()
+	return b.buf
+}
+
+// ChecksumType represents the transfer checksum type
+type ChecksumType string
+
+// Enum values for ChecksumType
+const (
+	ChecksumTypeComposite  ChecksumType = "COMPOSITE"
+	ChecksumTypeFullObject ChecksumType = "FULL_OBJECT"
+)

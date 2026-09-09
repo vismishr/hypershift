@@ -7,7 +7,7 @@ import (
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	assets "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/assets"
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/podspec"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -26,6 +26,13 @@ const (
 	controlPlaneOperatorComponentName = "control-plane-operator"
 )
 
+// isEtcdComponent returns true for the default etcd component and any etcd shard
+// component (e.g. "etcd-events"). It avoids matching unrelated components whose
+// names happen to start with "etcd" (e.g. a hypothetical "etcd-backup").
+func isEtcdComponent(name string) bool {
+	return name == etcdComponentName || strings.HasPrefix(name, etcdComponentName+"-")
+}
+
 var (
 	componentsExcludedFromKubeAPIServerDependency = sets.New(
 		etcdComponentName,
@@ -36,6 +43,8 @@ var (
 		"karpenter-operator",
 		"karpenter",
 		"router",
+		"ignition-server",
+		"ignition-server-proxy",
 	)
 )
 
@@ -50,7 +59,7 @@ var (
 func (c *controlPlaneWorkload[T]) checkDependencies(cpContext ControlPlaneContext) ([]string, error) {
 	unavailableDependencies := sets.New(c.dependencies...)
 	// always add kube-apiserver as a dependency, except execluded components.
-	if !componentsExcludedFromKubeAPIServerDependency.Has(c.Name()) {
+	if !componentsExcludedFromKubeAPIServerDependency.Has(c.Name()) && !isEtcdComponent(c.Name()) {
 		unavailableDependencies.Insert(kubeAPIServerComponentName)
 	}
 	// we don't deploy etcd for unmanaged, therefore components can't have a dependency on it.
@@ -94,13 +103,13 @@ func (c *controlPlaneWorkload[T]) checkDependencies(cpContext ControlPlaneContex
 func (c *controlPlaneWorkload[T]) reconcileComponentStatus(cpContext ControlPlaneContext, component *hyperv1.ControlPlaneComponent, unavailableDependencies []string, reconcilationError error) error {
 	workloadContrext := cpContext.workloadContext()
 	component.Status.Resources = []hyperv1.ComponentResource{}
-	if err := assets.ForEachManifest(c.Name(), func(manifestName string) error {
+	if err := assets.ForEachManifest(c.AssetDirName(), func(manifestName string) error {
 		adapter, exist := c.manifestsAdapters[manifestName]
 		if exist && adapter.predicate != nil && !adapter.predicate(workloadContrext) {
 			return nil
 		}
 
-		obj, gvk, err := assets.LoadManifest(c.name, manifestName)
+		obj, gvk, err := c.loadManifest(manifestName)
 		if err != nil {
 			return err
 		}
@@ -133,6 +142,8 @@ func (c *controlPlaneWorkload[T]) reconcileComponentStatus(cpContext ControlPlan
 		// set the version only if the rollout is complete
 		component.Status.Version = cpContext.ReleaseImageProvider.Version()
 	}
+
+	component.Status.ObservedGeneration = cpContext.HCP.Generation
 
 	return nil
 }
@@ -237,7 +248,7 @@ func (c *controlPlaneWorkload[T]) checkOperandsRolloutStatus(cpContext WorkloadC
 			errs = append(errs, fmt.Errorf("deployment %s/%s has version %s, expected %s", deployment.Namespace, deployment.Name, releaseVersion, expectedVersion))
 			continue
 		}
-		if !util.IsDeploymentReady(cpContext, &deployment) {
+		if !podspec.IsDeploymentReady(cpContext, &deployment) {
 			errs = append(errs, fmt.Errorf("deployment %s/%s is not ready", deployment.Namespace, deployment.Name))
 		}
 	}

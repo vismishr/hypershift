@@ -35,13 +35,19 @@ const (
 	SATokenIssuerKeyPathDescription   = "Path to the RSA private key file used to sign service account tokens. Required for OIDC-based workload identity authentication."
 	AutoAssignRolesDescription        = "Automatically assign required Azure RBAC roles to workload identities. This grants the identities permissions to manage Azure resources (DNS, networking, storage) for the cluster."
 
+	// Private connectivity / endpoint access
+	EndpointAccessDescription                                      = "Endpoint access type: Public, PublicAndPrivate, or Private."
+	EndpointAccessPrivateNATSubnetIDDescription                    = "Azure resource ID of the subnet used for Private Link Service NAT IP allocation (the subnet must have privateLinkServiceNetworkPolicies disabled)."
+	EndpointAccessPrivateAdditionalAllowedSubscriptionsDescription = "Additional Azure subscription IDs permitted to create Private Endpoints (the guest cluster's own subscription is always automatically allowed)."
+
 	// Encryption
-	EncryptionKeyIDDescription     = "Azure Key Vault key identifier used to encrypt etcd data via KMSv2 (format: https://<vault>.vault.azure.net/keys/<key>/<version>)."
+	EnableKMSDescription           = "Create a KMS workload identity for Azure Key Vault KMS encryption. Use this when the cluster will be configured with --encryption-key-id."
+	EncryptionKeyIDDescription     = "Azure Key Vault or Managed HSM key identifier used to encrypt etcd data via KMSv2 (formats: https://<vault>.vault.azure.net/keys/<key>/<version> or https://<hsm>.managedhsm.azure.net/keys/<key>/<version>)."
 	EncryptionAtHostDescription    = "Enable host-based encryption for VM disks and temp disks. Valid values: Enabled, Disabled."
 	DiskEncryptionSetIDDescription = "Full resource ID of an Azure Disk Encryption Set used to encrypt NodePool OS disks with customer-managed keys."
 
 	// VM configuration
-	InstanceTypeDescription = "Azure VM size for NodePool instances (e.g. Standard_D4s_v4, Standard_D8s_v5)."
+	InstanceTypeDescription = "Azure VM size for NodePool instances (e.g. Standard_D4s_v5, Standard_D8s_v5)."
 	RootDiskSizeDescription = "Size of the OS disk in GB for each NodePool VM. Minimum: 16 GB."
 
 	// Disk configuration
@@ -66,6 +72,7 @@ const (
 	LocationDestroyDescription          = "Azure region of the cluster. Inferred from the HostedCluster if it exists; only required if the cluster resource has already been deleted."
 	AzureCredsDestroyDescription        = "Path to an Azure credentials file (JSON format) used to authenticate and delete Azure resources."
 	ResourceGroupNameDestroyDescription = "Name of the resource group containing the cluster resources to delete. Inferred from the HostedCluster if it exists; only required if the cluster resource has already been deleted."
+	DNSZoneRGNameDestroyDescription     = "Name of the resource group containing the Azure DNS zone (required). Used to clean up DNS zone role assignments during cluster or IAM destruction."
 
 	// Infrastructure command specific flags
 	AssignIdentityRolesDescription          = "Automatically assign required Azure RBAC roles to workload identities. This grants the identities permissions to manage Azure resources."
@@ -77,5 +84,5 @@ const (
 
 	// Common flags
 	NameDescription  = "A name for the HostedCluster. This name is used to identify resources and must be unique within the namespace."
-	CloudDescription = "Azure cloud environment. Valid values: AzurePublicCloud, AzureUSGovernmentCloud, AzureChinaCloud."
+	CloudDescription = "Azure cloud environment. Valid values: AzurePublicCloud, AzureUSGovernmentCloud, AzureChinaCloud, AzureGermanCloud, AzureBleuCloud."
 )

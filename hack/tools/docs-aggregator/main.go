@@ -42,11 +42,13 @@ func run() error {
 	// Build the aggregated content
 	var builder strings.Builder
 
+	// Write front matter to exclude from MkDocs search results
+	builder.WriteString("---\nsearch:\n  exclude: true\n---\n\n")
+
 	// Write header
 	builder.WriteString("# HyperShift Documentation (Aggregated)\n\n")
 	builder.WriteString("This file contains all HyperShift documentation aggregated into a single file\n")
 	builder.WriteString("for use with AI tools like NotebookLM.\n\n")
-	builder.WriteString(fmt.Sprintf("Total documents: %d\n\n", len(mdFiles)))
 
 	// Process each file
 	for _, filePath := range mdFiles {
@@ -59,7 +61,7 @@ func run() error {
 		builder.WriteString("---\n\n")
 		builder.WriteString(fmt.Sprintf("## Source: %s\n\n", filePath))
 		// Strip markdown links to avoid broken link warnings in aggregated file
-		builder.WriteString(stripMarkdownLinks(string(content)))
+		builder.WriteString(stripTrailingWhitespace(stripMarkdownLinks(string(content))))
 		builder.WriteString("\n\n")
 	}
 
@@ -93,6 +95,11 @@ func findMarkdownFiles(root string) ([]string, error) {
 			return nil
 		}
 
+		// Skip blog posts — they are progress reports, not reference documentation
+		if strings.Contains(path, "/blog/") {
+			return nil
+		}
+
 		if !d.IsDir() && strings.HasSuffix(strings.ToLower(d.Name()), ".md") {
 			files = append(files, path)
 		}
@@ -105,6 +112,14 @@ func findMarkdownFiles(root string) ([]string, error) {
 	}
 
 	return files, nil
+}
+
+func stripTrailingWhitespace(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // stripMarkdownLinks converts markdown links [text](url) to just the text,
