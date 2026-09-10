@@ -14,8 +14,7 @@ HyperShift uses AI-assisted CI jobs powered by Claude Code to help with developm
 
 | Job | Purpose | Schedule |
 |-----|---------|----------|
-| `periodic-jira-agent` | Analyzes Jira issues and creates draft PRs with fixes | Weekly on Mondays at 8:30 AM UTC |
-| `periodic-review-agent` | Addresses PR review comments on agent-created PRs | Every 3 hours (8:00-23:00 UTC) daily |
+| `periodic-jira-agent` | Analyzes Jira issues and creates draft PRs with fixes | Daily at 9:00 AM UTC |
 | `address-review-comments` | On-demand job to address review comments on a single PR | Triggered via `/test address-review-comments` |
 | `periodic-hypershift-dependabot-triage` | Consolidates open dependabot PRs into a single weekly PR | Weekly on Fridays at 12:00 UTC |
 
@@ -35,9 +34,13 @@ These jobs process **internal Red Hat tickets only** from the following Jira pro
 The Jira Agent (`periodic-jira-agent`) automatically analyzes Jira issues and creates draft pull requests with proposed fixes.
 
 - **Job name**: `periodic-jira-agent`
-- **Schedule**: Weekly on Mondays at 8:30 AM UTC (`30 8 * * 1`)
+- **Schedule**: Daily at 9:00 AM UTC (`0 9 * * *`)
 - **Max issues per run**: 1 (configurable via `JIRA_AGENT_MAX_ISSUES`)
 - **Max agentic turns**: 100 per issue
+
+!!! tip "Want to set up a Jira Agent for your team?"
+    The Jira Agent is built on a generic, reusable step registry — any OpenShift team can onboard.
+    See the [Jira Agent Onboarding Guide](jira-agent-onboarding.md) for step-by-step instructions.
 
 ### How It Works
 
@@ -59,6 +62,7 @@ project in (OCPBUGS, CNTRLPLANE)
   AND resolution = Unresolved
   AND status in (New, "To Do")
   AND labels = issue-for-agent
+  AND labels = ready-to-solve
   AND labels != agent-processed
 ```
 
@@ -67,7 +71,7 @@ project in (OCPBUGS, CNTRLPLANE)
 ```mermaid
 flowchart TD
     subgraph "Prow CI Environment"
-        A[Periodic Job Trigger<br/>Weekly Monday 8:30 UTC] --> B[Setup Step]
+        A[Periodic Job Trigger<br/>Daily 9:00 UTC] --> B[Setup Step]
         B --> C[Process Step]
 
         subgraph "Process Step"
@@ -100,7 +104,13 @@ flowchart TD
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `JIRA_AGENT_MAX_ISSUES` | 1 | Maximum issues to process per run |
+| `JIRA_AGENT_ISSUE_KEY` | *(none)* | Process a single specific Jira issue instead of running the JQL query |
 | Rate limit | 60 seconds | Delay between processing issues |
+
+!!! tip ":zap: Trigger on demand"
+    You don't have to wait for the daily cron — trigger the jira-agent for a specific issue
+    immediately via the Gangway API or Claude Code. See
+    [Triggering Jobs On Demand](triggering-jobs-on-demand.md) for instructions.
 
 ---
 
@@ -108,20 +118,17 @@ flowchart TD
 
 ### Overview
 
-The Review Agent (`periodic-review-agent`) automatically addresses PR review comments on PRs created by the Jira Agent.
+The Review Agent (`address-review-comments`) addresses PR review comments on PRs created by the Jira Agent.
 
-- **Job name**: `periodic-review-agent`
-- **Schedule**: Every 3 hours (8:00-23:00 UTC) daily (`0 8-23/3 * * *`)
-- **Max PRs per run**: 10 (configurable via `REVIEW_AGENT_MAX_PRS`)
+- **Job name**: `address-review-comments`
+- **Trigger**: On-demand via `/test address-review-comments` on a PR
 - **Max agentic turns**: 100 per PR
-- **On-demand job**: `address-review-comments` (trigger with `/test address-review-comments`)
 
 ### How It Works
 
-1. **Queries GitHub** for open PRs authored by `app/hypershift-jira-solve-ci`
-2. **Analyzes review threads** to identify comments needing attention
-3. **Runs Claude Code** with the `/utils:address-reviews` command
-4. **Pushes changes** back to the PR branch
+1. **Analyzes review threads** to identify comments needing attention
+2. **Runs Claude Code** with the `/utils:address-reviews` command
+3. **Pushes changes** back to the PR branch
 
 ### Comment Analysis Logic
 
@@ -171,43 +178,15 @@ When addressing feedback, the bot follows these rules:
 2. **Code changes only when requested**: Only modifies code when explicitly asked (imperative language like "change", "fix", "update")
 3. **Explanations for questions**: Replies with explanation only for clarifying questions, without code changes
 
-### Data Flow
+### Triggering On-Demand
 
-```mermaid
-flowchart TD
-    subgraph "Prow CI Environment"
-        A[Periodic Job Trigger<br/>Every 3 hours 8:00-23:00 UTC] --> B[Setup Step]
-        B --> C[Process Step]
+For a single PR, trigger the review agent with:
 
-        subgraph "Process Step"
-            C --> D[Query GitHub API<br/>for Agent PRs]
-            D --> E{PRs Found?}
-            E -->|No| F[Exit Successfully]
-            E -->|Yes| G[For Each PR]
-            G --> H[Analyze Review Threads]
-            H --> I{Threads Need<br/>Attention?}
-            I -->|No| J{More PRs?}
-            I -->|Yes| K[Checkout PR Branch]
-            K --> L[Run Claude Code<br/>/utils:address-reviews]
-            L --> M[Push Changes]
-            M --> J
-            J -->|Yes| G
-            J -->|No| F
-        end
-    end
-
-    subgraph "External Systems"
-        D <--> GH[(GitHub API<br/>github.com)]
-        L <--> CLAUDE[Claude API<br/>via Vertex AI]
-        M <--> FORK[(GitHub Fork<br/>hypershift-community)]
-    end
+```
+/test address-review-comments
 ```
 
-### Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `REVIEW_AGENT_MAX_PRS` | 10 | Maximum PRs to process per run |
+This runs the review agent for that specific PR only.
 
 ---
 
@@ -314,10 +293,17 @@ To have an issue processed by the Jira Agent:
 1. Ensure the issue is in **OCPBUGS** or **CNTRLPLANE** project
 2. Set status to **New** or **To Do**
 3. Ensure resolution is **Unresolved**
-4. Add the label **`issue-for-agent`**
-5. Security set to none
+4. Validate the issue is well-groomed using `/jira:ready-to-solve <issue-key>` (use `--fix` to auto-fix)
+5. Add the label **`issue-for-agent`**
+6. Security set to none
 
-The issue will be picked up on the next weekly run (Mondays at 8:30 AM UTC).
+The issue will be picked up on the next daily run (9:00 AM UTC).
+
+!!! tip
+    The `/jira:ready-to-solve` skill checks that the issue description has the required sections
+    (Context, Acceptance Criteria, Technical Details) and runs qualitative assessments. Issues that
+    pass are labeled `ready-to-solve`. See the [Jira Agent Onboarding Guide](jira-agent-onboarding.md#issue-format)
+    for details on issue formatting.
 
 ### Viewing AI-Generated Output
 
@@ -333,17 +319,7 @@ PRs are created as **drafts** and require human review before merging.
 To have an issue reprocessed:
 
 1. Remove the **`agent-processed`** label from the Jira issue
-2. The issue will be picked up on the next weekly run
-
-### Triggering Review Agent On-Demand
-
-For a single PR, you can trigger the review agent manually:
-
-```
-/test address-review-comments
-```
-
-This runs the review agent for that specific PR only.
+2. The issue will be picked up on the next daily run
 
 ---
 
@@ -351,7 +327,7 @@ This runs the review agent for that specific PR only.
 
 - **AI may produce incorrect or incomplete solutions** - always review carefully
 - **Complex issues may not be fully addressed** - multi-faceted problems may need human intervention
-- **Rate limited**: 1 issue per weekly run (jira-agent), 10 PRs per run (review-agent), all non-k8s dependabot PRs per run (dependabot-triage)
+- **Rate limited**: 1 issue per daily run (jira-agent), all non-k8s dependabot PRs per run (dependabot-triage)
 - **Cannot access private resources** - no access to internal systems beyond Jira/GitHub
 - **Cannot execute destructive operations** - no ability to delete resources or force-push
 - **Maximum agentic turns**: 100 per issue (jira-agent), 100 per PR (review-agent)

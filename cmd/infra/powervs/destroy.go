@@ -3,6 +3,7 @@ package powervs
 import (
 	"context"
 	"encoding/json"
+	coreerrors "errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -514,14 +515,14 @@ func destroyVpc(ctx context.Context, logger logr.Logger, options *DestroyInfraOp
 }
 
 // deleteVpc deletes the vpc id passed
-func deleteVpc(ctx context.Context, logger logr.Logger, id string, v1 *vpcv1.VpcV1, infraID string) error {
+func deleteVpc(ctx context.Context, logger logr.Logger, id string, v1 *vpcv1.VpcV1, _ string) error {
 	logger.Info("Deleting VPC", "id", id)
 	_, err := v1.DeleteVPCWithContext(ctx, &vpcv1.DeleteVPCOptions{ID: &id})
 	return err
 }
 
 // destroyVpcSubnet destroying vpc subnet
-func destroyVpcSubnet(ctx context.Context, logger logr.Logger, options *DestroyInfraOptions, infra *Infra, resourceGroupID string, v1 *vpcv1.VpcV1, infraID string) error {
+func destroyVpcSubnet(ctx context.Context, logger logr.Logger, options *DestroyInfraOptions, infra *Infra, resourceGroupID string, v1 *vpcv1.VpcV1, _ string) error {
 	if infra != nil && infra.VPCSubnetID != "" {
 		return deleteVpcSubnet(ctx, logger, infra.VPCSubnetID, v1, options)
 	}
@@ -768,7 +769,8 @@ func deleteCOSBucket(ctx context.Context, bucketName string, cosClient *s3.S3) e
 	if _, err := cosClient.DeleteBucketWithContext(ctx, &s3.DeleteBucketInput{
 		Bucket: aws.String(bucketName),
 	}); err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
+		var aerr awserr.Error
+		if coreerrors.As(err, &aerr) {
 			if aerr.Code() != s3.ErrCodeNoSuchBucket {
 				return err
 			}
@@ -886,7 +888,7 @@ func destroyTransitGateway(ctx context.Context, logger logr.Logger, options *Des
 		TransitGatewayID: tg.ID,
 	})
 	if err != nil {
-		return fmt.Errorf("error retrieving transit gateway connection list: %v", err)
+		return fmt.Errorf("error retrieving transit gateway connection list: %w", err)
 	}
 
 	for _, tgConn := range tgConnList.Connections {
@@ -895,7 +897,7 @@ func destroyTransitGateway(ctx context.Context, logger logr.Logger, options *Des
 			TransitGatewayID: tg.ID,
 			ID:               tgConn.ID,
 		}); err != nil {
-			return fmt.Errorf("error deleting transit gateway connection %s, %v", *tgConn.Name, err)
+			return fmt.Errorf("error deleting transit gateway connection %s, %w", *tgConn.Name, err)
 		}
 	}
 
@@ -904,7 +906,7 @@ func destroyTransitGateway(ctx context.Context, logger logr.Logger, options *Des
 			TransitGatewayID: tg.ID,
 		})
 		if err != nil {
-			return false, fmt.Errorf("error retrieving transit gateway connection list: %v", err)
+			return false, fmt.Errorf("error retrieving transit gateway connection list: %w", err)
 		}
 		if len(tgConnList.Connections) > 0 {
 			return false, nil
@@ -915,7 +917,7 @@ func destroyTransitGateway(ctx context.Context, logger logr.Logger, options *Des
 
 	logger.Info("Waiting for transit gateway connections to get deleted")
 	if err = wait.PollUntilContextTimeout(ctx, time.Minute*1, time.Minute*10, true, f); err != nil {
-		return fmt.Errorf("error waiting for tranist gateway connections to get deleted: %v", err)
+		return fmt.Errorf("error waiting for tranist gateway connections to get deleted: %w", err)
 	}
 
 	logger.Info("Deleting transit gateway", "name", *tg.Name)

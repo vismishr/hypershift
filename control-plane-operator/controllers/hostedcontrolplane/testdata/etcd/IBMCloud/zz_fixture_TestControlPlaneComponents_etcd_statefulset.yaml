@@ -1,6 +1,8 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
+  annotations:
+    hypershift.openshift.io/desired-state-hash: 8539d6edaeac16b94bc9f8c288adf1c05d3a9fe50df4bfe7528b9703121f763f
   labels:
     hypershift.openshift.io/managed-by: control-plane-operator
   name: etcd
@@ -132,8 +134,16 @@ spec:
           value: /etc/etcd/tls/etcd-ca/ca.crt
         - name: ETCD_ENABLE_PPROF
           value: "true"
+        - name: ETCD_METRICS
+          value: extensive
         - name: ETCD_INITIAL_CLUSTER
           value: etcd-0=https://etcd-0.etcd-discovery.hcp-namespace.svc:2380,etcd-1=https://etcd-1.etcd-discovery.hcp-namespace.svc:2380,etcd-2=https://etcd-2.etcd-discovery.hcp-namespace.svc:2380
+        - name: ETCD_TLS_MIN_VERSION
+          value: TLS1.2
+        - name: ETCD_CIPHER_SUITES
+          value: TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+        - name: ETCD_LOG_LEVEL
+          value: info
         image: etcd
         imagePullPolicy: IfNotPresent
         livenessProbe:
@@ -197,7 +207,6 @@ spec:
         - grpc-proxy
         - start
         - --endpoints=https://localhost:2382
-        - --advertise-client-url=""
         - --key=/etc/etcd/tls/peer/peer.key
         - --key-file=/etc/etcd/tls/server/server.key
         - --cert=/etc/etcd/tls/peer/peer.crt
@@ -206,6 +215,9 @@ spec:
         - --trusted-ca-file=/etc/etcd/tls/etcd-metrics-ca/ca.crt
         - --listen-addr=127.0.0.1:2383
         - --metrics-addr=https://0.0.0.0:2381
+        - --advertise-client-url=
+        - --tls-min-version=TLS1.2
+        - --listen-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
         command:
         - etcd
         image: etcd
@@ -242,6 +254,8 @@ spec:
         - --client-cert-file=/etc/etcd/tls/client/etcd-client.crt
         - --client-key-file=/etc/etcd/tls/client/etcd-client.key
         - --client-cacert-file=/etc/etcd/tls/etcd-ca/ca.crt
+        - --listen-tls-min-version=TLS1.2
+        - --listen-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
         command:
         - cluster-etcd-operator
         image: cluster-etcd-operator
@@ -270,7 +284,7 @@ spec:
       initContainers:
       - args:
         - -c
-        - exec control-plane-operator resolve-dns ${HOSTNAME}.etcd-discovery.${NAMESPACE}.svc
+        - exec control-plane-operator resolve-dns --self-register ${HOSTNAME}.etcd-discovery.${NAMESPACE}.svc
         command:
         - /bin/bash
         env:
@@ -279,6 +293,11 @@ spec:
             fieldRef:
               apiVersion: v1
               fieldPath: metadata.namespace
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: status.podIP
         image: controlplane-operator
         imagePullPolicy: IfNotPresent
         name: ensure-dns
@@ -351,6 +370,7 @@ spec:
       priorityClassName: hypershift-etcd
       restartPolicy: Always
       schedulerName: default-scheduler
+      serviceAccountName: etcd
       tolerations:
       - effect: NoSchedule
         key: hypershift.openshift.io/control-plane
@@ -360,6 +380,14 @@ spec:
         key: hypershift.openshift.io/cluster
         operator: Equal
         value: hcp-namespace
+      - effect: NoExecute
+        key: node.kubernetes.io/not-ready
+        operator: Exists
+        tolerationSeconds: 60
+      - effect: NoExecute
+        key: node.kubernetes.io/unreachable
+        operator: Exists
+        tolerationSeconds: 60
       volumes:
       - name: peer-tls
         secret:

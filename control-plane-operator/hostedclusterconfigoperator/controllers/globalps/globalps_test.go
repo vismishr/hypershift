@@ -16,10 +16,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	capiv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
 var (
@@ -355,14 +354,12 @@ func TestReconcileGlobalPullSecret(t *testing.T) {
 			// Create separate clients for different namespaces/purposes
 			cpClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.existingObjects...).Build()
 			kubeSystemSecretClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.existingObjects...).Build()
-			nodeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.nodeObjects...).Build()
 			hcUncachedClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.existingObjects...).Build()
 
 			// Create reconciler
 			reconciler := &Reconciler{
 				cpClient:               cpClient,
 				kubeSystemSecretClient: kubeSystemSecretClient,
-				nodeClient:             nodeClient,
 				hcUncachedClient:       hcUncachedClient,
 				hcpNamespace:           tt.hcpNamespace,
 				hccoImage:              tt.hccoImage,
@@ -447,7 +444,7 @@ func TestValidateAdditionalPullSecret(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "valid pull secret",
+			name: "When pull secret has valid docker config, it should pass validation",
 			secret: &corev1.Secret{
 				Data: map[string][]byte{
 					corev1.DockerConfigJsonKey: composePullSecretBytes(map[string]string{"quay.io": validAuth}),
@@ -456,7 +453,7 @@ func TestValidateAdditionalPullSecret(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "missing docker config key",
+			name: "When pull secret is missing docker config key, it should return error",
 			secret: &corev1.Secret{
 				Data: map[string][]byte{
 					"wrong-key": composePullSecretBytes(map[string]string{"quay.io": validAuth}),
@@ -465,7 +462,7 @@ func TestValidateAdditionalPullSecret(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "invalid json",
+			name: "When pull secret has invalid json, it should return error",
 			secret: &corev1.Secret{
 				Data: map[string][]byte{
 					corev1.DockerConfigJsonKey: []byte(`invalid json`),
@@ -474,7 +471,7 @@ func TestValidateAdditionalPullSecret(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "empty auths",
+			name: "When pull secret has empty auths, it should return error",
 			secret: &corev1.Secret{
 				Data: map[string][]byte{
 					corev1.DockerConfigJsonKey: []byte(`{"auths":{}}`),
@@ -506,68 +503,68 @@ func TestMergePullSecrets(t *testing.T) {
 		wantErr          bool
 	}{
 		{
-			name:             "successful merge with 1 entries",
+			name:             "When merging one entry from each secret, it should combine both registries",
 			originalSecret:   composePullSecretBytes(map[string]string{"registry1": validAuth}),
 			additionalSecret: composePullSecretBytes(map[string]string{"registry2": validAuth}),
 			expectedResult:   composePullSecretBytes(map[string]string{"registry1": validAuth, "registry2": validAuth}),
 			wantErr:          false,
 		},
 		{
-			name:             "successful merge with 2 entries in additional secret",
+			name:             "When additional secret has two entries, it should merge all registries",
 			originalSecret:   composePullSecretBytes(map[string]string{"registry1": validAuth}),
 			additionalSecret: composePullSecretBytes(map[string]string{"registry2": validAuth, "registry3": validAuth}),
 			expectedResult:   composePullSecretBytes(map[string]string{"registry1": validAuth, "registry2": validAuth, "registry3": validAuth}),
 			wantErr:          false,
 		},
 		{
-			name:             "successful merge with 2 entries in original secret",
+			name:             "When original secret has two entries, it should merge all registries",
 			originalSecret:   composePullSecretBytes(map[string]string{"registry1": validAuth, "registry2": validAuth}),
 			additionalSecret: composePullSecretBytes(map[string]string{"registry3": validAuth}),
 			expectedResult:   composePullSecretBytes(map[string]string{"registry1": validAuth, "registry2": validAuth, "registry3": validAuth}),
 			wantErr:          false,
 		},
 		{
-			name:             "conflict resolution - original always wins",
+			name:             "When registries conflict, it should preserve original secret credentials",
 			originalSecret:   composePullSecretBytes(map[string]string{"registry1": oldAuth}),
 			additionalSecret: composePullSecretBytes(map[string]string{"registry1": validAuth}),
 			expectedResult:   composePullSecretBytes(map[string]string{"registry1": oldAuth}),
 			wantErr:          false,
 		},
 		{
-			name:             "precedence test - original always has precedence",
+			name:             "When registries overlap, it should give precedence to original secret",
 			originalSecret:   composePullSecretBytes(map[string]string{"registry1": oldAuth, "registry2": oldAuth}),
 			additionalSecret: composePullSecretBytes(map[string]string{"registry1": validAuth, "registry3": validAuth}),
 			expectedResult:   composePullSecretBytes(map[string]string{"registry1": oldAuth, "registry2": oldAuth, "registry3": validAuth}),
 			wantErr:          false,
 		},
 		{
-			name:             "multiple conflicts - original always wins",
+			name:             "When multiple registries conflict, it should preserve all original credentials",
 			originalSecret:   composePullSecretBytes(map[string]string{"registry1": oldAuth, "registry2": oldAuth}),
 			additionalSecret: composePullSecretBytes(map[string]string{"registry1": validAuth, "registry2": validAuth, "registry3": validAuth}),
 			expectedResult:   composePullSecretBytes(map[string]string{"registry1": oldAuth, "registry2": oldAuth, "registry3": validAuth}),
 			wantErr:          false,
 		},
 		{
-			name:             "invalid original secret",
+			name:             "When original secret has invalid json, it should return error",
 			originalSecret:   []byte(`invalid json`),
 			additionalSecret: composePullSecretBytes(map[string]string{"registry1": validAuth}),
 			wantErr:          true,
 		},
 		{
-			name:             "invalid additional secret",
+			name:             "When additional secret has invalid json, it should return error",
 			originalSecret:   composePullSecretBytes(map[string]string{"registry1": validAuth}),
 			additionalSecret: []byte(`invalid json`),
 			wantErr:          true,
 		},
 		{
-			name:             "empty additional secret, invalid JSON",
+			name:             "When additional secret has empty invalid json, it should return error",
 			originalSecret:   composePullSecretBytes(map[string]string{"registry1": validAuth}),
 			additionalSecret: []byte{},
 			expectedResult:   composePullSecretBytes(map[string]string{"registry1": validAuth}),
 			wantErr:          true,
 		},
 		{
-			name:             "empty additional secret with valid JSON",
+			name:             "When additional secret has empty valid json, it should return original secret unchanged",
 			originalSecret:   composePullSecretBytes(map[string]string{"registry1": validAuth, "registry2": validAuth}),
 			additionalSecret: []byte(`{"auths":{}}`),
 			expectedResult:   composePullSecretBytes(map[string]string{"registry1": validAuth, "registry2": validAuth}),
@@ -615,7 +612,7 @@ func TestAdditionalPullSecretExists(t *testing.T) {
 		objects        []client.Object
 	}{
 		{
-			name:           "secret exists",
+			name:           "When additional pull secret exists, it should return true with secret data",
 			secretExists:   true,
 			expectedExists: true,
 			expectedSecret: &corev1.Secret{
@@ -640,7 +637,7 @@ func TestAdditionalPullSecretExists(t *testing.T) {
 			},
 		},
 		{
-			name:           "secret exists but has no content",
+			name:           "When additional pull secret exists without content, it should return true with nil data",
 			secretExists:   true,
 			expectedExists: true,
 			expectedSecret: &corev1.Secret{
@@ -661,7 +658,7 @@ func TestAdditionalPullSecretExists(t *testing.T) {
 			},
 		},
 		{
-			name:           "secret exists but has incorrect content",
+			name:           "When additional pull secret exists with invalid content, it should return true with raw data",
 			secretExists:   true,
 			expectedExists: true,
 			expectedSecret: &corev1.Secret{
@@ -686,7 +683,7 @@ func TestAdditionalPullSecretExists(t *testing.T) {
 			},
 		},
 		{
-			name:           "secret does not exist",
+			name:           "When additional pull secret does not exist, it should return false",
 			secretExists:   false,
 			expectedExists: false,
 			expectedSecret: nil,
@@ -712,419 +709,4 @@ func TestAdditionalPullSecretExists(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestLabelNodesForGlobalPullSecret(t *testing.T) {
-	tests := []struct {
-		name            string
-		nodes           []corev1.Node
-		machineSets     []capiv1.MachineSet
-		machines        []capiv1.Machine
-		expectedLabeled []string // names of nodes that should have the label
-	}{
-		{
-			name: "Replace-InPlace-Replace scenario: only Replace nodes should be labeled",
-			nodes: []corev1.Node{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "replace-node-1",
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "inplace-node-1",
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "replace-node-2",
-					},
-				},
-			},
-			machineSets: []capiv1.MachineSet{
-				// First NodePool: Replace strategy (no InPlace annotations)
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "replace-machineset-1",
-						Namespace: "test-namespace",
-					},
-					Spec: capiv1.MachineSetSpec{
-						Selector: metav1.LabelSelector{
-							MatchLabels: map[string]string{
-								"machineset": "replace-1",
-							},
-						},
-					},
-				},
-				// Second NodePool: InPlace strategy (has InPlace annotations)
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "inplace-machineset-1",
-						Namespace: "test-namespace",
-						Annotations: map[string]string{
-							"hypershift.openshift.io/nodePoolTargetConfigVersion":  "config-hash-123",
-							"hypershift.openshift.io/nodePoolCurrentConfigVersion": "config-hash-456",
-						},
-					},
-					Spec: capiv1.MachineSetSpec{
-						Selector: metav1.LabelSelector{
-							MatchLabels: map[string]string{
-								"machineset": "inplace-1",
-							},
-						},
-					},
-				},
-				// Third NodePool: Replace strategy (no InPlace annotations) - this should work after InPlace
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "replace-machineset-2",
-						Namespace: "test-namespace",
-					},
-					Spec: capiv1.MachineSetSpec{
-						Selector: metav1.LabelSelector{
-							MatchLabels: map[string]string{
-								"machineset": "replace-2",
-							},
-						},
-					},
-				},
-			},
-			machines: []capiv1.Machine{
-				// Machine for first Replace NodePool
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "replace-machine-1",
-						Namespace: "test-namespace",
-						Labels: map[string]string{
-							"machineset": "replace-1",
-						},
-					},
-					Status: capiv1.MachineStatus{
-						NodeRef: &corev1.ObjectReference{
-							Name: "replace-node-1",
-						},
-					},
-				},
-				// Machine for InPlace NodePool
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "inplace-machine-1",
-						Namespace: "test-namespace",
-						Labels: map[string]string{
-							"machineset": "inplace-1",
-						},
-					},
-					Status: capiv1.MachineStatus{
-						NodeRef: &corev1.ObjectReference{
-							Name: "inplace-node-1",
-						},
-					},
-				},
-				// Machine for second Replace NodePool (created after InPlace)
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "replace-machine-2",
-						Namespace: "test-namespace",
-						Labels: map[string]string{
-							"machineset": "replace-2",
-						},
-					},
-					Status: capiv1.MachineStatus{
-						NodeRef: &corev1.ObjectReference{
-							Name: "replace-node-2",
-						},
-					},
-				},
-			},
-			expectedLabeled: []string{"replace-node-1", "replace-node-2"}, // Both Replace nodes should be labeled
-		},
-		{
-			name: "Only InPlace NodePools: no nodes should be labeled",
-			nodes: []corev1.Node{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "inplace-node-1",
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "inplace-node-2",
-					},
-				},
-			},
-			machineSets: []capiv1.MachineSet{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "inplace-machineset-1",
-						Namespace: "test-namespace",
-						Annotations: map[string]string{
-							"hypershift.openshift.io/nodePoolTargetConfigVersion": "config-hash-123",
-						},
-					},
-					Spec: capiv1.MachineSetSpec{
-						Selector: metav1.LabelSelector{
-							MatchLabels: map[string]string{
-								"machineset": "inplace-1",
-							},
-						},
-					},
-				},
-			},
-			machines: []capiv1.Machine{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "inplace-machine-1",
-						Namespace: "test-namespace",
-						Labels: map[string]string{
-							"machineset": "inplace-1",
-						},
-					},
-					Status: capiv1.MachineStatus{
-						NodeRef: &corev1.ObjectReference{
-							Name: "inplace-node-1",
-						},
-					},
-				},
-			},
-			expectedLabeled: []string{}, // No nodes should be labeled
-		},
-		{
-			name: "Only Replace NodePools: all nodes should be labeled",
-			nodes: []corev1.Node{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "replace-node-1",
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "replace-node-2",
-					},
-				},
-			},
-			machineSets: []capiv1.MachineSet{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "replace-machineset-1",
-						Namespace: "test-namespace",
-						// No InPlace annotations
-					},
-					Spec: capiv1.MachineSetSpec{
-						Selector: metav1.LabelSelector{
-							MatchLabels: map[string]string{
-								"machineset": "replace-1",
-							},
-						},
-					},
-				},
-			},
-			machines: []capiv1.Machine{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "replace-machine-1",
-						Namespace: "test-namespace",
-						Labels: map[string]string{
-							"machineset": "replace-1",
-						},
-					},
-					Status: capiv1.MachineStatus{
-						NodeRef: &corev1.ObjectReference{
-							Name: "replace-node-1",
-						},
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "replace-machine-2",
-						Namespace: "test-namespace",
-						Labels: map[string]string{
-							"machineset": "replace-1",
-						},
-					},
-					Status: capiv1.MachineStatus{
-						NodeRef: &corev1.ObjectReference{
-							Name: "replace-node-2",
-						},
-					},
-				},
-			},
-			expectedLabeled: []string{"replace-node-1", "replace-node-2"}, // All Replace nodes should be labeled
-		},
-		{
-			name: "When Machine.Status.NodeRef is nil it should skip the node for labeling",
-			nodes: []corev1.Node{
-				{ObjectMeta: metav1.ObjectMeta{Name: "new-node-1"}},
-				{ObjectMeta: metav1.ObjectMeta{Name: "existing-node-1"}},
-			},
-			machineSets: []capiv1.MachineSet{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "replace-machineset-1",
-						Namespace: "test-namespace",
-					},
-					Spec: capiv1.MachineSetSpec{
-						Selector: metav1.LabelSelector{
-							MatchLabels: map[string]string{"machineset": "replace-1"},
-						},
-					},
-				},
-			},
-			machines: []capiv1.Machine{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "machine-with-noderef",
-						Namespace: "test-namespace",
-						Labels:    map[string]string{"machineset": "replace-1"},
-					},
-					Status: capiv1.MachineStatus{
-						NodeRef: &corev1.ObjectReference{Name: "existing-node-1"},
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "machine-without-noderef",
-						Namespace: "test-namespace",
-						Labels:    map[string]string{"machineset": "replace-1"},
-					},
-					Status: capiv1.MachineStatus{NodeRef: nil},
-				},
-			},
-			expectedLabeled: []string{"existing-node-1"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
-
-			// Create runtime scheme and add required types
-			scheme := runtime.NewScheme()
-			_ = corev1.AddToScheme(scheme)
-			_ = capiv1.AddToScheme(scheme)
-
-			// Convert to client.Object slices
-			var objects []client.Object
-			for i := range tt.nodes {
-				objects = append(objects, &tt.nodes[i])
-			}
-			for i := range tt.machineSets {
-				objects = append(objects, &tt.machineSets[i])
-			}
-			for i := range tt.machines {
-				objects = append(objects, &tt.machines[i])
-			}
-
-			// Create fake clients
-			cpClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-			kubeSystemSecretClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-			nodeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-			hcUncachedClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-
-			// Create reconciler
-			reconciler := &Reconciler{
-				cpClient:               cpClient,
-				kubeSystemSecretClient: kubeSystemSecretClient,
-				nodeClient:             nodeClient,
-				hcUncachedClient:       hcUncachedClient,
-				hcpNamespace:           "test-namespace",
-			}
-
-			// Execute the function under test
-			err := reconciler.labelNodesForGlobalPullSecret(context.Background())
-			g.Expect(err).NotTo(HaveOccurred())
-
-			// Check that only expected nodes have the label
-			nodeList := &corev1.NodeList{}
-			err = nodeClient.List(context.Background(), nodeList)
-			g.Expect(err).NotTo(HaveOccurred())
-
-			labeledNodes := make(map[string]bool)
-			for _, node := range nodeList.Items {
-				if node.Labels != nil && node.Labels[globalPSLabelKey] == "true" {
-					labeledNodes[node.Name] = true
-				}
-			}
-
-			// Verify expected nodes are labeled
-			for _, expectedNode := range tt.expectedLabeled {
-				g.Expect(labeledNodes[expectedNode]).To(BeTrue(), "Node %s should be labeled but wasn't", expectedNode)
-			}
-
-			// Verify no unexpected nodes are labeled
-			g.Expect(len(labeledNodes)).To(Equal(len(tt.expectedLabeled)), "Number of labeled nodes doesn't match expected")
-		})
-	}
-}
-
-func TestMachineNodeRefPredicate(t *testing.T) {
-	p := machineNodeRefPredicate()
-
-	t.Run("When a Machine is created it should not trigger reconciliation", func(t *testing.T) {
-		g := NewWithT(t)
-		e := event.TypedCreateEvent[*capiv1.Machine]{
-			Object: &capiv1.Machine{},
-		}
-		g.Expect(p.Create(e)).To(BeFalse())
-	})
-
-	t.Run("When a Machine is deleted it should not trigger reconciliation", func(t *testing.T) {
-		g := NewWithT(t)
-		e := event.TypedDeleteEvent[*capiv1.Machine]{
-			Object: &capiv1.Machine{},
-		}
-		g.Expect(p.Delete(e)).To(BeFalse())
-	})
-
-	t.Run("When a generic event occurs it should not trigger reconciliation", func(t *testing.T) {
-		g := NewWithT(t)
-		e := event.TypedGenericEvent[*capiv1.Machine]{
-			Object: &capiv1.Machine{},
-		}
-		g.Expect(p.Generic(e)).To(BeFalse())
-	})
-
-	t.Run("When NodeRef transitions from nil to non-nil it should trigger reconciliation", func(t *testing.T) {
-		g := NewWithT(t)
-		e := event.TypedUpdateEvent[*capiv1.Machine]{
-			ObjectOld: &capiv1.Machine{
-				Status: capiv1.MachineStatus{NodeRef: nil},
-			},
-			ObjectNew: &capiv1.Machine{
-				Status: capiv1.MachineStatus{
-					NodeRef: &corev1.ObjectReference{Name: "node-1"},
-				},
-			},
-		}
-		g.Expect(p.Update(e)).To(BeTrue())
-	})
-
-	t.Run("When NodeRef is already set on both old and new it should not trigger reconciliation", func(t *testing.T) {
-		g := NewWithT(t)
-		e := event.TypedUpdateEvent[*capiv1.Machine]{
-			ObjectOld: &capiv1.Machine{
-				Status: capiv1.MachineStatus{
-					NodeRef: &corev1.ObjectReference{Name: "node-1"},
-				},
-			},
-			ObjectNew: &capiv1.Machine{
-				Status: capiv1.MachineStatus{
-					NodeRef: &corev1.ObjectReference{Name: "node-1"},
-				},
-			},
-		}
-		g.Expect(p.Update(e)).To(BeFalse())
-	})
-
-	t.Run("When NodeRef is nil on both old and new it should not trigger reconciliation", func(t *testing.T) {
-		g := NewWithT(t)
-		e := event.TypedUpdateEvent[*capiv1.Machine]{
-			ObjectOld: &capiv1.Machine{
-				Status: capiv1.MachineStatus{NodeRef: nil},
-			},
-			ObjectNew: &capiv1.Machine{
-				Status: capiv1.MachineStatus{NodeRef: nil},
-			},
-		}
-		g.Expect(p.Update(e)).To(BeFalse())
-	})
 }

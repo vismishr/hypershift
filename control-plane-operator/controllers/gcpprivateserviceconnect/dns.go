@@ -17,6 +17,7 @@ package gcpprivateserviceconnect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -72,7 +73,8 @@ func ensureDNSDot(name string) string {
 
 // isNotFound checks if a GCP API error indicates a resource was not found.
 func isNotFound(err error) bool {
-	if apiErr, ok := err.(*googleapi.Error); ok {
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) {
 		return apiErr.Code == 404 // HTTP 404 Not Found
 	}
 	// Fallback: check if error message contains "404" or "not found" patterns
@@ -542,7 +544,7 @@ func ReconcileDNS(ctx context.Context, hcp *hyperv1.HostedControlPlane, pscEndpo
 	clusterName := hcp.Name
 	baseDomain := hcp.Spec.DNS.BaseDomain
 	projectID := gcpSpec.Project
-	vpcNetwork := gcpSpec.NetworkConfig.Network.Name
+	vpcNetwork := string(gcpSpec.NetworkConfig.Network.Name)
 
 	// Generate zone names
 	names, err := generateZoneNames(clusterName, baseDomain)

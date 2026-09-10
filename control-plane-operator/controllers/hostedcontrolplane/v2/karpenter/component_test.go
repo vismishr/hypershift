@@ -6,7 +6,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
-	hyperkarpenterv1 "github.com/openshift/hypershift/api/karpenter/v1beta1"
+	hyperkarpenterv1 "github.com/openshift/hypershift/api/karpenter/v1"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
 	assets "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/assets"
 	"github.com/openshift/hypershift/control-plane-operator/hostedclusterconfigoperator/api"
@@ -27,6 +27,14 @@ func TestPredicate(t *testing.T) {
 		},
 		Spec: hyperv1.HostedControlPlaneSpec{
 			InfraID: "test-infra-id",
+			AutoNode: hyperv1.AutoNode{
+				Provisioner: hyperv1.ProvisionerConfig{
+					Name: hyperv1.ProvisionerKarpenter,
+					Karpenter: hyperv1.KarpenterConfig{
+						Platform: hyperv1.AWSPlatform,
+					},
+				},
+			},
 		},
 	}
 
@@ -37,12 +45,12 @@ func TestPredicate(t *testing.T) {
 		expected bool
 	}{
 		{
-			name:                 "when CAPI kubeconfig secret exist predicate returns true",
+			name:                 "When CAPI kubeconfig secret exists, it should return true",
 			capiKubeconfigSecret: manifests.KASServiceCAPIKubeconfigSecret(hcp.Namespace, hcp.Spec.InfraID),
 			expected:             true,
 		},
 		{
-			name:     "when CAPI kubeconfig secret doesn't exist, predicate return false",
+			name:     "When CAPI kubeconfig secret does not exist, it should return false",
 			expected: false,
 		},
 	}
@@ -96,14 +104,14 @@ func TestAdaptDeployment(t *testing.T) {
 		expectedImage string
 	}{
 		{
-			name: "when HCP has KarpenterProviderAWSImage annotation, image should be overridden",
+			name: "When HCP has KarpenterProviderAWSImage annotation, it should override the image",
 			hcpAnnotations: map[string]string{
 				hyperkarpenterv1.KarpenterProviderAWSImage: "some-override-karpenter-image",
 			},
 			expectedImage: "some-override-karpenter-image",
 		},
 		{
-			name:          "expect default image",
+			name:          "When no image override annotation is set, it should use the default image",
 			expectedImage: "aws-karpenter-provider-aws",
 		},
 	}

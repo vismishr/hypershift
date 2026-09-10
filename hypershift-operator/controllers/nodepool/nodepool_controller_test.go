@@ -15,11 +15,12 @@ import (
 	ignserver "github.com/openshift/hypershift/ignition-server/controllers"
 	kvinfra "github.com/openshift/hypershift/kubevirtexternalinfra"
 	"github.com/openshift/hypershift/support/api"
+	"github.com/openshift/hypershift/support/k8sutil"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	fakereleaseprovider "github.com/openshift/hypershift/support/releaseinfo/fake"
+	"github.com/openshift/hypershift/support/releaseinfo/fixtures"
 	"github.com/openshift/hypershift/support/thirdparty/library-go/pkg/image/dockerv1client"
 	"github.com/openshift/hypershift/support/upsert"
-	"github.com/openshift/hypershift/support/util"
 	fakeimagemetadataprovider "github.com/openshift/hypershift/support/util/fakeimagemetadataprovider"
 
 	configv1 "github.com/openshift/api/config/v1"
@@ -34,7 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
-	capiv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -42,11 +43,13 @@ import (
 	"sigs.k8s.io/yaml"
 
 	ignitionapi "github.com/coreos/ignition/v2/config/v3_2/types"
+	"github.com/coreos/stream-metadata-go/stream"
 	"github.com/google/go-cmp/cmp"
 	"github.com/vincent-petithory/dataurl"
 )
 
 func TestIsUpdatingConfig(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name     string
 		nodePool *hyperv1.NodePool
@@ -54,7 +57,7 @@ func TestIsUpdatingConfig(t *testing.T) {
 		expect   bool
 	}{
 		{
-			name: "it is not updating when strings match",
+			name: "When strings match, it should not update",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
@@ -66,7 +69,7 @@ func TestIsUpdatingConfig(t *testing.T) {
 			expect: false,
 		},
 		{
-			name: "it is updating when strings does not match",
+			name: "When strings do not match, it should update",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
@@ -81,6 +84,7 @@ func TestIsUpdatingConfig(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			g := NewWithT(t)
 			g.Expect(isUpdatingConfig(tc.nodePool, tc.target)).To(Equal(tc.expect))
 		})
@@ -88,6 +92,7 @@ func TestIsUpdatingConfig(t *testing.T) {
 }
 
 func TestIsUpdatingVersion(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name     string
 		nodePool *hyperv1.NodePool
@@ -95,7 +100,7 @@ func TestIsUpdatingVersion(t *testing.T) {
 		expect   bool
 	}{
 		{
-			name: "it is not updating when strings match",
+			name: "When strings match, it should not update",
 			nodePool: &hyperv1.NodePool{
 				Status: hyperv1.NodePoolStatus{
 					Version: "same",
@@ -105,7 +110,7 @@ func TestIsUpdatingVersion(t *testing.T) {
 			expect: false,
 		},
 		{
-			name: "it is updating when strings does not match",
+			name: "When strings do not match, it should update",
 			nodePool: &hyperv1.NodePool{
 				Status: hyperv1.NodePoolStatus{
 					Version: "v1",
@@ -118,6 +123,7 @@ func TestIsUpdatingVersion(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			g := NewWithT(t)
 			g.Expect(isUpdatingVersion(tc.nodePool, tc.target)).To(Equal(tc.expect))
 		})
@@ -125,13 +131,14 @@ func TestIsUpdatingVersion(t *testing.T) {
 }
 
 func TestIsAutoscalingEnabled(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name     string
 		nodePool *hyperv1.NodePool
 		expect   bool
 	}{
 		{
-			name: "it is enabled when the struct is not nil and has no values",
+			name: "When the struct is not nil and has no values, it should be enabled",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					AutoScaling: &hyperv1.NodePoolAutoScaling{
@@ -143,7 +150,7 @@ func TestIsAutoscalingEnabled(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "it is enabled when the struct is not nil and has values",
+			name: "When the struct is not nil and has values, it should be enabled",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					AutoScaling: &hyperv1.NodePoolAutoScaling{
@@ -155,7 +162,7 @@ func TestIsAutoscalingEnabled(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "it is not enabled when the struct is nil",
+			name: "When the struct is nil, it should not be enabled",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{},
 			},
@@ -165,6 +172,7 @@ func TestIsAutoscalingEnabled(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			g := NewWithT(t)
 			g.Expect(isAutoscalingEnabled(tc.nodePool)).To(Equal(tc.expect))
 		})
@@ -172,6 +180,7 @@ func TestIsAutoscalingEnabled(t *testing.T) {
 }
 
 func TestValidateManagement(t *testing.T) {
+	t.Parallel()
 	intstrPointer1 := intstr.FromInt(1)
 	testCases := []struct {
 		name     string
@@ -179,7 +188,7 @@ func TestValidateManagement(t *testing.T) {
 		error    bool
 	}{
 		{
-			name: "it fails with bad upgradeType",
+			name: "When bad upgradeType is set, it should fail",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{},
 				Spec: hyperv1.NodePoolSpec{
@@ -195,7 +204,7 @@ func TestValidateManagement(t *testing.T) {
 			error: true,
 		},
 		{
-			name: "it fails with Replace type and no Replace settings",
+			name: "When Replace type has no Replace settings, it should fail",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{},
 				Spec: hyperv1.NodePoolSpec{
@@ -207,7 +216,7 @@ func TestValidateManagement(t *testing.T) {
 			error: true,
 		},
 		{
-			name: "it fails with Replace type and bad strategy",
+			name: "When Replace type has bad strategy, it should fail",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{},
 				Spec: hyperv1.NodePoolSpec{
@@ -226,7 +235,7 @@ func TestValidateManagement(t *testing.T) {
 			error: true,
 		},
 		{
-			name: "it fails with Replace type, RollingUpdate strategy and no rollingUpdate settings",
+			name: "When Replace type has RollingUpdate strategy and no rollingUpdate settings, it should fail",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{},
 				Spec: hyperv1.NodePoolSpec{
@@ -242,7 +251,7 @@ func TestValidateManagement(t *testing.T) {
 			error: true,
 		},
 		{
-			name: "it passes with Replace type, RollingUpdate strategy and RollingUpdate settings",
+			name: "When Replace type has RollingUpdate strategy and RollingUpdate settings, it should pass",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{},
 				Spec: hyperv1.NodePoolSpec{
@@ -261,7 +270,7 @@ func TestValidateManagement(t *testing.T) {
 			error: false,
 		},
 		{
-			name: "it passes with Replace type and OnDelete strategy",
+			name: "When Replace type has OnDelete strategy, it should pass",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{},
 				Spec: hyperv1.NodePoolSpec{
@@ -291,6 +300,7 @@ func TestValidateManagement(t *testing.T) {
 }
 
 func TestValidateInfraID(t *testing.T) {
+	t.Parallel()
 	g := NewWithT(t)
 	err := validateInfraID("")
 	g.Expect(err).To(HaveOccurred())
@@ -300,6 +310,7 @@ func TestValidateInfraID(t *testing.T) {
 }
 
 func TestGetName(t *testing.T) {
+	t.Parallel()
 	g := NewWithT(t)
 
 	alphaNumeric := regexp.MustCompile(`^[a-z0-9]*$`)
@@ -321,6 +332,7 @@ func TestGetName(t *testing.T) {
 }
 
 func TestGetNodePoolNamespacedName(t *testing.T) {
+	t.Parallel()
 	testControlPlaneNamespace := "control-plane-ns"
 	testNodePoolNamespace := "clusters"
 	testNodePoolName := "nodepool-1"
@@ -333,14 +345,14 @@ func TestGetNodePoolNamespacedName(t *testing.T) {
 		error                 bool
 	}{
 		{
-			name:                  "gets correct NodePool namespaced name",
+			name:                  "When HostedControlPlane has cluster annotation, it should return correct NodePool namespaced name",
 			nodePoolName:          testNodePoolName,
 			controlPlaneNamespace: testControlPlaneNamespace,
 			hostedControlPlane: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: testControlPlaneNamespace,
 					Annotations: map[string]string{
-						util.HostedClusterAnnotation: types.NamespacedName{Name: "hosted-cluster-1", Namespace: testNodePoolNamespace}.String(),
+						k8sutil.HostedClusterAnnotation: types.NamespacedName{Name: "hosted-cluster-1", Namespace: testNodePoolNamespace}.String(),
 					},
 				},
 			},
@@ -348,7 +360,7 @@ func TestGetNodePoolNamespacedName(t *testing.T) {
 			error:  false,
 		},
 		{
-			name:                  "fails if HostedControlPlane missing HostedClusterAnnotation",
+			name:                  "When HostedControlPlane is missing HostedClusterAnnotation, it should fail",
 			nodePoolName:          testNodePoolName,
 			controlPlaneNamespace: testControlPlaneNamespace,
 			hostedControlPlane: &hyperv1.HostedControlPlane{
@@ -360,7 +372,7 @@ func TestGetNodePoolNamespacedName(t *testing.T) {
 			error:  true,
 		},
 		{
-			name:                  "fails if HostedControlPlane does not exist",
+			name:                  "When HostedControlPlane does not exist, it should fail",
 			nodePoolName:          testNodePoolName,
 			controlPlaneNamespace: testControlPlaneNamespace,
 			hostedControlPlane:    nil,
@@ -400,6 +412,7 @@ func TestGetNodePoolNamespacedName(t *testing.T) {
 }
 
 func TestNodepoolDeletionDoesntRequireHCluster(t *testing.T) {
+	t.Parallel()
 	nodePool := &hyperv1.NodePool{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "some-nodepool",
@@ -431,6 +444,7 @@ func TestNodepoolDeletionDoesntRequireHCluster(t *testing.T) {
 }
 
 func TestCreateValidGeneratedPayloadCondition(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name                    string
 		tokenSecret             *corev1.Secret
@@ -438,7 +452,7 @@ func TestCreateValidGeneratedPayloadCondition(t *testing.T) {
 		expectedCondition       *hyperv1.NodePoolCondition
 	}{
 		{
-			name: "when token secret is not found it should report it in the condition",
+			name: "When token secret is not found, it should report it in the condition",
 			tokenSecret: &corev1.Secret{
 				TypeMeta: metav1.TypeMeta{},
 				ObjectMeta: metav1.ObjectMeta{
@@ -458,7 +472,7 @@ func TestCreateValidGeneratedPayloadCondition(t *testing.T) {
 			},
 		},
 		{
-			name: "when token secret has data it should report it in the condition",
+			name: "When token secret has data, it should report it in the condition",
 			tokenSecret: &corev1.Secret{
 				TypeMeta: metav1.TypeMeta{},
 				ObjectMeta: metav1.ObjectMeta{
@@ -481,7 +495,7 @@ func TestCreateValidGeneratedPayloadCondition(t *testing.T) {
 			},
 		},
 		{
-			name: "when token secret has no data it should report unknown in the condition",
+			name: "When token secret has no data, it should report unknown in the condition",
 			tokenSecret: &corev1.Secret{
 				TypeMeta: metav1.TypeMeta{},
 				ObjectMeta: metav1.ObjectMeta{
@@ -504,6 +518,7 @@ func TestCreateValidGeneratedPayloadCondition(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			g := NewWithT(t)
 
 			var client client.Client
@@ -525,121 +540,153 @@ func TestCreateValidGeneratedPayloadCondition(t *testing.T) {
 }
 
 func TestDefaultNodePoolAMI(t *testing.T) {
+	t.Parallel()
+
+	basicReleaseImage := &releaseinfo.ReleaseImage{
+		StreamMetadata: &stream.Stream{
+			Architectures: map[string]stream.Arch{
+				"x86_64": {
+					Images: stream.Images{
+						Aws: &stream.AwsImage{
+							Regions: map[string]stream.SingleImage{
+								"us-east-1": {Release: "4.12.0", Image: "us-east-1-x86_64-image"},
+							},
+						},
+					},
+				},
+				"aarch64": {
+					Images: stream.Images{
+						Aws: &stream.AwsImage{
+							Regions: map[string]stream.SingleImage{
+								"us-east-1": {Release: "4.12.0", Image: "us-east-1-aarch64-image"},
+								"us-west-1": {Release: "4.12.0", Image: ""},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	defaultStream, osStreams, err := releaseinfo.DeserializeImageMetadata(fixtures.CoreOSBootImagesYAML_5_0)
+	if err != nil {
+		t.Fatalf("failed to parse multi-stream fixture: %v", err)
+	}
+	multiStreamReleaseImage := &releaseinfo.ReleaseImage{StreamMetadata: defaultStream, OSStreams: osStreams}
+
 	testCases := []struct {
 		name          string
 		region        string
 		specifiedArch string
+		rhelStream    string
 		releaseImage  *releaseinfo.ReleaseImage
-		image         string
-		err           error
 		expectedImage string
+		expectedErr   string
 	}{
+		// --- Happy paths ---
 		{
-			name:          "successfully pull amd64 AMI",
+			name:          "When resolving amd64 AMI it should return the correct image",
 			region:        "us-east-1",
 			specifiedArch: "amd64",
+			releaseImage:  basicReleaseImage,
 			expectedImage: "us-east-1-x86_64-image",
 		},
 		{
-			name:          "successfully pull arm64 AMI",
+			name:          "When resolving arm64 AMI it should return the correct image",
 			region:        "us-east-1",
 			specifiedArch: "arm64",
+			releaseImage:  basicReleaseImage,
 			expectedImage: "us-east-1-aarch64-image",
 		},
 		{
-			name:          "fail to pull amd64 AMI because region can't be found",
-			region:        "us-east-2",
-			specifiedArch: "amd64",
-			expectedImage: "",
-		},
-		{
-			name:          "fail to pull arm64 AMI because region can't be found",
-			region:        "us-east-2",
-			specifiedArch: "arm64",
-			expectedImage: "",
-		},
-		{
-			name:          "fail because architecture can't be found",
-			region:        "us-east-2",
-			specifiedArch: "arm644",
-			expectedImage: "",
-		},
-		{
-			name:          "fail because architecture can't be found",
-			region:        "us-east-2",
-			specifiedArch: "s390x",
-			expectedImage: "",
-		},
-		{
-			name:          "fail because no image data is defined",
-			region:        "us-west-1",
-			specifiedArch: "arm64",
-			expectedImage: "",
-		},
-		{
-			name:          "fail because stream metadata is nil",
+			name:          "When resolving rhel-9 stream it should return the rhel-9 AMI",
 			region:        "us-east-1",
 			specifiedArch: "amd64",
-			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: nil,
-			},
-			expectedImage: "",
+			rhelStream:    "rhel-9",
+			releaseImage:  multiStreamReleaseImage,
+			expectedImage: "ami-06a6b025350ff1e23",
+		},
+		{
+			name:          "When resolving rhel-10 stream it should return the rhel-10 AMI",
+			region:        "us-east-1",
+			specifiedArch: "amd64",
+			rhelStream:    "rhel-10",
+			releaseImage:  multiStreamReleaseImage,
+			expectedImage: "ami-04b3d999e39d62c5b",
+		},
+		{
+			name:          "When resolving rhel-10 arm64 stream it should return the rhel-10 arm64 AMI",
+			region:        "us-east-1",
+			specifiedArch: "arm64",
+			rhelStream:    "rhel-10",
+			releaseImage:  multiStreamReleaseImage,
+			expectedImage: "ami-0d7237e6b04d9a9e1",
+		},
+		{
+			name:          "When using default stream it should return the default AMI",
+			region:        "us-east-1",
+			specifiedArch: "amd64",
+			releaseImage:  multiStreamReleaseImage,
+			expectedImage: "ami-06a6b025350ff1e23",
+		},
+		// --- Sad paths ---
+		{
+			name:          "When region is not found it should return error",
+			region:        "us-east-2",
+			specifiedArch: "amd64",
+			releaseImage:  basicReleaseImage,
+			expectedErr:   `couldn't find AWS image for region "us-east-2"`,
+		},
+		{
+			name:          "When architecture is not found it should return error",
+			region:        "us-east-1",
+			specifiedArch: "s390x",
+			releaseImage:  basicReleaseImage,
+			expectedErr:   `couldn't find OS metadata for architecture "s390x"`,
+		},
+		{
+			name:          "When image data is empty for region it should return error",
+			region:        "us-west-1",
+			specifiedArch: "arm64",
+			releaseImage:  basicReleaseImage,
+			expectedErr:   `release image metadata has no image for region "us-west-1"`,
+		},
+		{
+			name:          "When stream metadata is nil it should return error",
+			region:        "us-east-1",
+			specifiedArch: "amd64",
+			releaseImage:  &releaseinfo.ReleaseImage{StreamMetadata: nil},
+			expectedErr:   "couldn't resolve stream metadata: no default stream metadata available",
+		},
+		{
+			name:          "When release image is nil it should return error",
+			region:        "us-east-1",
+			specifiedArch: "amd64",
+			releaseImage:  nil,
+			expectedErr:   "release image is nil",
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			g := NewWithT(t)
 
-			other := []client.Object{
-				&corev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{Name: "pull-secret"},
-					Data: map[string][]byte{
-						corev1.DockerConfigJsonKey: nil,
-					},
-				},
-			}
-
-			client := fake.NewClientBuilder().WithObjects(other...).Build()
-			releaseProvider := &fakereleaseprovider.FakeReleaseProvider{}
-			hc := &hyperv1.HostedCluster{
-				Spec: hyperv1.HostedClusterSpec{
-					PullSecret: corev1.LocalObjectReference{
-						Name: "pull-secret",
-					},
-					Release: hyperv1.Release{
-						Image: "image-4.12.0",
-					},
-				},
-			}
-
-			ctx := t.Context()
-			if tc.releaseImage == nil {
-				tc.releaseImage = fakereleaseprovider.GetReleaseImage(ctx, hc, client, releaseProvider)
-			}
-
-			tc.image, tc.err = defaultNodePoolAMI(tc.region, tc.specifiedArch, tc.releaseImage)
-			if strings.Contains(tc.name, "successfully") {
-				g.Expect(tc.image).To(Equal(tc.expectedImage))
-				g.Expect(tc.err).To(BeNil())
-			} else if strings.Contains(tc.name, "fail to pull") {
-				g.Expect(tc.image).To(BeEmpty())
-				g.Expect(tc.err.Error()).To(Equal("couldn't find AWS image for region \"" + tc.region + "\""))
-			} else if strings.Contains(tc.name, "fail because architecture") {
-				g.Expect(tc.image).To(BeEmpty())
-				g.Expect(tc.err.Error()).To(Equal("couldn't find OS metadata for architecture \"" + tc.specifiedArch + "\""))
-			} else if strings.Contains(tc.name, "stream metadata is nil") {
-				g.Expect(tc.image).To(BeEmpty())
-				g.Expect(tc.err.Error()).To(Equal("release image stream metadata is nil"))
+			image, err := defaultNodePoolAMI(tc.region, tc.specifiedArch, tc.rhelStream, tc.releaseImage)
+			if tc.expectedErr != "" {
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(err.Error()).To(Equal(tc.expectedErr))
+				g.Expect(image).To(BeEmpty())
 			} else {
-				g.Expect(tc.image).To(BeEmpty())
-				g.Expect(tc.err.Error()).To(Equal("release image metadata has no image for region \"" + tc.region + "\""))
+				g.Expect(err).ToNot(HaveOccurred())
+				g.Expect(image).To(Equal(tc.expectedImage))
 			}
 		})
 	}
 }
 
 func TestGetHostedClusterVersion(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name                string
 		versionStatus       *hyperv1.ClusterVersionStatus
@@ -647,12 +694,12 @@ func TestGetHostedClusterVersion(t *testing.T) {
 		expectedVersion     string
 	}{
 		{
-			name:                "version history status is empty, should return release image version",
+			name:                "When version history status is empty, it should return release image version",
 			releaseImageVersion: "4.15.0",
 			expectedVersion:     "4.15.0",
 		},
 		{
-			name: "version history status has a completed entry, should return the completed version",
+			name: "When version history status has a completed entry, it should return the completed version",
 			versionStatus: &hyperv1.ClusterVersionStatus{
 				History: []configv1.UpdateHistory{
 					{
@@ -665,7 +712,7 @@ func TestGetHostedClusterVersion(t *testing.T) {
 			expectedVersion:     "4.14.0",
 		},
 		{
-			name: "version history status has no completed entries, should return release image version",
+			name: "When version history status has no completed entries, it should return release image version",
 			versionStatus: &hyperv1.ClusterVersionStatus{
 				History: []configv1.UpdateHistory{
 					{
@@ -678,7 +725,7 @@ func TestGetHostedClusterVersion(t *testing.T) {
 			expectedVersion:     "4.15.0",
 		},
 		{
-			name: "version history status has multiple entries, should return the first completed version",
+			name: "When version history status has multiple entries, it should return the first completed version",
 			versionStatus: &hyperv1.ClusterVersionStatus{
 				History: []configv1.UpdateHistory{
 					{
@@ -698,6 +745,7 @@ func TestGetHostedClusterVersion(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			g := NewWithT(t)
 
 			releaseProvider := &fakereleaseprovider.FakeReleaseProvider{
@@ -723,14 +771,130 @@ func TestGetHostedClusterVersion(t *testing.T) {
 			g.Expect(version).ToNot(BeNil())
 			g.Expect(version.String()).To(Equal(tc.expectedVersion))
 		})
+	}
+}
 
+func TestFindMachineStatusCondition(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		machine       *capiv1.Machine
+		conditionType string
+		expected      *machineConditionResult
+	}{
+		{
+			name: "When condition is False, it should return the condition values",
+			machine: &capiv1.Machine{
+				Status: capiv1.MachineStatus{
+					Conditions: []capiv1.Condition{
+						{
+							Type:    capiv1.ReadyCondition,
+							Status:  corev1.ConditionFalse,
+							Reason:  "InstanceTerminated",
+							Message: "i-0abc123def456 instance is in terminated state",
+						},
+					},
+				},
+			},
+			conditionType: string(capiv1.ReadyCondition),
+			expected: &machineConditionResult{
+				Status:  corev1.ConditionFalse,
+				Reason:  "InstanceTerminated",
+				Message: "i-0abc123def456 instance is in terminated state",
+			},
+		},
+		{
+			name: "When neither has condition, it should return nil",
+			machine: &capiv1.Machine{
+				Status: capiv1.MachineStatus{
+					Conditions: []capiv1.Condition{
+						{
+							Type:   capiv1.InfrastructureReadyCondition,
+							Status: corev1.ConditionTrue,
+						},
+					},
+				},
+			},
+			conditionType: string(capiv1.ReadyCondition),
+			expected:      nil,
+		},
+		{
+			name: "When condition is True, it should return the condition values",
+			machine: &capiv1.Machine{
+				Status: capiv1.MachineStatus{
+					Conditions: []capiv1.Condition{
+						{
+							Type:    capiv1.ReadyCondition,
+							Status:  corev1.ConditionTrue,
+							Reason:  "InstanceProvisionStarted",
+							Message: "started provisioning i-0abc123def456",
+						},
+					},
+				},
+			},
+			conditionType: string(capiv1.ReadyCondition),
+			expected: &machineConditionResult{
+				Status:  corev1.ConditionTrue,
+				Reason:  "InstanceProvisionStarted",
+				Message: "started provisioning i-0abc123def456",
+			},
+		},
+		{
+			name: "When machine has no conditions, it should return nil",
+			machine: &capiv1.Machine{
+				Status: capiv1.MachineStatus{
+					Conditions: []capiv1.Condition{},
+				},
+			},
+			conditionType: string(capiv1.ReadyCondition),
+			expected:      nil,
+		},
+		{
+			name: "When looking up MachineNodeHealthyCondition, it should return matching values",
+			machine: &capiv1.Machine{
+				Status: capiv1.MachineStatus{
+					Conditions: []capiv1.Condition{
+						{
+							Type:   capiv1.ReadyCondition,
+							Status: corev1.ConditionTrue,
+						},
+						{
+							Type:    capiv1.MachineNodeHealthyCondition,
+							Status:  corev1.ConditionFalse,
+							Reason:  capiv1.NodeConditionsFailedReason,
+							Message: "Condition Ready on node is reporting status False",
+						},
+					},
+				},
+			},
+			conditionType: string(capiv1.MachineNodeHealthyCondition),
+			expected: &machineConditionResult{
+				Status:  corev1.ConditionFalse,
+				Reason:  capiv1.NodeConditionsFailedReason,
+				Message: "Condition Ready on node is reporting status False",
+			},
+		},
+	} {
+		t.Run(tc.name, func(tt *testing.T) {
+			g := NewWithT(tt)
+			result := findMachineStatusCondition(tc.machine, tc.conditionType)
+			if tc.expected == nil {
+				g.Expect(result).To(BeNil())
+			} else {
+				g.Expect(result).ToNot(BeNil())
+				g.Expect(result.Status).To(Equal(tc.expected.Status))
+				g.Expect(result.Reason).To(Equal(tc.expected.Reason))
+				g.Expect(result.Message).To(Equal(tc.expected.Message))
+			}
+		})
 	}
 }
 
 type testCondition struct {
-	Status   corev1.ConditionStatus
-	Reason   string
-	Messages []string
+	Status        corev1.ConditionStatus
+	Reason        string
+	Messages      []string
+	MaxMessageLen int // if > 0, assert that len(cond.Message) <= this value
+	MaxReasonLen  int // if > 0, assert that len(cond.Reason) <= this value
 }
 
 func (t *testCondition) Compare(g Gomega, cond *hyperv1.NodePoolCondition) {
@@ -739,14 +903,25 @@ func (t *testCondition) Compare(g Gomega, cond *hyperv1.NodePoolCondition) {
 	}
 
 	g.Expect(cond.Status).To(Equal(t.Status))
-	g.Expect(cond.Reason).To(Equal(t.Reason))
+	if t.Reason != "" {
+		g.Expect(cond.Reason).To(Equal(t.Reason))
+	}
 
 	for _, msg := range t.Messages {
 		g.ExpectWithOffset(1, cond.Message).To(ContainSubstring(msg))
 	}
+
+	if t.MaxMessageLen > 0 {
+		g.ExpectWithOffset(1, len(cond.Message)).To(BeNumerically("<=", t.MaxMessageLen))
+	}
+
+	if t.MaxReasonLen > 0 {
+		g.ExpectWithOffset(1, len(cond.Reason)).To(BeNumerically("<=", t.MaxReasonLen))
+	}
 }
 
 func TestSetMachineAndNodeConditions(t *testing.T) {
+	t.Parallel()
 	g := NewWithT(t)
 	s := runtime.NewScheme()
 	g.Expect(hyperv1.AddToScheme(s)).To(Succeed())
@@ -760,7 +935,7 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 		expectedCIDRCollision *testCondition
 	}{
 		{
-			name:              "no cluster-api machines",
+			name:              "When there are no cluster-api machines, it should set WaitingForMachines condition",
 			machinesGenerator: func() []client.Object { return nil },
 			expectedAllMachine: &testCondition{
 				Status:   corev1.ConditionFalse,
@@ -773,7 +948,7 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 		},
 		{
-			name: "good machines",
+			name: "When all machines are healthy, it should set AllMachinesReady condition",
 			machinesGenerator: func() []client.Object {
 				return []client.Object{
 					&capiv1.Machine{
@@ -788,6 +963,10 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							Conditions: []capiv1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
+									Status: corev1.ConditionTrue,
+								},
+								{
+									Type:   capiv1.MachineNodeHealthyCondition,
 									Status: corev1.ConditionTrue,
 								},
 							},
@@ -807,6 +986,10 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 									Type:   capiv1.ReadyCondition,
 									Status: corev1.ConditionTrue,
 								},
+								{
+									Type:   capiv1.MachineNodeHealthyCondition,
+									Status: corev1.ConditionTrue,
+								},
 							},
 						},
 					},
@@ -824,7 +1007,7 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 		},
 		{
-			name: "no InfrastructureReady condition",
+			name: "When machines have no InfrastructureReady condition, it should report waiting",
 			machinesGenerator: func() []client.Object {
 				return []client.Object{
 					&capiv1.Machine{
@@ -886,12 +1069,12 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 			expectedAllNodes: &testCondition{
 				Status:   corev1.ConditionFalse,
-				Reason:   "TestReasonNode2",
-				Messages: []string{"TestReasonNode1", "TestReasonNode2"},
+				Reason:   "TestReasonNode1,TestReasonNode2",
+				Messages: []string{"2 of 2 machines are not healthy", "Machine node1: TestReasonNode1: test message node 1", "Machine node2: TestReasonNode2: test message node 2"},
 			},
 		},
 		{
-			name: "mix InfrastructureReady condition; setup counter first",
+			name: "When machines have mixed InfrastructureReady conditions with setup counter first, it should report mixed status",
 			machinesGenerator: func() []client.Object {
 				return []client.Object{
 					&capiv1.Machine{
@@ -989,12 +1172,12 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 			expectedAllNodes: &testCondition{
 				Status:   corev1.ConditionFalse,
-				Reason:   "TestReasonNode2",
-				Messages: []string{"TestReasonNode1", "TestReasonNode2"},
+				Reason:   "TestReasonNode1,TestReasonNode2",
+				Messages: []string{"2 of 3 machines are not healthy", "Machine node1: TestReasonNode1: test message node 1", "Machine node2: TestReasonNode2: test message node 2"},
 			},
 		},
 		{
-			name: "mix InfrastructureReady condition; failure text first",
+			name: "When machines have mixed InfrastructureReady conditions with failure text first, it should report mixed status",
 			machinesGenerator: func() []client.Object {
 				return []client.Object{
 					&capiv1.Machine{
@@ -1092,12 +1275,12 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 			expectedAllNodes: &testCondition{
 				Status:   corev1.ConditionFalse,
-				Reason:   "TestReasonNode2",
-				Messages: []string{"TestReasonNode1", "TestReasonNode2"},
+				Reason:   "TestReasonNode1,TestReasonNode2",
+				Messages: []string{"2 of 3 machines are not healthy", "Machine node1: TestReasonNode1: test message node 1", "Machine node2: TestReasonNode2: test message node 2"},
 			},
 		},
 		{
-			name: "too many not ready machines",
+			name: "When too many machines are not ready, it should truncate the message",
 			machinesGenerator: func() []client.Object {
 				longMessage := strings.Repeat("msg ", 50)
 
@@ -1215,7 +1398,7 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 			},
 		},
 		{
-			name: "machine cidr collision",
+			name: "When machine has cidr collision, it should report the collision",
 			machinesGenerator: func() []client.Object {
 				return []client.Object{
 					&capiv1.Machine{
@@ -1230,6 +1413,10 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							Conditions: []capiv1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
+									Status: corev1.ConditionTrue,
+								},
+								{
+									Type:   capiv1.MachineNodeHealthyCondition,
 									Status: corev1.ConditionTrue,
 								},
 							},
@@ -1253,6 +1440,10 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 							Conditions: []capiv1.Condition{
 								{
 									Type:   capiv1.ReadyCondition,
+									Status: corev1.ConditionTrue,
+								},
+								{
+									Type:   capiv1.MachineNodeHealthyCondition,
 									Status: corev1.ConditionTrue,
 								},
 							},
@@ -1284,6 +1475,686 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 					"machine [node2] with ip [10.10.10.6] collides with cluster-network cidr [10.10.10.0/14]",
 				},
 			},
+		},
+		{
+			name: "When machines have no NodeHealthy condition it should report WaitingForNodeRef",
+			machinesGenerator: func() []client.Object {
+				return []client.Object{
+					&capiv1.Machine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "node1",
+							Namespace: "myns-cluster-name",
+							Annotations: map[string]string{
+								nodePoolAnnotation: "myns/np-name",
+							},
+						},
+						Status: capiv1.MachineStatus{
+							Conditions: []capiv1.Condition{
+								{
+									Type:   capiv1.ReadyCondition,
+									Status: corev1.ConditionTrue,
+								},
+							},
+						},
+					},
+				}
+			},
+			expectedAllMachine: &testCondition{
+				Status:   corev1.ConditionTrue,
+				Reason:   hyperv1.AsExpectedReason,
+				Messages: []string{hyperv1.AllIsWellMessage},
+			},
+			expectedAllNodes: &testCondition{
+				Status:   corev1.ConditionFalse,
+				Reason:   capiv1.WaitingForNodeRefReason,
+				Messages: []string{"1 of 1 machines are not healthy", "Machine node1: WaitingForNodeRef"},
+			},
+		},
+		{
+			name: "When machines have no Ready condition it should report WaitingForInfrastructure",
+			machinesGenerator: func() []client.Object {
+				return []client.Object{
+					&capiv1.Machine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "node1",
+							Namespace: "myns-cluster-name",
+							Annotations: map[string]string{
+								nodePoolAnnotation: "myns/np-name",
+							},
+						},
+						Status: capiv1.MachineStatus{
+							Conditions: []capiv1.Condition{
+								{
+									Type:   capiv1.MachineNodeHealthyCondition,
+									Status: corev1.ConditionTrue,
+								},
+							},
+						},
+					},
+				}
+			},
+			expectedAllMachine: &testCondition{
+				Status:   corev1.ConditionFalse,
+				Reason:   capiv1.WaitingForInfrastructureFallbackReason,
+				Messages: []string{"1 of 1 machines are not ready", "Machine node1: WaitingForInfrastructure"},
+			},
+			expectedAllNodes: &testCondition{
+				Status:   corev1.ConditionTrue,
+				Reason:   hyperv1.AsExpectedReason,
+				Messages: []string{hyperv1.AllIsWellMessage},
+			},
+		},
+		{
+			name: "When machine has NodeHealthy False with empty message it should report reason only",
+			machinesGenerator: func() []client.Object {
+				return []client.Object{
+					&capiv1.Machine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "node1",
+							Namespace: "myns-cluster-name",
+							Annotations: map[string]string{
+								nodePoolAnnotation: "myns/np-name",
+							},
+						},
+						Status: capiv1.MachineStatus{
+							Conditions: []capiv1.Condition{
+								{
+									Type:   capiv1.ReadyCondition,
+									Status: corev1.ConditionTrue,
+								},
+								{
+									Type:   capiv1.MachineNodeHealthyCondition,
+									Status: corev1.ConditionFalse,
+									Reason: capiv1.NodeProvisioningReason,
+								},
+							},
+						},
+					},
+				}
+			},
+			expectedAllMachine: &testCondition{
+				Status:   corev1.ConditionTrue,
+				Reason:   hyperv1.AsExpectedReason,
+				Messages: []string{hyperv1.AllIsWellMessage},
+			},
+			expectedAllNodes: &testCondition{
+				Status:   corev1.ConditionFalse,
+				Reason:   capiv1.NodeProvisioningReason,
+				Messages: []string{"1 of 1 machines are not healthy", "Machine node1: " + capiv1.NodeProvisioningReason},
+			},
+		},
+		{
+			name: "When machines mix nil and False NodeHealthy it should aggregate both",
+			machinesGenerator: func() []client.Object {
+				return []client.Object{
+					&capiv1.Machine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "node1",
+							Namespace: "myns-cluster-name",
+							Annotations: map[string]string{
+								nodePoolAnnotation: "myns/np-name",
+							},
+						},
+						Status: capiv1.MachineStatus{
+							Conditions: []capiv1.Condition{
+								{
+									Type:   capiv1.ReadyCondition,
+									Status: corev1.ConditionTrue,
+								},
+							},
+						},
+					},
+					&capiv1.Machine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "node2",
+							Namespace: "myns-cluster-name",
+							Annotations: map[string]string{
+								nodePoolAnnotation: "myns/np-name",
+							},
+						},
+						Status: capiv1.MachineStatus{
+							Conditions: []capiv1.Condition{
+								{
+									Type:   capiv1.ReadyCondition,
+									Status: corev1.ConditionTrue,
+								},
+								{
+									Type:    capiv1.MachineNodeHealthyCondition,
+									Status:  corev1.ConditionFalse,
+									Reason:  capiv1.NodeConditionsFailedReason,
+									Message: "Condition Ready on node is reporting status False",
+								},
+							},
+						},
+					},
+					&capiv1.Machine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "node3",
+							Namespace: "myns-cluster-name",
+							Annotations: map[string]string{
+								nodePoolAnnotation: "myns/np-name",
+							},
+						},
+						Status: capiv1.MachineStatus{
+							Conditions: []capiv1.Condition{
+								{
+									Type:   capiv1.ReadyCondition,
+									Status: corev1.ConditionTrue,
+								},
+								{
+									Type:   capiv1.MachineNodeHealthyCondition,
+									Status: corev1.ConditionTrue,
+								},
+							},
+						},
+					},
+				}
+			},
+			expectedAllMachine: &testCondition{
+				Status:   corev1.ConditionTrue,
+				Reason:   hyperv1.AsExpectedReason,
+				Messages: []string{hyperv1.AllIsWellMessage},
+			},
+			expectedAllNodes: &testCondition{
+				Status:   corev1.ConditionFalse,
+				Reason:   capiv1.NodeConditionsFailedReason + "," + capiv1.WaitingForNodeRefReason,
+				Messages: []string{"2 of 3 machines are not healthy", "Machine node1: WaitingForNodeRef", "Machine node2: " + capiv1.NodeConditionsFailedReason + ": Condition Ready on node is reporting status False"},
+			},
+		},
+		{
+			name: "When machine has Ready False with non-counter message and no InfraReady it should include message",
+			machinesGenerator: func() []client.Object {
+				return []client.Object{
+					&capiv1.Machine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "node1",
+							Namespace: "myns-cluster-name",
+							Annotations: map[string]string{
+								nodePoolAnnotation: "myns/np-name",
+							},
+						},
+						Status: capiv1.MachineStatus{
+							Conditions: []capiv1.Condition{
+								{
+									Type:    capiv1.ReadyCondition,
+									Status:  corev1.ConditionFalse,
+									Reason:  "InstanceTerminated",
+									Message: "i-0abc123def456 instance is in terminated state",
+								},
+								{
+									Type:   capiv1.MachineNodeHealthyCondition,
+									Status: corev1.ConditionTrue,
+								},
+							},
+						},
+					},
+				}
+			},
+			expectedAllMachine: &testCondition{
+				Status:   corev1.ConditionFalse,
+				Reason:   "InstanceTerminated",
+				Messages: []string{"1 of 1 machines are not ready", "Machine node1: InstanceTerminated: i-0abc123def456 instance is in terminated state"},
+			},
+			expectedAllNodes: &testCondition{
+				Status:   corev1.ConditionTrue,
+				Reason:   hyperv1.AsExpectedReason,
+				Messages: []string{hyperv1.AllIsWellMessage},
+			},
+		},
+		{
+			name: "When machine has Ready False with setup-counter message and no InfraReady it should omit message",
+			machinesGenerator: func() []client.Object {
+				return []client.Object{
+					&capiv1.Machine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "node1",
+							Namespace: "myns-cluster-name",
+							Annotations: map[string]string{
+								nodePoolAnnotation: "myns/np-name",
+							},
+						},
+						Status: capiv1.MachineStatus{
+							Conditions: []capiv1.Condition{
+								{
+									Type:    capiv1.ReadyCondition,
+									Status:  corev1.ConditionFalse,
+									Reason:  "InstanceProvisionStarted",
+									Message: "3 of 7 completed",
+								},
+								{
+									Type:   capiv1.MachineNodeHealthyCondition,
+									Status: corev1.ConditionTrue,
+								},
+							},
+						},
+					},
+				}
+			},
+			expectedAllMachine: &testCondition{
+				Status:   corev1.ConditionFalse,
+				Reason:   "InstanceProvisionStarted",
+				Messages: []string{"1 of 1 machines are not ready", "Machine node1: InstanceProvisionStarted"},
+			},
+			expectedAllNodes: &testCondition{
+				Status:   corev1.ConditionTrue,
+				Reason:   hyperv1.AsExpectedReason,
+				Messages: []string{hyperv1.AllIsWellMessage},
+			},
+		},
+		{
+			name: "When machines mix nil and False Ready conditions it should aggregate both",
+			machinesGenerator: func() []client.Object {
+				return []client.Object{
+					&capiv1.Machine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "node1",
+							Namespace: "myns-cluster-name",
+							Annotations: map[string]string{
+								nodePoolAnnotation: "myns/np-name",
+							},
+						},
+						Status: capiv1.MachineStatus{
+							Conditions: []capiv1.Condition{
+								{
+									Type:   capiv1.MachineNodeHealthyCondition,
+									Status: corev1.ConditionTrue,
+								},
+							},
+						},
+					},
+					&capiv1.Machine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "node2",
+							Namespace: "myns-cluster-name",
+							Annotations: map[string]string{
+								nodePoolAnnotation: "myns/np-name",
+							},
+						},
+						Status: capiv1.MachineStatus{
+							Conditions: []capiv1.Condition{
+								{
+									Type:    capiv1.ReadyCondition,
+									Status:  corev1.ConditionFalse,
+									Reason:  capiv1.MachineHasFailureReason,
+									Message: "Machine has FailureMessage: i-0abc123def456 is in terminated state",
+								},
+								{
+									Type:   capiv1.MachineNodeHealthyCondition,
+									Status: corev1.ConditionTrue,
+								},
+							},
+						},
+					},
+				}
+			},
+			expectedAllMachine: &testCondition{
+				Status:   corev1.ConditionFalse,
+				Reason:   capiv1.MachineHasFailureReason + "," + capiv1.WaitingForInfrastructureFallbackReason,
+				Messages: []string{"2 of 2 machines are not ready", "Machine node1: WaitingForInfrastructure", "Machine node2: " + capiv1.MachineHasFailureReason + ": Machine has FailureMessage: i-0abc123def456 is in terminated state"},
+			},
+			expectedAllNodes: &testCondition{
+				Status:   corev1.ConditionTrue,
+				Reason:   hyperv1.AsExpectedReason,
+				Messages: []string{hyperv1.AllIsWellMessage},
+			},
+		},
+		{
+			name: "When many machines fail across many reasons it should truncate global message",
+			machinesGenerator: func() []client.Object {
+				longMsg := strings.Repeat("x", 80)
+				// Create 10 distinct reasons with 20 machines each = 200 failing machines.
+				// Each per-reason block can reach ~1000 chars, and 10 blocks would produce
+				// ~10000 chars total, well above maxGlobalMessageLength (3000).
+				numReasons := 10
+				machinesPerReason := 20
+				total := numReasons * machinesPerReason
+				machines := make([]client.Object, total)
+				for r := range numReasons {
+					for m := range machinesPerReason {
+						idx := r*machinesPerReason + m
+						machines[idx] = &capiv1.Machine{
+							ObjectMeta: metav1.ObjectMeta{
+								Name:      fmt.Sprintf("node-%d-%d", r, m),
+								Namespace: "myns-cluster-name",
+								Annotations: map[string]string{
+									nodePoolAnnotation: "myns/np-name",
+								},
+							},
+							Status: capiv1.MachineStatus{
+								Conditions: []capiv1.Condition{
+									{
+										Type:    capiv1.ReadyCondition,
+										Status:  corev1.ConditionFalse,
+										Reason:  fmt.Sprintf("Reason%02d", r),
+										Message: longMsg,
+									},
+									{
+										Type:    capiv1.MachineNodeHealthyCondition,
+										Status:  corev1.ConditionFalse,
+										Reason:  fmt.Sprintf("Reason%02d", r),
+										Message: longMsg,
+									},
+								},
+							},
+						}
+					}
+				}
+				return machines
+			},
+			expectedAllMachine: &testCondition{
+				Status:        corev1.ConditionFalse,
+				Messages:      []string{"200 of 200 machines are not ready", endOfGlobalMessage},
+				MaxMessageLen: maxGlobalMessageLength,
+			},
+			expectedAllNodes: &testCondition{
+				Status:        corev1.ConditionFalse,
+				Messages:      []string{"200 of 200 machines are not healthy", endOfGlobalMessage},
+				MaxMessageLen: maxGlobalMessageLength,
+			},
+		},
+		{
+			name: "When machines fail with many distinct reasons it should truncate the reason field to fit MaxLength=1024",
+			machinesGenerator: func() []client.Object {
+				// Use real CAPI v1beta1 condition reasons plus realistic cloud-provider reasons.
+				// 48 distinct reasons produce a comma-joined string of ~1033 chars, exceeding
+				// the NodePoolCondition.Reason MaxLength=1024 validation limit.
+				failureReasons := []struct {
+					reason  string
+					message string
+				}{
+					{capiv1.WaitingForInfrastructureFallbackReason, ""},
+					{capiv1.MachineHasFailureReason, "Machine has FailureReason: InsufficientCapacity"},
+					{capiv1.DeletingReason, "Waiting for machine volumes to be detached"},
+					{capiv1.DeletionFailedReason, "failed to delete machine"},
+					{capiv1.DrainingReason, "Draining node node-4"},
+					{capiv1.DrainingFailedReason, "failed to drain node: cannot evict pod"},
+					{capiv1.WaitingForVolumeDetachReason, "Waiting for 2 volumes to be detached"},
+					{capiv1.WaitingExternalHookReason, "Waiting for external hook to complete"},
+					{capiv1.PreflightCheckFailedReason, "Machine pre-flight checks failed"},
+					{capiv1.MachineCreationFailedReason, "failed to create machine: quota exceeded"},
+					{capiv1.ScalingUpReason, "Scaling up to 10 replicas"},
+					{capiv1.ScalingDownReason, "Scaling down to 5 replicas"},
+					{capiv1.WaitingForDataSecretFallbackReason, ""},
+					{capiv1.WaitingForControlPlaneFallbackReason, ""},
+					{capiv1.WaitingForControlPlaneAvailableReason, "Control plane is not available"},
+					{capiv1.BootstrapTemplateCloningFailedReason, "failed to clone bootstrap template"},
+					{capiv1.InfrastructureTemplateCloningFailedReason, "failed to clone infrastructure template"},
+					{capiv1.IncorrectExternalRefReason, "external ref is incorrect"},
+					{capiv1.RemediationFailedReason, "remediation failed"},
+					{capiv1.RemediationInProgressReason, "remediation in progress for node-18"},
+					{capiv1.WaitingForRemediationReason, "waiting for remediation to complete"},
+					{capiv1.NodeStartupTimeoutReason, "Node failed to report NodeReady condition within 20m0s"},
+					{capiv1.WaitingForNodeRefReason, ""},
+					{capiv1.NodeProvisioningReason, "Node is provisioning"},
+					{capiv1.NodeNotFoundReason, "node not found in cluster"},
+					{capiv1.NodeConditionsFailedReason, "Condition Ready on node is reporting status False"},
+					{capiv1.NodeInspectionFailedReason, "failed to inspect node"},
+					{capiv1.UnhealthyNodeConditionReason, "Node condition ReadonlyFilesystem is True"},
+					{capiv1.HasRemediateMachineAnnotationReason, "machine has remediate annotation"},
+					{capiv1.TooManyUnhealthyReason, "too many unhealthy machines: 10 of 20"},
+					{capiv1.ExternalRemediationTemplateNotFoundReason, "external remediation template not found"},
+					{capiv1.ExternalRemediationRequestCreationFailedReason, "failed to create external remediation request"},
+					{capiv1.WaitingForControlPlaneProviderInitializedReason, "control plane provider is not initialized"},
+					{capiv1.MissingNodeRefReason, "machine does not have a node ref"},
+					// Realistic cloud-provider reasons (CAPA/CAPZ) — already used in existing tests.
+					{"InstanceTerminated", "i-0abc123def456 instance is in terminated state"},
+					{"InstanceProvisionFailed", "failed to create instance: InsufficientInstanceCapacity"},
+					{"InstanceProvisionStarted", "3 of 7 completed"},
+					{"InsufficientCapacity", "not enough capacity in az us-east-1a"},
+					{"SubnetExhausted", "no available IPs in subnet-0abc123"},
+					{"SecurityGroupNotFound", "security group sg-0abc123 not found"},
+					{"AMINotFound", "AMI ami-0abc123 not found"},
+					{"VPCNotAvailable", "VPC vpc-0abc123 is not available"},
+					{"LaunchTemplateFailed", "failed to create launch template"},
+					{"SpotInstanceTerminated", "spot instance i-0abc123 was terminated"},
+					{"NetworkInterfaceLimitExceeded", "ENI limit reached for instance type m5.xlarge"},
+					{"EBSVolumeLimitExceeded", "EBS volume limit exceeded in us-east-1a"},
+					{"InsufficientInstanceCapacity", "not enough m5.xlarge capacity in us-east-1b"},
+					{"UnsupportedInstanceType", "instance type m5.metal not supported in us-east-1c"},
+				}
+
+				machines := make([]client.Object, len(failureReasons))
+				for i, fr := range failureReasons {
+					machines[i] = &capiv1.Machine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      fmt.Sprintf("machine-%d", i),
+							Namespace: "myns-cluster-name",
+							Annotations: map[string]string{
+								nodePoolAnnotation: "myns/np-name",
+							},
+						},
+						Status: capiv1.MachineStatus{
+							Conditions: []capiv1.Condition{
+								{
+									Type:    capiv1.ReadyCondition,
+									Status:  corev1.ConditionFalse,
+									Reason:  fr.reason,
+									Message: fr.message,
+								},
+								{
+									Type:    capiv1.MachineNodeHealthyCondition,
+									Status:  corev1.ConditionFalse,
+									Reason:  fr.reason,
+									Message: fr.message,
+								},
+							},
+						},
+					}
+				}
+				return machines
+			},
+			expectedAllMachine: &testCondition{
+				Status:       corev1.ConditionFalse,
+				MaxReasonLen: maxReasonLength,
+				Messages:     []string{fmt.Sprintf("%d of %d machines are not ready", 48, 48)},
+			},
+			expectedAllNodes: &testCondition{
+				Status:       corev1.ConditionFalse,
+				MaxReasonLen: maxReasonLength,
+				Messages:     []string{fmt.Sprintf("%d of %d machines are not healthy", 48, 48)},
+			},
+		},
+		{
+			name: "When 10 of 20 machines are not ready with different reasons it should aggregate correctly",
+			machinesGenerator: func() []client.Object {
+				machines := make([]client.Object, 20)
+				// Use real CAPI v1beta1 and AWS CAPA reasons with realistic messages.
+				failureReasons := []struct {
+					reason  string
+					message string
+				}{
+					{capiv1.NodeStartupTimeoutReason, "Node failed to report NodeReady condition within 20m0s"},
+					{capiv1.NodeStartupTimeoutReason, "Node failed to report NodeReady condition within 20m0s"},
+					{capiv1.MachineHasFailureReason, "Machine has FailureReason: InsufficientCapacity"},
+					{capiv1.MachineHasFailureReason, "Machine has FailureMessage: i-0abc123def456 is in terminated state"},
+					{"InstanceTerminated", "i-0abc123def456 instance is in terminated state"},
+					{"InstanceTerminated", "i-0def456abc789 instance is in terminated state"},
+					{"InstanceProvisionFailed", "failed to create instance: InsufficientInstanceCapacity: We currently do not have sufficient capacity in the Availability Zone you requested"},
+					{"InstanceProvisionFailed", "failed to create instance: Unsupported: The requested configuration is currently not supported"},
+					{capiv1.WaitingForInfrastructureFallbackReason, ""},
+					{capiv1.WaitingForInfrastructureFallbackReason, ""},
+				}
+				for i := range 10 {
+					machines[i] = &capiv1.Machine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      fmt.Sprintf("failing-node-%d", i),
+							Namespace: "myns-cluster-name",
+							Annotations: map[string]string{
+								nodePoolAnnotation: "myns/np-name",
+							},
+						},
+						Status: capiv1.MachineStatus{
+							Conditions: []capiv1.Condition{
+								{
+									Type:    capiv1.ReadyCondition,
+									Status:  corev1.ConditionFalse,
+									Reason:  failureReasons[i].reason,
+									Message: failureReasons[i].message,
+								},
+								{
+									Type:   capiv1.MachineNodeHealthyCondition,
+									Status: corev1.ConditionTrue,
+								},
+							},
+						},
+					}
+				}
+				for i := range 10 {
+					machines[10+i] = &capiv1.Machine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      fmt.Sprintf("healthy-node-%d", i),
+							Namespace: "myns-cluster-name",
+							Annotations: map[string]string{
+								nodePoolAnnotation: "myns/np-name",
+							},
+						},
+						Status: capiv1.MachineStatus{
+							Conditions: []capiv1.Condition{
+								{
+									Type:   capiv1.ReadyCondition,
+									Status: corev1.ConditionTrue,
+								},
+								{
+									Type:   capiv1.MachineNodeHealthyCondition,
+									Status: corev1.ConditionTrue,
+								},
+							},
+						},
+					}
+				}
+				return machines
+			},
+			expectedAllMachine: &testCondition{
+				Status: corev1.ConditionFalse,
+				Reason: "InstanceProvisionFailed,InstanceTerminated,MachineHasFailure,NodeStartupTimeout,WaitingForInfrastructure",
+				Messages: []string{
+					"10 of 20 machines are not ready",
+					"Machine failing-node-0: NodeStartupTimeout: Node failed to report NodeReady condition within 20m0s",
+					"Machine failing-node-2: MachineHasFailure: Machine has FailureReason: InsufficientCapacity",
+					"Machine failing-node-4: InstanceTerminated: i-0abc123def456 instance is in terminated state",
+					"Machine failing-node-6: InstanceProvisionFailed: failed to create instance: InsufficientInstanceCapacity",
+					"Machine failing-node-8: WaitingForInfrastructure",
+				},
+			},
+			expectedAllNodes: &testCondition{
+				Status:   corev1.ConditionTrue,
+				Reason:   hyperv1.AsExpectedReason,
+				Messages: []string{hyperv1.AllIsWellMessage},
+			},
+		},
+		{
+			name: "When machine has addresses both inside and outside cluster network it should not report cidr collision",
+			machinesGenerator: func() []client.Object {
+				return []client.Object{
+					&capiv1.Machine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "node1",
+							Namespace: "myns-cluster-name",
+							Annotations: map[string]string{
+								nodePoolAnnotation: "myns/np-name",
+							},
+						},
+						Status: capiv1.MachineStatus{
+							Conditions: []capiv1.Condition{
+								{
+									Type:   capiv1.ReadyCondition,
+									Status: corev1.ConditionTrue,
+								},
+								{
+									Type:   capiv1.MachineNodeHealthyCondition,
+									Status: corev1.ConditionTrue,
+								},
+							},
+							Addresses: capiv1.MachineAddresses{
+								{
+									Type:    capiv1.MachineInternalIP,
+									Address: "192.168.1.10",
+								},
+								{
+									Type:    capiv1.MachineExternalIP,
+									Address: "192.168.1.10",
+								},
+								{
+									Type:    capiv1.MachineInternalIP,
+									Address: "10.10.10.2",
+								},
+								{
+									Type:    capiv1.MachineExternalIP,
+									Address: "10.10.10.2",
+								},
+							},
+						},
+					},
+				}
+			},
+			expectedAllMachine: &testCondition{
+				Status:   corev1.ConditionTrue,
+				Reason:   hyperv1.AsExpectedReason,
+				Messages: []string{hyperv1.AllIsWellMessage},
+			},
+			expectedAllNodes: &testCondition{
+				Status:   corev1.ConditionTrue,
+				Reason:   hyperv1.AsExpectedReason,
+				Messages: []string{hyperv1.AllIsWellMessage},
+			},
+			expectedCIDRCollision: nil,
+		},
+		{
+			name: "When machine has out-of-cluster address alongside link-local and in-cluster addresses it should not report cidr collision",
+			machinesGenerator: func() []client.Object {
+				return []client.Object{
+					&capiv1.Machine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "node1",
+							Namespace: "myns-cluster-name",
+							Annotations: map[string]string{
+								nodePoolAnnotation: "myns/np-name",
+							},
+						},
+						Status: capiv1.MachineStatus{
+							Conditions: []capiv1.Condition{
+								{
+									Type:   capiv1.ReadyCondition,
+									Status: corev1.ConditionTrue,
+								},
+								{
+									Type:   capiv1.MachineNodeHealthyCondition,
+									Status: corev1.ConditionTrue,
+								},
+							},
+							Addresses: capiv1.MachineAddresses{
+								{
+									Type:    capiv1.MachineInternalIP,
+									Address: "192.168.1.10",
+								},
+								{
+									Type:    capiv1.MachineInternalIP,
+									Address: "169.254.0.2",
+								},
+								{
+									Type:    capiv1.MachineInternalIP,
+									Address: "fe80::1",
+								},
+								{
+									Type:    capiv1.MachineInternalIP,
+									Address: "10.10.10.2",
+								},
+							},
+						},
+					},
+				}
+			},
+			expectedAllMachine: &testCondition{
+				Status:   corev1.ConditionTrue,
+				Reason:   hyperv1.AsExpectedReason,
+				Messages: []string{hyperv1.AllIsWellMessage},
+			},
+			expectedAllNodes: &testCondition{
+				Status:   corev1.ConditionTrue,
+				Reason:   hyperv1.AsExpectedReason,
+				Messages: []string{hyperv1.AllIsWellMessage},
+			},
+			expectedCIDRCollision: nil,
 		},
 	} {
 		t.Run(tc.name, func(tt *testing.T) {
@@ -1329,7 +2200,524 @@ func TestSetMachineAndNodeConditions(t *testing.T) {
 				gg.Expect(cond).ToNot(BeNil())
 				tc.expectedCIDRCollision.Compare(gg, cond)
 			}
+		})
+	}
+}
 
+func TestTruncateReasons(t *testing.T) {
+	g := NewWithT(t)
+
+	for _, tc := range []struct {
+		name           string
+		reasons        []string
+		expectSuffix   string
+		expectMaxLen   int
+		expectExactLen int // if > 0, expect exact length
+	}{
+		{
+			name:         "When reasons fit within limit it should return them unchanged",
+			reasons:      []string{capiv1.MachineHasFailureReason, capiv1.NodeConditionsFailedReason, capiv1.WaitingForNodeRefReason},
+			expectSuffix: capiv1.WaitingForNodeRefReason,
+			expectMaxLen: maxReasonLength,
+		},
+		{
+			name:         "When a single reason fits within limit it should return it unchanged",
+			reasons:      []string{capiv1.ExternalRemediationRequestCreationFailedReason},
+			expectSuffix: capiv1.ExternalRemediationRequestCreationFailedReason,
+			expectMaxLen: maxReasonLength,
+		},
+		{
+			name:           "When empty reasons it should return empty string",
+			reasons:        []string{},
+			expectExactLen: 0,
+		},
+		{
+			name: "When many CAPI reasons exceed limit it should truncate with ReasonsTruncated suffix",
+			reasons: []string{
+				capiv1.WaitingForInfrastructureFallbackReason,
+				capiv1.MachineHasFailureReason,
+				capiv1.DeletingReason,
+				capiv1.DeletionFailedReason,
+				capiv1.DrainingReason,
+				capiv1.DrainingFailedReason,
+				capiv1.WaitingForVolumeDetachReason,
+				capiv1.WaitingExternalHookReason,
+				capiv1.PreflightCheckFailedReason,
+				capiv1.MachineCreationFailedReason,
+				capiv1.ScalingUpReason,
+				capiv1.ScalingDownReason,
+				capiv1.WaitingForDataSecretFallbackReason,
+				capiv1.WaitingForControlPlaneFallbackReason,
+				capiv1.WaitingForControlPlaneAvailableReason,
+				capiv1.BootstrapTemplateCloningFailedReason,
+				capiv1.InfrastructureTemplateCloningFailedReason,
+				capiv1.IncorrectExternalRefReason,
+				capiv1.RemediationFailedReason,
+				capiv1.RemediationInProgressReason,
+				capiv1.WaitingForRemediationReason,
+				capiv1.NodeStartupTimeoutReason,
+				capiv1.WaitingForNodeRefReason,
+				capiv1.NodeProvisioningReason,
+				capiv1.NodeNotFoundReason,
+				capiv1.NodeConditionsFailedReason,
+				capiv1.NodeInspectionFailedReason,
+				capiv1.UnhealthyNodeConditionReason,
+				capiv1.HasRemediateMachineAnnotationReason,
+				capiv1.TooManyUnhealthyReason,
+				capiv1.ExternalRemediationTemplateNotFoundReason,
+				capiv1.ExternalRemediationRequestCreationFailedReason,
+				capiv1.WaitingForControlPlaneProviderInitializedReason,
+				capiv1.MissingNodeRefReason,
+				// Realistic cloud-provider reasons (CAPA/CAPZ).
+				"InstanceTerminated",
+				"InstanceProvisionFailed",
+				"InstanceProvisionStarted",
+				"InsufficientCapacity",
+				"SubnetExhausted",
+				"SecurityGroupNotFound",
+				"AMINotFound",
+				"VPCNotAvailable",
+				"LaunchTemplateFailed",
+				"SpotInstanceTerminated",
+				"NetworkInterfaceLimitExceeded",
+				"EBSVolumeLimitExceeded",
+				"InsufficientInstanceCapacity",
+				"UnsupportedInstanceType",
+			},
+			expectSuffix: endOfReasons,
+			expectMaxLen: maxReasonLength,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := truncateReasons(tc.reasons)
+
+			if tc.expectMaxLen > 0 {
+				g.Expect(len(result)).To(BeNumerically("<=", tc.expectMaxLen),
+					"reason length %d exceeds max %d: %s", len(result), tc.expectMaxLen, result)
+			}
+			if tc.expectExactLen > 0 {
+				g.Expect(len(result)).To(Equal(tc.expectExactLen))
+			}
+			if tc.expectSuffix != "" {
+				g.Expect(result).To(HaveSuffix(tc.expectSuffix))
+			}
+		})
+	}
+}
+
+func TestAggregateMachineMessages(t *testing.T) {
+	shortMsg := "machine is unhealthy\n"
+	// Build a message that is exactly (1000 - len(shortMsg)) chars so the total is exactly 1000.
+	padLen := maxMessageLength - len(shortMsg)
+	paddedMsg := strings.Repeat("x", padLen-1) + "\n"
+
+	for _, tc := range []struct {
+		name   string
+		msgs   []string
+		expect string
+	}{
+		{
+			name:   "When input is nil it should return empty string",
+			msgs:   nil,
+			expect: "",
+		},
+		{
+			name:   "When input is empty it should return empty string",
+			msgs:   []string{},
+			expect: "",
+		},
+		{
+			name:   "When a single short message is given it should return it verbatim",
+			msgs:   []string{shortMsg},
+			expect: shortMsg,
+		},
+		{
+			name:   "When multiple messages fit within limit it should return them all concatenated",
+			msgs:   []string{"error one\n", "error two\n", "error three\n"},
+			expect: "error one\nerror two\nerror three\n",
+		},
+		{
+			name:   "When messages exactly hit the 1000-char boundary it should include all without truncation",
+			msgs:   []string{paddedMsg, shortMsg},
+			expect: paddedMsg + shortMsg,
+		},
+		{
+			name:   "When messages exceed the 1000-char limit it should truncate and append suffix",
+			msgs:   []string{paddedMsg, shortMsg, "this overflows\n"},
+			expect: paddedMsg + shortMsg + endOfMessage,
+		},
+		{
+			name:   "When a single message is exactly maxMessageLength it should be included",
+			msgs:   []string{strings.Repeat("z", maxMessageLength)},
+			expect: strings.Repeat("z", maxMessageLength),
+		},
+		{
+			name:   "When a single message exceeds the limit it should return only the truncation suffix",
+			msgs:   []string{strings.Repeat("a", maxMessageLength+1)},
+			expect: endOfMessage,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+			result := aggregateMachineMessages(tc.msgs)
+			g.Expect(result).To(Equal(tc.expect))
+		})
+	}
+}
+
+func TestAggregateMachineReasonsAndMessages(t *testing.T) {
+	g := NewWithT(t)
+
+	for _, tc := range []struct {
+		name              string
+		messageMap        map[string][]string
+		numMachines       int
+		numNotReady       int
+		state             string
+		expectReason      string
+		expectMessages    []string
+		expectNotContains []string
+		expectMaxMsgLen   int
+	}{
+		{
+			name: "When a single machine fails it should return its reason and message",
+			messageMap: map[string][]string{
+				capiv1.NodeConditionsFailedReason: {
+					"Machine machine-0: NodeConditionsFailed: Condition Ready on node is reporting status False\n",
+				},
+			},
+			numMachines:    3,
+			numNotReady:    1,
+			state:          aggregatorMachineStateHealthy,
+			expectReason:   capiv1.NodeConditionsFailedReason,
+			expectMessages: []string{"1 of 3 machines are not healthy", "Machine machine-0: NodeConditionsFailed: Condition Ready on node is reporting status False"},
+		},
+		{
+			name: "When machines fail with two reasons it should join reasons with comma",
+			messageMap: map[string][]string{
+				capiv1.MachineHasFailureReason: {
+					"Machine machine-0: MachineHasFailure: Machine has FailureReason: InsufficientCapacity\n",
+				},
+				capiv1.WaitingForInfrastructureFallbackReason: {
+					"Machine machine-1: WaitingForInfrastructure\n",
+				},
+			},
+			numMachines:    5,
+			numNotReady:    2,
+			state:          aggregatorMachineStateReady,
+			expectReason:   capiv1.MachineHasFailureReason + "," + capiv1.WaitingForInfrastructureFallbackReason,
+			expectMessages: []string{"2 of 5 machines are not ready", "Machine machine-0: MachineHasFailure", "Machine machine-1: WaitingForInfrastructure"},
+		},
+		{
+			name: "When many machines share one reason it should truncate per-reason messages",
+			messageMap: func() map[string][]string {
+				msgs := make([]string, 30)
+				for i := range 30 {
+					msgs[i] = fmt.Sprintf("Machine machine-%d: MachineHasFailure: Machine has FailureMessage: i-%012d is in terminated state\n", i, i)
+				}
+				return map[string][]string{
+					capiv1.MachineHasFailureReason: msgs,
+				}
+			}(),
+			numMachines:    30,
+			numNotReady:    30,
+			state:          aggregatorMachineStateReady,
+			expectReason:   capiv1.MachineHasFailureReason,
+			expectMessages: []string{"30 of 30 machines are not ready", "Machine machine-0: MachineHasFailure", endOfMessage},
+		},
+		{
+			name: "When many reasons produce large message blocks it should truncate global message",
+			messageMap: func() map[string][]string {
+				m := make(map[string][]string)
+				// 10 distinct reasons, each with 20 machines producing ~1000 char blocks.
+				reasons := []string{
+					capiv1.MachineHasFailureReason,
+					capiv1.NodeConditionsFailedReason,
+					capiv1.WaitingForInfrastructureFallbackReason,
+					capiv1.DeletingReason,
+					capiv1.DrainingReason,
+					capiv1.NodeStartupTimeoutReason,
+					capiv1.WaitingForNodeRefReason,
+					capiv1.RemediationInProgressReason,
+					capiv1.PreflightCheckFailedReason,
+					capiv1.MachineCreationFailedReason,
+				}
+				longMsg := strings.Repeat("x", 80)
+				machineIdx := 0
+				for _, reason := range reasons {
+					msgs := make([]string, 20)
+					for j := range 20 {
+						msgs[j] = fmt.Sprintf("Machine machine-%d: %s: %s\n", machineIdx, reason, longMsg)
+						machineIdx++
+					}
+					m[reason] = msgs
+				}
+				return m
+			}(),
+			numMachines:     200,
+			numNotReady:     200,
+			state:           aggregatorMachineStateReady,
+			expectMessages:  []string{"200 of 200 machines are not ready", endOfGlobalMessage},
+			expectMaxMsgLen: maxGlobalMessageLength,
+		},
+		{
+			name: "When messages within a reason are unsorted it should sort them deterministically",
+			messageMap: map[string][]string{
+				capiv1.NodeConditionsFailedReason: {
+					"Machine machine-2: NodeConditionsFailed: Condition MemoryPressure is True\n",
+					"Machine machine-0: NodeConditionsFailed: Condition Ready is False\n",
+					"Machine machine-1: NodeConditionsFailed: Condition DiskPressure is True\n",
+				},
+			},
+			numMachines:  5,
+			numNotReady:  3,
+			state:        aggregatorMachineStateHealthy,
+			expectReason: capiv1.NodeConditionsFailedReason,
+			// After sorting, machine-0 should come first, then machine-1, then machine-2.
+			expectMessages: []string{
+				"3 of 5 machines are not healthy",
+				"Machine machine-0: NodeConditionsFailed: Condition Ready is False",
+				"Machine machine-1: NodeConditionsFailed: Condition DiskPressure is True",
+				"Machine machine-2: NodeConditionsFailed: Condition MemoryPressure is True",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reason, message := aggregateMachineReasonsAndMessages(tc.messageMap, tc.numMachines, tc.numNotReady, tc.state)
+
+			if tc.expectReason != "" {
+				g.Expect(reason).To(Equal(tc.expectReason))
+			}
+			for _, msg := range tc.expectMessages {
+				g.Expect(message).To(ContainSubstring(msg))
+			}
+			for _, msg := range tc.expectNotContains {
+				g.Expect(message).ToNot(ContainSubstring(msg))
+			}
+			if tc.expectMaxMsgLen > 0 {
+				g.Expect(len(message)).To(BeNumerically("<=", tc.expectMaxMsgLen),
+					"message length %d exceeds max %d", len(message), tc.expectMaxMsgLen)
+			}
+		})
+	}
+}
+
+// TestSetCIDRConflictConditionDualStack tests setCIDRConflictCondition directly
+// (unit-level isolation) while TestSetMachineAndNodeConditions above exercises it
+// indirectly through the parent setMachineAndNodeConditions flow (integration-level).
+// Both exist because the dual-stack and condition-clearing scenarios are easier to
+// express with direct calls, while the integration cases verify end-to-end wiring.
+func TestSetCIDRConflictConditionDualStack(t *testing.T) {
+	t.Parallel()
+	r := NodePoolReconciler{}
+
+	for _, tc := range []struct {
+		name                  string
+		clusterNetwork        []hyperv1.ClusterNetworkEntry
+		machines              []*capiv1.Machine
+		preExistingCondition  bool
+		expectConflict        bool
+		expectMessageContains []string
+	}{
+		{
+			name: "When all addresses are inside cluster networks it should report dual-stack collision",
+			clusterNetwork: []hyperv1.ClusterNetworkEntry{
+				{CIDR: *ipnet.MustParseCIDR("10.128.0.0/14")},
+				{CIDR: *ipnet.MustParseCIDR("fd01::/48")},
+			},
+			machines: []*capiv1.Machine{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "node1"},
+					Status: capiv1.MachineStatus{
+						Addresses: capiv1.MachineAddresses{
+							{Type: capiv1.MachineInternalIP, Address: "10.128.0.5"},
+							{Type: capiv1.MachineInternalIP, Address: "fd01::5"},
+						},
+					},
+				},
+			},
+			expectConflict:        true,
+			expectMessageContains: []string{"10.128.0.5", "10.128.0.0/14", "fd01::5", "fd01::/48"},
+		},
+		{
+			name: "When machine has address outside all cluster networks it should not report dual-stack collision",
+			clusterNetwork: []hyperv1.ClusterNetworkEntry{
+				{CIDR: *ipnet.MustParseCIDR("10.128.0.0/14")},
+				{CIDR: *ipnet.MustParseCIDR("fd01::/48")},
+			},
+			machines: []*capiv1.Machine{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "node1"},
+					Status: capiv1.MachineStatus{
+						Addresses: capiv1.MachineAddresses{
+							{Type: capiv1.MachineExternalIP, Address: "192.168.1.10"},
+							{Type: capiv1.MachineInternalIP, Address: "10.128.0.5"},
+							{Type: capiv1.MachineInternalIP, Address: "fd01::5"},
+						},
+					},
+				},
+			},
+			expectConflict: false,
+		},
+		{
+			name: "When IPv4-only machine has address outside cluster network on dual-stack cluster it should not report collision",
+			clusterNetwork: []hyperv1.ClusterNetworkEntry{
+				{CIDR: *ipnet.MustParseCIDR("10.128.0.0/14")},
+				{CIDR: *ipnet.MustParseCIDR("fd01::/48")},
+			},
+			machines: []*capiv1.Machine{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "node1"},
+					Status: capiv1.MachineStatus{
+						Addresses: capiv1.MachineAddresses{
+							{Type: capiv1.MachineExternalIP, Address: "192.168.1.10"},
+							{Type: capiv1.MachineInternalIP, Address: "10.128.0.5"},
+						},
+					},
+				},
+			},
+			expectConflict: false,
+		},
+		{
+			name: "When IPv6-only address is in second CIDR it should detect dual-stack collision",
+			clusterNetwork: []hyperv1.ClusterNetworkEntry{
+				{CIDR: *ipnet.MustParseCIDR("10.128.0.0/14")},
+				{CIDR: *ipnet.MustParseCIDR("fd01::/48")},
+			},
+			machines: []*capiv1.Machine{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "node1"},
+					Status: capiv1.MachineStatus{
+						Addresses: capiv1.MachineAddresses{
+							{Type: capiv1.MachineInternalIP, Address: "fd01::a"},
+						},
+					},
+				},
+			},
+			expectConflict:        true,
+			expectMessageContains: []string{"fd01::a", "fd01::/48"},
+		},
+		{
+			name: "When machine has only link-local and in-cluster addresses it should report cidr collision",
+			clusterNetwork: []hyperv1.ClusterNetworkEntry{
+				{CIDR: *ipnet.MustParseCIDR("10.128.0.0/14")},
+			},
+			machines: []*capiv1.Machine{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "node1"},
+					Status: capiv1.MachineStatus{
+						Addresses: capiv1.MachineAddresses{
+							{Type: capiv1.MachineInternalIP, Address: "169.254.0.2"},
+							{Type: capiv1.MachineInternalIP, Address: "fe80::1"},
+							{Type: capiv1.MachineInternalIP, Address: "10.128.0.5"},
+						},
+					},
+				},
+			},
+			expectConflict:        true,
+			expectMessageContains: []string{"10.128.0.5", "10.128.0.0/14"},
+		},
+		{
+			name: "When machine has only link-local addresses it should not report cidr collision",
+			clusterNetwork: []hyperv1.ClusterNetworkEntry{
+				{CIDR: *ipnet.MustParseCIDR("10.128.0.0/14")},
+			},
+			machines: []*capiv1.Machine{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "node1"},
+					Status: capiv1.MachineStatus{
+						Addresses: capiv1.MachineAddresses{
+							{Type: capiv1.MachineInternalIP, Address: "169.254.0.2"},
+							{Type: capiv1.MachineInternalIP, Address: "fe80::1"},
+						},
+					},
+				},
+			},
+			expectConflict: false,
+		},
+		{
+			name: "When previously-conflicting machine gains out-of-cluster address it should clear the cidr conflict condition",
+			clusterNetwork: []hyperv1.ClusterNetworkEntry{
+				{CIDR: *ipnet.MustParseCIDR("10.128.0.0/14")},
+			},
+			machines: []*capiv1.Machine{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "node1"},
+					Status: capiv1.MachineStatus{
+						Addresses: capiv1.MachineAddresses{
+							{Type: capiv1.MachineExternalIP, Address: "192.168.1.10"},
+							{Type: capiv1.MachineInternalIP, Address: "10.128.0.5"},
+						},
+					},
+				},
+			},
+			preExistingCondition: true,
+			expectConflict:       false,
+		},
+		{
+			name: "When multiple machines have mixed conflict states it should only report the conflicting one",
+			clusterNetwork: []hyperv1.ClusterNetworkEntry{
+				{CIDR: *ipnet.MustParseCIDR("10.128.0.0/14")},
+			},
+			machines: []*capiv1.Machine{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "conflicting-node"},
+					Status: capiv1.MachineStatus{
+						Addresses: capiv1.MachineAddresses{
+							{Type: capiv1.MachineInternalIP, Address: "10.128.0.5"},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "healthy-node"},
+					Status: capiv1.MachineStatus{
+						Addresses: capiv1.MachineAddresses{
+							{Type: capiv1.MachineExternalIP, Address: "192.168.1.10"},
+							{Type: capiv1.MachineInternalIP, Address: "10.128.0.6"},
+						},
+					},
+				},
+			},
+			expectConflict:        true,
+			expectMessageContains: []string{"conflicting-node", "10.128.0.5"},
+		},
+	} {
+		t.Run(tc.name, func(tt *testing.T) {
+			tt.Parallel()
+			gg := NewWithT(tt)
+			np := &hyperv1.NodePool{
+				ObjectMeta: metav1.ObjectMeta{Name: "np-ds", Namespace: "myns"},
+			}
+			if tc.preExistingCondition {
+				np.Status.Conditions = []hyperv1.NodePoolCondition{
+					{
+						Type:   hyperv1.NodePoolClusterNetworkCIDRConflictType,
+						Status: corev1.ConditionTrue,
+						Reason: hyperv1.InvalidConfigurationReason,
+					},
+				}
+			}
+			hc := &hyperv1.HostedCluster{
+				Spec: hyperv1.HostedClusterSpec{
+					Networking: hyperv1.ClusterNetworking{
+						ClusterNetwork: tc.clusterNetwork,
+					},
+				},
+			}
+
+			err := r.setCIDRConflictCondition(tt.Context(), np, tc.machines, hc)
+			gg.Expect(err).ToNot(HaveOccurred())
+
+			cond := FindStatusCondition(np.Status.Conditions, hyperv1.NodePoolClusterNetworkCIDRConflictType)
+			if tc.expectConflict {
+				gg.Expect(cond).ToNot(BeNil(), "expected CIDR conflict condition to be set")
+				gg.Expect(cond.Status).To(Equal(corev1.ConditionTrue))
+				for _, want := range tc.expectMessageContains {
+					gg.Expect(cond.Message).To(ContainSubstring(want))
+				}
+			} else {
+				gg.Expect(cond).To(BeNil(), "expected no CIDR conflict condition")
+			}
 		})
 	}
 }
@@ -1342,13 +2730,14 @@ func newKVInfraMapMock(objects []client.Object) kvinfra.KubevirtInfraClientMap {
 }
 
 func TestIsArchAndPlatformSupported(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name     string
 		nodePool *hyperv1.NodePool
 		expect   bool
 	}{
 		{
-			name: "supported arch and platform used",
+			name: "When supported arch and platform are used, it should validate successfully",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					Platform: hyperv1.NodePoolPlatform{
@@ -1360,7 +2749,7 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "supported arch and platform used - s390x",
+			name: "When s390x arch and supported platform are used, it should validate successfully",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					Platform: hyperv1.NodePoolPlatform{
@@ -1372,7 +2761,7 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "supported platform with multiple arch baremetal - arm64",
+			name: "When arm64 arch is used on baremetal platform, it should validate successfully",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					Platform: hyperv1.NodePoolPlatform{
@@ -1384,7 +2773,7 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "supported platform with multiple arch - amd64",
+			name: "When amd64 arch is used on AWS platform, it should validate successfully",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					Platform: hyperv1.NodePoolPlatform{
@@ -1396,7 +2785,7 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "supported platform with multiple arch - ppc64le",
+			name: "When ppc64le arch is used on None platform, it should validate successfully",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					Platform: hyperv1.NodePoolPlatform{
@@ -1408,7 +2797,7 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "supported platform with multiple arch baremetal - arm64",
+			name: "When arm64 arch is used on agent platform, it should validate successfully",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					Platform: hyperv1.NodePoolPlatform{
@@ -1420,7 +2809,7 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "supported platform with multiple arch baremetal - amd64",
+			name: "When amd64 arch is used on agent platform, it should validate successfully",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					Platform: hyperv1.NodePoolPlatform{
@@ -1432,7 +2821,7 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 			expect: true,
 		},
 		{
-			name: "unsupported arch and platform used",
+			name: "When unsupported arch and platform are used, it should fail validation",
 			nodePool: &hyperv1.NodePool{
 				Spec: hyperv1.NodePoolSpec{
 					Platform: hyperv1.NodePoolPlatform{
@@ -1447,13 +2836,15 @@ func TestIsArchAndPlatformSupported(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			g := NewWithT(t)
 			g.Expect(isArchAndPlatformSupported(tc.nodePool)).To(Equal(tc.expect))
 		})
 	}
 }
 
-func Test_validateHCPayloadSupportsNodePoolCPUArch(t *testing.T) {
+func TestValidateHCPayloadSupportsNodePoolCPUArch(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name        string
 		hc          *hyperv1.HostedCluster
@@ -1461,7 +2852,7 @@ func Test_validateHCPayloadSupportsNodePoolCPUArch(t *testing.T) {
 		expectedErr bool
 	}{
 		{
-			name: "payload is multi",
+			name: "When payload is multi-arch, it should validate successfully",
 			hc: &hyperv1.HostedCluster{
 				Status: hyperv1.HostedClusterStatus{
 					PayloadArch: hyperv1.Multi,
@@ -1470,7 +2861,7 @@ func Test_validateHCPayloadSupportsNodePoolCPUArch(t *testing.T) {
 			expectedErr: false,
 		},
 		{
-			name: "payload is amd64; np is amd64",
+			name: "When payload is amd64 and nodepool is amd64, it should validate successfully",
 			hc: &hyperv1.HostedCluster{
 				Status: hyperv1.HostedClusterStatus{
 					PayloadArch: hyperv1.AMD64,
@@ -1484,7 +2875,7 @@ func Test_validateHCPayloadSupportsNodePoolCPUArch(t *testing.T) {
 			expectedErr: false,
 		},
 		{
-			name: "payload is amd64; np is arm64",
+			name: "When payload is amd64 and nodepool is arm64, it should fail validation",
 			hc: &hyperv1.HostedCluster{
 				Status: hyperv1.HostedClusterStatus{
 					PayloadArch: hyperv1.AMD64,
@@ -1500,6 +2891,7 @@ func Test_validateHCPayloadSupportsNodePoolCPUArch(t *testing.T) {
 	}
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			g := NewWithT(t)
 
 			err := validateHCPayloadSupportsNodePoolCPUArch(tt.hc, tt.np)
@@ -1512,6 +2904,7 @@ func Test_validateHCPayloadSupportsNodePoolCPUArch(t *testing.T) {
 		})
 	}
 }
+
 func TestResolveHAProxyImage(t *testing.T) {
 	const (
 		testAnnotationImage    = "quay.io/test/haproxy:custom"
@@ -1520,11 +2913,14 @@ func TestResolveHAProxyImage(t *testing.T) {
 	)
 
 	testCases := []struct {
-		name                string
-		nodePoolAnnotations map[string]string
-		useSharedIngress    bool
-		envVarImage         string
-		expectedImage       string
+		name                  string
+		nodePoolAnnotations   map[string]string
+		nodePoolStatusVersion string
+		useSharedIngress      bool
+		envVarImage           string
+		canonicalComponents   map[string]string
+		componentImage        string
+		expectedImage         string
 	}{
 		{
 			name: "When NodePool annotation is set it should use annotation image",
@@ -1579,6 +2975,49 @@ func TestResolveHAProxyImage(t *testing.T) {
 			useSharedIngress: false,
 			expectedImage:    testReleaseImage,
 		},
+		{
+			name:                "When registry overrides exist and NodePool is new it should use canonical image",
+			useSharedIngress:    false,
+			componentImage:      "mirror.example.com/openshift/haproxy-router:v4.16",
+			canonicalComponents: map[string]string{haproxy.HAProxyRouterImageName: "registry.test.io/openshift/haproxy-router:v4.16"},
+			expectedImage:       "registry.test.io/openshift/haproxy-router:v4.16",
+		},
+		{
+			name:                  "When registry overrides exist and NodePool is upgrading it should use canonical image",
+			nodePoolStatusVersion: "4.17.0",
+			useSharedIngress:      false,
+			componentImage:        "mirror.example.com/openshift/haproxy-router:v4.16",
+			canonicalComponents:   map[string]string{haproxy.HAProxyRouterImageName: "registry.test.io/openshift/haproxy-router:v4.16"},
+			expectedImage:         "registry.test.io/openshift/haproxy-router:v4.16",
+		},
+		{
+			name: "When registry overrides exist and canonical-data-plane-images annotation is set it should use canonical image",
+			nodePoolAnnotations: map[string]string{
+				nodePoolAnnotationCanonicalDataPlaneImages: "true",
+			},
+			nodePoolStatusVersion: "4.18.0",
+			useSharedIngress:      false,
+			componentImage:        "mirror.example.com/openshift/haproxy-router:v4.16",
+			canonicalComponents:   map[string]string{haproxy.HAProxyRouterImageName: "registry.test.io/openshift/haproxy-router:v4.16"},
+			expectedImage:         "registry.test.io/openshift/haproxy-router:v4.16",
+		},
+		{
+			name:                  "When registry overrides exist and NodePool is stable without annotation it should preserve overridden image",
+			nodePoolStatusVersion: "4.18.0",
+			useSharedIngress:      false,
+			componentImage:        "mirror.example.com/openshift/haproxy-router:v4.16",
+			canonicalComponents:   map[string]string{haproxy.HAProxyRouterImageName: "registry.test.io/openshift/haproxy-router:v4.16"},
+			expectedImage:         "mirror.example.com/openshift/haproxy-router:v4.16",
+		},
+		{
+			name: "When registry overrides exist it should not affect an annotation image",
+			nodePoolAnnotations: map[string]string{
+				hyperv1.NodePoolHAProxyImageAnnotation: "mirror.example.com/custom/haproxy:latest",
+			},
+			componentImage:      "mirror.example.com/openshift/haproxy-router:v4.16",
+			canonicalComponents: map[string]string{haproxy.HAProxyRouterImageName: "registry.test.io/openshift/haproxy-router:v4.16"},
+			expectedImage:       "mirror.example.com/custom/haproxy:latest",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -1599,6 +3038,9 @@ func TestResolveHAProxyImage(t *testing.T) {
 					Name:        "test-nodepool",
 					Namespace:   "clusters",
 					Annotations: tc.nodePoolAnnotations,
+				},
+				Status: hyperv1.NodePoolStatus{
+					Version: tc.nodePoolStatusVersion,
 				},
 			}
 
@@ -1670,11 +3112,18 @@ kind: Config`),
 			// Create fake client
 			c := fake.NewClientBuilder().WithObjects(objects...).Build()
 
+			componentImage := testReleaseImage
+			if tc.componentImage != "" {
+				componentImage = tc.componentImage
+			}
+
 			// Create fake release provider with component images
 			releaseProvider := &fakereleaseprovider.FakeReleaseProvider{
+				Version: "4.18.0",
 				Components: map[string]string{
-					haproxy.HAProxyRouterImageName: testReleaseImage,
+					haproxy.HAProxyRouterImageName: componentImage,
 				},
+				CanonicalComponents: tc.canonicalComponents,
 			}
 
 			// Create test HostedCluster
@@ -1684,12 +3133,29 @@ kind: Config`),
 					Namespace: "clusters",
 				},
 				Spec: hyperv1.HostedClusterSpec{
-					Platform: hyperv1.PlatformSpec{
-						Type: hyperv1.AWSPlatform,
-						AWS: &hyperv1.AWSPlatformSpec{
-							EndpointAccess: hyperv1.Public,
-						},
-					},
+					Platform: func() hyperv1.PlatformSpec {
+						if tc.useSharedIngress {
+							return hyperv1.PlatformSpec{
+								Type: hyperv1.AzurePlatform,
+								Azure: &hyperv1.AzurePlatformSpec{
+									Topology: hyperv1.AzureTopologyPublicAndPrivate,
+									Private: hyperv1.AzurePrivateSpec{
+										Type:  hyperv1.AzurePrivateTypeSwift,
+										Swift: hyperv1.AzureSwiftSpec{PodNetworkInstance: "test-pni"},
+									},
+									AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{
+										AzureAuthenticationConfigType: hyperv1.AzureAuthenticationTypeManagedIdentities,
+									},
+								},
+							}
+						}
+						return hyperv1.PlatformSpec{
+							Type: hyperv1.AWSPlatform,
+							AWS: &hyperv1.AWSPlatformSpec{
+								EndpointAccess: hyperv1.Public,
+							},
+						}
+					}(),
 					Networking: hyperv1.ClusterNetworking{
 						ServiceNetwork: []hyperv1.ServiceNetworkEntry{{CIDR: *ipnet.MustParseCIDR("192.168.1.0/24")}},
 					},
@@ -1762,6 +3228,7 @@ kind: Config`),
 }
 
 func TestSupportedVersionSkewCondition(t *testing.T) {
+	t.Parallel()
 	basePullSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "pull-secret",
@@ -1818,7 +3285,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 		expectedError     string
 	}{
 		{
-			name: "when nodePool version matches control plane version it should report valid condition",
+			name: "When nodePool version matches control plane version, it should report valid condition",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.18.5-x86_64"
@@ -1838,7 +3305,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 			expectedError: "",
 		},
 		{
-			name: "when nodePool version is higher than control plane version it should report invalid condition",
+			name: "When nodePool version is higher than control plane version, it should report invalid condition",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.19.0-x86_64"
@@ -1858,7 +3325,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 			expectedError: "",
 		},
 		{
-			name: "when nodePool version is two minor versions lower than control plane (odd version) it should report valid condition with n-3 support",
+			name: "When nodePool version is two minor versions lower than control plane (odd version), it should report valid condition with n-3 support",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.15.0-x86_64"
@@ -1882,7 +3349,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 			expectedError: "",
 		},
 		{
-			name: "when nodePool version is two minor versions lower than control plane (even version) it should report valid condition",
+			name: "When nodePool version is two minor versions lower than control plane (even version), it should report valid condition",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.16.0-x86_64"
@@ -1906,7 +3373,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 			expectedError: "",
 		},
 		{
-			name: "when hosted cluster version history is empty it should report valid condition",
+			name: "When hosted cluster version history is empty, it should report valid condition",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.18.5-x86_64"
@@ -1933,7 +3400,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 			expectedError: "",
 		},
 		{
-			name: "when nodePool version is three minor versions lower (n-3) it should report valid condition",
+			name: "When nodePool version is three minor versions lower (n-3), it should report valid condition",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.15.0-x86_64"
@@ -1957,7 +3424,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 			expectedError: "",
 		},
 		{
-			name: "when nodePool version is four minor versions lower (n-4) it should report invalid condition",
+			name: "When nodePool version is four minor versions lower (n-4), it should report invalid condition",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64"
@@ -1981,7 +3448,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 			expectedError: "",
 		},
 		{
-			name: "when nodePool patch version is lower than control plane (same minor version) it should report valid condition",
+			name: "When nodePool patch version is lower than control plane (same minor version), it should report valid condition",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.18.5-x86_64"
@@ -2005,7 +3472,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 			expectedError: "",
 		},
 		{
-			name: "when nodePool patch version is higher than control plane (same minor version) it should report invalid condition",
+			name: "When nodePool patch version is higher than control plane (same minor version), it should report invalid condition",
 			nodePool: func() *hyperv1.NodePool {
 				np := baseNodePool.DeepCopy()
 				np.Spec.Release.Image = "quay.io/openshift-release-dev/ocp-release:4.18.10-x86_64"
@@ -2065,6 +3532,7 @@ func TestSupportedVersionSkewCondition(t *testing.T) {
 }
 
 func TestNodePoolReconciler_reconcile(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string // description of this test case
 		// Named input parameters for target function.
@@ -2074,7 +3542,7 @@ func TestNodePoolReconciler_reconcile(t *testing.T) {
 		wantErr  bool
 	}{
 		{
-			name: "when NodePool and HostedCluster are valid it should reconcile successfully",
+			name: "When NodePool and HostedCluster are valid, it should reconcile successfully",
 			hcluster: &hyperv1.HostedCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-hc",
@@ -2122,7 +3590,7 @@ func TestNodePoolReconciler_reconcile(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "when reconciling it should set conditions in the expected order",
+			name: "When reconciling, it should set conditions in the expected order",
 			hcluster: &hyperv1.HostedCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-hc",
@@ -2170,7 +3638,7 @@ func TestNodePoolReconciler_reconcile(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "when ignition endpoint is missing it should exit early from condition loop",
+			name: "When ignition endpoint is missing, it should exit early from condition loop",
 			hcluster: &hyperv1.HostedCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-hc",
@@ -2232,6 +3700,7 @@ func TestNodePoolReconciler_reconcile(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			g := NewWithT(t)
 
 			pullSecret := &corev1.Secret{
@@ -2269,7 +3738,7 @@ func TestNodePoolReconciler_reconcile(t *testing.T) {
 			g.Expect(got).To(Equal(tt.want))
 
 			// For the condition order test, verify conditions are set in the expected order
-			if tt.name == "when reconciling it should set conditions in the expected order" {
+			if tt.name == "When reconciling, it should set conditions in the expected order" {
 				// Expected condition order based on reconcile() signalConditions array
 				expectedConditionOrder := []string{
 					hyperv1.NodePoolAutoscalingEnabledConditionType,
@@ -2310,7 +3779,7 @@ func TestNodePoolReconciler_reconcile(t *testing.T) {
 			}
 
 			// For the early exit test, verify the function exited early from the condition loop
-			if tt.name == "when ignition endpoint is missing it should exit early from condition loop" {
+			if tt.name == "When ignition endpoint is missing, it should exit early from condition loop" {
 				// Verify IgnitionEndpointAvailable condition is set to False
 				ignitionCondition := FindStatusCondition(tt.nodePool.Status.Conditions, string(hyperv1.IgnitionEndpointAvailable))
 				g.Expect(ignitionCondition).NotTo(BeNil(), "IgnitionEndpointAvailable condition should be set")
@@ -2335,6 +3804,138 @@ func TestNodePoolReconciler_reconcile(t *testing.T) {
 					}
 				}
 			}
+		})
+	}
+}
+
+func TestEnqueueNodePoolsForCloudConfig(t *testing.T) {
+	t.Parallel()
+	hcNamespace := "clusters"
+	hcName := "my-cluster"
+	cpNamespace := "clusters-my-cluster"
+
+	hcp := &hyperv1.HostedControlPlane{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      hcName,
+			Namespace: cpNamespace,
+			Annotations: map[string]string{
+				k8sutil.HostedClusterAnnotation: hcNamespace + "/" + hcName,
+			},
+		},
+	}
+
+	matchingNodePool := &hyperv1.NodePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "np-1",
+			Namespace: hcNamespace,
+		},
+		Spec: hyperv1.NodePoolSpec{
+			ClusterName: hcName,
+		},
+	}
+
+	unrelatedNodePool := &hyperv1.NodePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "np-other",
+			Namespace: hcNamespace,
+		},
+		Spec: hyperv1.NodePoolSpec{
+			ClusterName: "other-cluster",
+		},
+	}
+
+	testCases := []struct {
+		name     string
+		cm       *corev1.ConfigMap
+		objects  []client.Object
+		expected []reconcile.Request
+	}{
+		{
+			name: "When azure-cloud-config changes, it should enqueue matching NodePools",
+			cm: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "azure-cloud-config",
+					Namespace: cpNamespace,
+				},
+			},
+			objects: []client.Object{hcp, matchingNodePool, unrelatedNodePool},
+			expected: []reconcile.Request{
+				{NamespacedName: types.NamespacedName{Name: "np-1", Namespace: hcNamespace}},
+			},
+		},
+		{
+			name: "When openstack-cloud-config changes, it should enqueue matching NodePools",
+			cm: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "openstack-cloud-config",
+					Namespace: cpNamespace,
+				},
+			},
+			objects: []client.Object{hcp, matchingNodePool},
+			expected: []reconcile.Request{
+				{NamespacedName: types.NamespacedName{Name: "np-1", Namespace: hcNamespace}},
+			},
+		},
+		{
+			name: "When no HostedControlPlane exists in the namespace, it should return nil",
+			cm: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "azure-cloud-config",
+					Namespace: cpNamespace,
+				},
+			},
+			objects:  []client.Object{matchingNodePool},
+			expected: nil,
+		},
+		{
+			name: "When HostedControlPlane has no cluster annotation, it should return nil",
+			cm: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "azure-cloud-config",
+					Namespace: cpNamespace,
+				},
+			},
+			objects: []client.Object{
+				&hyperv1.HostedControlPlane{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      hcName,
+						Namespace: cpNamespace,
+					},
+				},
+				matchingNodePool,
+			},
+			expected: nil,
+		},
+		{
+			name: "When no NodePools match the HostedCluster, it should return empty",
+			cm: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "azure-cloud-config",
+					Namespace: cpNamespace,
+				},
+			},
+			objects:  []client.Object{hcp, unrelatedNodePool},
+			expected: nil,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := NewWithT(t)
+
+			// Deep-copy shared objects so parallel subtests don't race on
+			// ResourceVersion mutations inside fake.ClientBuilder.Build().
+			objs := make([]client.Object, len(tc.objects))
+			for i, obj := range tc.objects {
+				objs[i] = obj.DeepCopyObject().(client.Object)
+			}
+
+			c := fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(objs...).Build()
+			r := &NodePoolReconciler{Client: c}
+
+			result := r.enqueueNodePoolsForCloudConfig(context.Background(), tc.cm)
+			g.Expect(result).To(Equal(tc.expected))
 		})
 	}
 }

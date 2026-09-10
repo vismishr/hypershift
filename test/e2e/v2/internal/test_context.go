@@ -19,20 +19,29 @@ package internal
 import (
 	"context"
 	"fmt"
-	"sync"
+	"io"
+	"net"
+
+	"github.com/blang/semver"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests"
+	hyperapi "github.com/openshift/hypershift/support/api"
+	supportforwarder "github.com/openshift/hypershift/support/forwarder"
+	"github.com/openshift/hypershift/support/netutil"
 	e2eutil "github.com/openshift/hypershift/test/e2e/util"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// TestContextGetter is a function type that returns a TestContext.
-// It is used to lazily access the test context in test functions.
 type TestContextGetter func() *TestContext
 
-// TestContext holds the test context including clients and hosted cluster reference
 type TestContext struct {
 	context.Context
 	MgmtClient            crclient.Client
@@ -40,78 +49,287 @@ type TestContext struct {
 	ClusterNamespace      string
 	ControlPlaneNamespace string
 	ArtifactDir           string
-	hostedCluster         *hyperv1.HostedCluster
-	hostedClusterOnce     sync.Once
 }
 
-// GetHostedCluster returns the HostedCluster associated with this test context.
-// It fetches the HostedCluster lazily on first call if ClusterName and ClusterNamespace are set.
-// Returns nil if the HostedCluster cannot be fetched or if ClusterName/ClusterNamespace are not set.
-func (tc *TestContext) GetHostedCluster() *hyperv1.HostedCluster {
-	tc.hostedClusterOnce.Do(func() {
-		if tc.ClusterName == "" || tc.ClusterNamespace == "" {
+// GetHostedCluster fetches the HostedCluster from the management cluster.
+// Returns an error if no cluster name/namespace is configured or if the API
+// call fails.
+func (tc *TestContext) GetHostedCluster() (*hyperv1.HostedCluster, error) {
+	if tc.ClusterName == "" || tc.ClusterNamespace == "" {
+		return nil, fmt.Errorf("no hosted cluster configured for this test run (E2E_HOSTED_CLUSTER_NAME and E2E_HOSTED_CLUSTER_NAMESPACE must be set)")
+	}
+	hostedCluster := &hyperv1.HostedCluster{}
+	err := tc.MgmtClient.Get(tc.Context, crclient.ObjectKey{
+		Namespace: tc.ClusterNamespace,
+		Name:      tc.ClusterName,
+	}, hostedCluster)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get HostedCluster %s/%s: %w", tc.ClusterNamespace, tc.ClusterName, err)
+	}
+	return hostedCluster, nil
+}
+
+// GetHostedClusterVersion fetches the HostedCluster and parses its version.
+// Returns an error if the cluster cannot be fetched or the version cannot be
+// parsed.
+func (tc *TestContext) GetHostedClusterVersion() (semver.Version, error) {
+	hc, err := tc.GetHostedCluster()
+	if err != nil {
+		return semver.Version{}, err
+	}
+	if hc.Status.Version != nil && len(hc.Status.Version.History) > 0 && hc.Status.Version.History[0].Version != "" {
+		releaseVersion, err := semver.Parse(hc.Status.Version.History[0].Version)
+		if err != nil {
+			return semver.Version{}, fmt.Errorf("error parsing version: %w", err)
+		}
+		releaseVersion.Patch = 0
+		releaseVersion.Pre = nil
+		releaseVersion.Build = nil
+		return releaseVersion, nil
+	}
+	return semver.Version{}, nil
+}
+
+// GetHostedClusterRESTConfig returns the REST config for the hosted cluster.
+// Returns an error if the kubeconfig secret cannot be fetched or parsed.
+func (tc *TestContext) GetHostedClusterRESTConfig(hc *hyperv1.HostedCluster) (*rest.Config, error) {
+	if hc.Status.KubeConfig == nil {
+		return nil, fmt.Errorf("kubeconfig status not yet available for HostedCluster %s/%s", hc.Namespace, hc.Name)
+	}
+	var kubeconfigSecret corev1.Secret
+	err := tc.MgmtClient.Get(tc.Context, crclient.ObjectKey{
+		Namespace: hc.Namespace,
+		Name:      hc.Status.KubeConfig.Name,
+	}, &kubeconfigSecret)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get kubeconfig secret %s/%s: %w", hc.Namespace, hc.Status.KubeConfig.Name, err)
+	}
+
+	kubeconfigData, ok := kubeconfigSecret.Data["kubeconfig"]
+	if !ok || len(kubeconfigData) == 0 {
+		return nil, fmt.Errorf("kubeconfig key not found or empty in secret %s/%s", hc.Namespace, hc.Status.KubeConfig.Name)
+	}
+
+	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create REST config from kubeconfig: %w", err)
+	}
+	// Disable client-side rate limiting for e2e tests. See test/e2e/util/client.go.
+	restConfig.QPS = -1
+	restConfig.Burst = -1
+
+	return restConfig, nil
+}
+
+// GetHostedClusterClient returns a controller-runtime client for the hosted
+// cluster. Returns an error if the kubeconfig or client setup fails.
+func (tc *TestContext) GetHostedClusterClient(hc *hyperv1.HostedCluster) (crclient.Client, error) {
+	restConfig, err := tc.GetHostedClusterRESTConfig(hc)
+	if err != nil {
+		return nil, err
+	}
+	if restConfig == nil {
+		return nil, fmt.Errorf("expected a REST config for hostedcluster")
+	}
+	client, err := crclient.New(restConfig, crclient.Options{Scheme: hyperapi.Scheme})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create hosted cluster client: %w", err)
+	}
+	return client, nil
+}
+
+// PortForwardedClient holds a controller-runtime client connected to the hosted
+// cluster via a port-forward to the kube-apiserver pod. Callers must call Close
+// when done to release the port-forward.
+type PortForwardedClient struct {
+	crclient.Client
+	stopChan chan struct{}
+}
+
+// Close stops the port-forward tunnel. Safe to call multiple times.
+func (c *PortForwardedClient) Close() {
+	select {
+	case <-c.stopChan:
+		// already closed
+	default:
+		close(c.stopChan)
+	}
+}
+
+// GetHostedClusterClientViaPortForward returns a controller-runtime client for
+// the hosted cluster by port-forwarding to the kube-apiserver pod in the control
+// plane namespace. This bypasses external DNS and load balancers, making it work
+// for every provider and every visibility mode (public, private,
+// publicAndPrivate).
+//
+// Callers MUST call Close on the returned PortForwardedClient to release the
+// port-forward tunnel. Use DeferCleanup in tests:
+//
+//	pfc, err := tc.GetHostedClusterClientViaPortForward(hc)
+//	Expect(err).NotTo(HaveOccurred())
+//	DeferCleanup(pfc.Close)
+func (tc *TestContext) GetHostedClusterClientViaPortForward(hc *hyperv1.HostedCluster) (*PortForwardedClient, error) {
+	// 1. Find a running kube-apiserver pod.
+	kasPod, err := supportforwarder.GetRunningKubeAPIServerPod(tc.Context, tc.MgmtClient, tc.ControlPlaneNamespace)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find running kube-apiserver pod in %s: %w", tc.ControlPlaneNamespace, err)
+	}
+
+	// 2. Read the localhost-kubeconfig secret. This kubeconfig uses TLS
+	//    credentials that the kube-apiserver trusts, but its server URL
+	//    points to localhost (for in-pod use). We override it below.
+	var kubeconfigSecret corev1.Secret
+	if err := tc.MgmtClient.Get(tc.Context, crclient.ObjectKey{
+		Namespace: tc.ControlPlaneNamespace,
+		Name:      "localhost-kubeconfig",
+	}, &kubeconfigSecret); err != nil {
+		return nil, fmt.Errorf("failed to get localhost-kubeconfig secret in %s: %w", tc.ControlPlaneNamespace, err)
+	}
+	kubeconfigData, ok := kubeconfigSecret.Data["kubeconfig"]
+	if !ok || len(kubeconfigData) == 0 {
+		return nil, fmt.Errorf("kubeconfig key not found or empty in localhost-kubeconfig secret in %s", tc.ControlPlaneNamespace)
+	}
+
+	// 3. Allocate a random local port.
+	listener, err := (&net.ListenConfig{}).Listen(tc.Context, "tcp", "localhost:0")
+	if err != nil {
+		return nil, fmt.Errorf("failed to allocate local port for port-forward: %w", err)
+	}
+	localPort := listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+
+	// 4. Set up the port-forward.
+	mgmtRESTConfig, err := e2eutil.GetConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get management cluster REST config: %w", err)
+	}
+	kubeClient, err := kubernetes.NewForConfig(mgmtRESTConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kubernetes client for port-forward: %w", err)
+	}
+
+	podPort := netutil.KASPodPortFromHostedCluster(hc)
+	stopChan := make(chan struct{})
+	fwd := &supportforwarder.PortForwarder{
+		Namespace: kasPod.Namespace,
+		PodName:   kasPod.Name,
+		Client:    kubeClient,
+		Config:    mgmtRESTConfig,
+		Out:       io.Discard,
+		ErrOut:    io.Discard,
+	}
+	if err := fwd.ForwardPorts([]string{fmt.Sprintf("%d:%d", localPort, podPort)}, stopChan); err != nil {
+		close(stopChan)
+		return nil, fmt.Errorf("failed to start port-forward to kube-apiserver pod %s/%s: %w", kasPod.Namespace, kasPod.Name, err)
+	}
+
+	// 5. Parse the localhost kubeconfig and override the server URL.
+	localhostKubeconfig, err := clientcmd.Load(kubeconfigData)
+	if err != nil {
+		close(stopChan)
+		return nil, fmt.Errorf("failed to parse localhost kubeconfig: %w", err)
+	}
+	for k := range localhostKubeconfig.Clusters {
+		localhostKubeconfig.Clusters[k].Server = fmt.Sprintf("https://localhost:%d", localPort)
+	}
+	modifiedKubeconfig, err := clientcmd.Write(*localhostKubeconfig)
+	if err != nil {
+		close(stopChan)
+		return nil, fmt.Errorf("failed to serialize modified kubeconfig: %w", err)
+	}
+
+	restConfig, err := clientcmd.RESTConfigFromKubeConfig(modifiedKubeconfig)
+	if err != nil {
+		close(stopChan)
+		return nil, fmt.Errorf("failed to create REST config from modified kubeconfig: %w", err)
+	}
+	restConfig.QPS = -1
+	restConfig.Burst = -1
+
+	// 6. Create the controller-runtime client.
+	hcClient, err := crclient.New(restConfig, crclient.Options{Scheme: hyperapi.Scheme})
+	if err != nil {
+		close(stopChan)
+		return nil, fmt.Errorf("failed to create hosted cluster client via port-forward: %w", err)
+	}
+
+	return &PortForwardedClient{Client: hcClient, stopChan: stopChan}, nil
+}
+
+// VersionAtLeast returns true if the hosted cluster version is at least v.
+// Fails the test if the version cannot be determined.
+func (tc *TestContext) VersionAtLeast(v semver.Version) bool {
+	GinkgoHelper()
+	version, err := tc.GetHostedClusterVersion()
+	Expect(err).NotTo(HaveOccurred(), "failed to get HostedCluster version for %s/%s", tc.ClusterNamespace, tc.ClusterName)
+	return !version.LT(v)
+}
+
+// SkipIfVersionBelow skips the test if the hosted cluster version is below
+// minVersion. Returns the detected version on success.
+func (tc *TestContext) SkipIfVersionBelow(minVersion semver.Version) semver.Version {
+	GinkgoHelper()
+	version, err := tc.GetHostedClusterVersion()
+	Expect(err).NotTo(HaveOccurred(), "failed to get HostedCluster version for %s/%s", tc.ClusterNamespace, tc.ClusterName)
+	if version.LT(minVersion) {
+		Skip(fmt.Sprintf("Only tested in %s and later", minVersion))
+	}
+	return version
+}
+
+// SkipIfNotPlatform skips the test unless the hosted cluster matches one of the
+// given platforms. Fails the test if the HostedCluster cannot be fetched.
+func (tc *TestContext) SkipIfNotPlatform(platforms ...hyperv1.PlatformType) {
+	GinkgoHelper()
+	hc, err := tc.GetHostedCluster()
+	Expect(err).NotTo(HaveOccurred(), "failed to get HostedCluster for platform check")
+	for _, p := range platforms {
+		if hc.Spec.Platform.Type == p {
 			return
 		}
-
-		hostedCluster := &hyperv1.HostedCluster{}
-		err := tc.MgmtClient.Get(tc.Context, crclient.ObjectKey{
-			Namespace: tc.ClusterNamespace,
-			Name:      tc.ClusterName,
-		}, hostedCluster)
-		if err != nil {
-			// In test code, panicking is acceptable and will fail the test appropriately
-			panic(fmt.Sprintf("failed to get HostedCluster %s/%s: %v", tc.ClusterNamespace, tc.ClusterName, err))
-		}
-
-		err = e2eutil.SetReleaseVersionFromHostedCluster(tc.Context, hostedCluster)
-		if err != nil {
-			panic(fmt.Sprintf("failed to set release version from HostedCluster: %v", err))
-		}
-
-		tc.hostedCluster = hostedCluster
-	})
-	return tc.hostedCluster
+	}
+	Skip(fmt.Sprintf("test only applies to platforms %v, got %s", platforms, hc.Spec.Platform.Type))
 }
 
-var (
-	// Global test context - set in BeforeSuite
-	testCtx *TestContext
-)
+// SkipIfPlatform skips the test if the hosted cluster matches any of the given
+// platforms. Fails the test if the HostedCluster cannot be fetched.
+func (tc *TestContext) SkipIfPlatform(platforms ...hyperv1.PlatformType) {
+	GinkgoHelper()
+	hc, err := tc.GetHostedCluster()
+	Expect(err).NotTo(HaveOccurred(), "failed to get HostedCluster for platform check")
+	for _, p := range platforms {
+		if hc.Spec.Platform.Type == p {
+			Skip(fmt.Sprintf("test does not apply to platform %s", p))
+		}
+	}
+}
 
-// GetTestContext returns the global test context
+// SkipIfWorkloadUnsupportedForVersion skips the test if the workload is incompatible
+// with the hosted cluster according to ShouldSkipWorkloadForVersion. Fails the test
+// if the HostedCluster cannot be fetched.
+func (tc *TestContext) SkipIfWorkloadUnsupportedForVersion(workload WorkloadSpec) {
+	GinkgoHelper()
+	version, err := tc.GetHostedClusterVersion()
+	Expect(err).NotTo(HaveOccurred(), "failed to get HostedCluster version for %s/%s", tc.ClusterNamespace, tc.ClusterName)
+	if ShouldSkipWorkloadForVersion(workload, version) {
+		Skip(fmt.Sprintf("workload %s is not expected on this cluster version", workload.Name))
+	}
+}
+
+var testCtx *TestContext
+
 func GetTestContext() *TestContext {
 	return testCtx
 }
 
-// SetTestContext sets the global test context
 func SetTestContext(ctx *TestContext) {
 	testCtx = ctx
-}
-
-// SetupTestContext initializes the test context from a HostedCluster
-func SetupTestContext(ctx context.Context, hostedClusterName, hostedClusterNamespace string) (*TestContext, error) {
-	// Get management client
-	mgmtClient, err := e2eutil.GetClient()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get management client: %w", err)
-	}
-
-	testCtx := &TestContext{
-		Context:               ctx,
-		MgmtClient:            mgmtClient,
-		ClusterName:           hostedClusterName,
-		ClusterNamespace:      hostedClusterNamespace,
-		ControlPlaneNamespace: manifests.HostedControlPlaneNamespace(hostedClusterNamespace, hostedClusterName),
-	}
-
-	return testCtx, nil
 }
 
 // SetupTestContextFromEnv initializes the test context from environment variables.
 // It reads E2E_HOSTED_CLUSTER_NAME and E2E_HOSTED_CLUSTER_NAMESPACE from the environment.
 // If these are not set, it creates a basic context with only the management client.
 func SetupTestContextFromEnv(ctx context.Context) (*TestContext, error) {
-	// Get management client
 	mgmtClient, err := e2eutil.GetClient()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get management client: %w", err)
@@ -126,7 +344,6 @@ func SetupTestContextFromEnv(ctx context.Context) (*TestContext, error) {
 	hostedClusterNamespace := GetEnvVarValue("E2E_HOSTED_CLUSTER_NAMESPACE")
 	artifactDir := GetEnvVarValue("ARTIFACT_DIR")
 
-	// If both env vars are present, set up full context with cluster info
 	if hostedClusterName != "" && hostedClusterNamespace != "" {
 		testCtx.ClusterName = hostedClusterName
 		testCtx.ClusterNamespace = hostedClusterNamespace
@@ -135,15 +352,4 @@ func SetupTestContextFromEnv(ctx context.Context) (*TestContext, error) {
 	testCtx.ArtifactDir = artifactDir
 
 	return testCtx, nil
-}
-
-// ValidateControlPlaneNamespace checks if the ControlPlaneNamespace is set in the test context.
-// Returns an error with a helpful message if not set.
-func (tc *TestContext) ValidateControlPlaneNamespace() error {
-	if tc.ControlPlaneNamespace == "" {
-		return fmt.Errorf("ControlPlaneNamespace is required but not set. Please set the following environment variables:\n" +
-			"  E2E_HOSTED_CLUSTER_NAME - Name of the HostedCluster to test\n" +
-			"  E2E_HOSTED_CLUSTER_NAMESPACE - Namespace of the HostedCluster to test")
-	}
-	return nil
 }

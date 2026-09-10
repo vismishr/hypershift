@@ -115,7 +115,13 @@ var (
 				"ec2:DescribeVolumes",
 				"ec2:DescribeVolumesModifications",
 				"ec2:DetachVolume",
-				"ec2:ModifyVolume"
+				"ec2:ModifyVolume",
+				"ec2:DescribeAvailabilityZones",
+				"ec2:EnableFastSnapshotRestores",
+				"ec2:DescribeInstanceTypes",
+      			"ec2:DescribeVolumeStatus",
+      			"ec2:CopyVolumes",
+      			"ec2:LockSnapshot"
 			],
 			"Resource": "*"
 		},
@@ -214,6 +220,7 @@ var (
         "elasticloadbalancing:ModifyTargetGroup",
         "elasticloadbalancing:RegisterTargets",
         "elasticloadbalancing:SetLoadBalancerPoliciesOfListener",
+        "elasticloadbalancing:SetSecurityGroups",
         "iam:CreateServiceLinkedRole",
         "kms:DescribeKey"
       ],
@@ -249,7 +256,8 @@ var (
 					"arn:*:ec2:*::image/*",
 					"arn:*:ec2:*::snapshot/*",
 					"arn:*:ec2:*:*:security-group/*",
-					"arn:*:ec2:*:*:subnet/*"
+					"arn:*:ec2:*:*:subnet/*",
+					"arn:*:ec2:*:*:capacity-reservation/*"
 				],
 				"Action": [
 					"ec2:RunInstances",
@@ -345,6 +353,7 @@ var (
 				"Effect": "Allow",
 				"Resource": "*",
 				"Action": [
+					"ec2:DescribeCapacityReservations",
 					"ec2:DescribeImages",
 					"ec2:DescribeInstances",
 					"ec2:DescribeInstanceTypeOfferings",
@@ -675,7 +684,8 @@ func controlPlaneOperatorPolicy(hostedZone string, sharedVPC bool) policyBinding
 						"ec2:RevokeSecurityGroupIngress",
 						"ec2:RevokeSecurityGroupEgress",
 						"ec2:DescribeSecurityGroups",
-						"ec2:DescribeVpcs"
+						"ec2:DescribeVpcs",
+						"ec2:DescribeSubnets"
 					],
 					"Resource": "*"
 				}
@@ -701,7 +711,8 @@ func controlPlaneOperatorPolicy(hostedZone string, sharedVPC bool) policyBinding
 						"ec2:RevokeSecurityGroupIngress",
 						"ec2:RevokeSecurityGroupEgress",
 						"ec2:DescribeSecurityGroups",
-						"ec2:DescribeVpcs"
+						"ec2:DescribeVpcs",
+						"ec2:DescribeSubnets"
 					],
 					"Resource": "*"
 				},
@@ -775,7 +786,8 @@ func sharedVPCEndpointRole(controlPlaneRoleARN string) sharedVPCPolicyBinding {
 						"ec2:RevokeSecurityGroupIngress",
 						"ec2:RevokeSecurityGroupEgress",
 						"ec2:DescribeSecurityGroups",
-						"ec2:DescribeVpcs"
+						"ec2:DescribeVpcs",
+						"ec2:DescribeSubnets"
 					],
 					"Resource": "*"
 				}
@@ -890,7 +902,7 @@ func (o *CreateIAMOptions) CreateOIDCResources(ctx context.Context, iamClient aw
 		// Create a single shared role with all policies
 		sharedRoleARN, err := o.CreateSharedOIDCRole(ctx, iamClient, bindings, providerARN, providerName, logger)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create shared OIDC role: %v", err)
+			return nil, fmt.Errorf("failed to create shared OIDC role: %w", err)
 		}
 		// Set all role ARNs to the shared role ARN
 		for into := range bindings {
@@ -902,7 +914,7 @@ func (o *CreateIAMOptions) CreateOIDCResources(ctx context.Context, iamClient aw
 			trustPolicy := oidcTrustPolicy(providerARN, providerName, binding.serviceAccounts...)
 			arn, err := o.CreateOIDCRole(ctx, iamClient, binding, trustPolicy, logger)
 			if err != nil {
-				return nil, fmt.Errorf("failed to create OIDC Role %q: with trust policy %s and permission policy %s: %v", binding.name, trustPolicy, binding.policy, err)
+				return nil, fmt.Errorf("failed to create OIDC Role %q: with trust policy %s and permission policy %s: %w", binding.name, trustPolicy, binding.policy, err)
 			}
 			*into = arn
 		}
@@ -932,20 +944,12 @@ func (o *CreateIAMOptions) CreateOIDCResources(ctx context.Context, iamClient aw
 		ingressRoleName := output.Roles.IngressARN[strings.LastIndex(output.Roles.IngressARN, "/")+1:]
 
 		// Cloud Controller Manager's (CCM) managed policy needs to be updated on ROSA to allow new permissions downstream controllers to work.
-		// The permissions are:
-		// - elasticloadbalancing:DescribeTargetGroupAttributes
-		// - elasticloadbalancing:ModifyTargetGroupAttributes
-		//
-		// https://issues.redhat.com/browse/OCPBUGS-65885
-		//
 		// This inline policy must be removed when the following issue is resolved:
-		// https://issues.redhat.com/browse/SREP-2895
-		// https://redhat-internal.slack.com/archives/C03SZLX3A10/p1765396356482459
+		// elasticloadbalancing:SetSecurityGroups: https://redhat.atlassian.net/browse/SPLAT-2742
 		ccmPolicyStatement := `{
 				"Effect": "Allow",
 				"Action": [
-					"elasticloadbalancing:DescribeTargetGroupAttributes",
-					"elasticloadbalancing:ModifyTargetGroupAttributes"
+					"elasticloadbalancing:SetSecurityGroups"
 				],
 				"Resource": "*"
 			}`
@@ -965,7 +969,7 @@ func (o *CreateIAMOptions) CreateOIDCResources(ctx context.Context, iamClient aw
 					]
 				}`, ingressPolicyStatement, ccmPolicyStatement)),
 			}); err != nil {
-				return nil, fmt.Errorf("failed to create role policy %q: with permission policy %s: %v", ingressRoleName, ingressPolicyStatement, err)
+				return nil, fmt.Errorf("failed to create role policy %q: with permission policy %s: %w", ingressRoleName, ingressPolicyStatement, err)
 			}
 			logger.Info("Added inline shared policy to ROSA Managed Role", "role", ingressRoleName)
 		} else {
@@ -978,7 +982,7 @@ func (o *CreateIAMOptions) CreateOIDCResources(ctx context.Context, iamClient aw
 					"Statement": [%s]
 				}`, ingressPolicyStatement)),
 			}); err != nil {
-				return nil, fmt.Errorf("failed to create role policy %q: with permission policy %s: %v", ingressRoleName, ingressPolicyStatement, err)
+				return nil, fmt.Errorf("failed to create role policy %q: with permission policy %s: %w", ingressRoleName, ingressPolicyStatement, err)
 			}
 			logger.Info("Added inline policy to ROSA Ingress Managed Role", "role", ingressRoleName)
 
@@ -991,7 +995,7 @@ func (o *CreateIAMOptions) CreateOIDCResources(ctx context.Context, iamClient aw
 					"Statement": [%s]
 				}`, ccmPolicyStatement)),
 			}); err != nil {
-				return nil, fmt.Errorf("failed to create role policy %q: with permission policy %s: %v", ccmRoleName, ccmPolicyStatement, err)
+				return nil, fmt.Errorf("failed to create role policy %q: with permission policy %s: %w", ccmRoleName, ccmPolicyStatement, err)
 			}
 			logger.Info("Added inline policy to ROSA Cloud Controller Manager Managed Role", "role", ccmRoleName)
 		}

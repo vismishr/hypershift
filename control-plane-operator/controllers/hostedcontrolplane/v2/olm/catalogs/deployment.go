@@ -9,6 +9,7 @@ import (
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/common"
 	"github.com/openshift/hypershift/support/catalogs"
 	component "github.com/openshift/hypershift/support/controlplane-component"
+	"github.com/openshift/hypershift/support/podspec"
 	"github.com/openshift/hypershift/support/thirdparty/library-go/pkg/image/reference"
 	"github.com/openshift/hypershift/support/util"
 
@@ -34,7 +35,7 @@ func (c *catalogOptions) adaptCatalogDeployment(cpContext component.WorkloadCont
 		existingDeployment := &appsv1.Deployment{}
 		if err := cpContext.Client.Get(cpContext, client.ObjectKeyFromObject(deployment), existingDeployment); err != nil {
 			if !apierrors.IsNotFound(err) {
-				return fmt.Errorf("failed to get existing deployment: %v", err)
+				return fmt.Errorf("failed to get existing deployment: %w", err)
 			}
 		} else {
 			// If deployment already exists, imagestream tag will already populate the container image
@@ -43,10 +44,10 @@ func (c *catalogOptions) adaptCatalogDeployment(cpContext component.WorkloadCont
 	}
 
 	if image != "" {
-		util.UpdateContainer("registry", deployment.Spec.Template.Spec.Containers, func(c *corev1.Container) {
+		podspec.UpdateContainer("registry", deployment.Spec.Template.Spec.Containers, func(c *corev1.Container) {
 			c.Image = image
 		})
-		util.UpdateContainer("extract-content", deployment.Spec.Template.Spec.InitContainers, func(c *corev1.Container) {
+		podspec.UpdateContainer("extract-content", deployment.Spec.Template.Spec.InitContainers, func(c *corev1.Container) {
 			c.Image = image
 		})
 	}
@@ -58,7 +59,6 @@ func getCatalogImagesOverrides(cpContext component.WorkloadContext, capabilityIm
 	hcp := cpContext.HCP
 	catalogOverrides := map[string]string{
 		"redhat-operators":    hcp.Annotations[hyperv1.RedHatOperatorsCatalogImageAnnotation],
-		"redhat-marketplace":  hcp.Annotations[hyperv1.RedHatMarketplaceCatalogImageAnnotation],
 		"community-operators": hcp.Annotations[hyperv1.CommunityOperatorsCatalogImageAnnotation],
 		"certified-operators": hcp.Annotations[hyperv1.CertifiedOperatorsCatalogImageAnnotation],
 	}
@@ -95,7 +95,7 @@ func getCatalogImagesOverrides(cpContext component.WorkloadContext, capabilityIm
 
 		digest, _, err := cpContext.ImageMetadataProvider.GetDigest(cpContext, imageRef.Exact(), pullSecret.Data[corev1.DockerConfigJsonKey])
 		if err != nil {
-			return nil, fmt.Errorf("failed to get manifest for image %s: %v", imageRef.Exact(), err)
+			return nil, fmt.Errorf("failed to get manifest for image %s: %w", imageRef.Exact(), err)
 		}
 		imageRef.ID = digest.String()
 
@@ -123,7 +123,7 @@ func checkCatalogImageOverides(images map[string]string) (bool, error) {
 	if override {
 		for _, image := range images {
 			if image == "" {
-				return false, errors.New("if OLM catalog images are overridden, all the values for the 4 default catalogs should be provided")
+				return false, errors.New("if OLM catalog images are overridden, all the values for the 3 default catalogs should be provided")
 			}
 		}
 	}

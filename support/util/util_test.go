@@ -2,6 +2,7 @@ package util
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"unicode/utf8"
 
@@ -9,6 +10,8 @@ import (
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/support/api"
+	"github.com/openshift/hypershift/support/thirdparty/library-go/pkg/image/dockerv1client"
+	"github.com/openshift/hypershift/support/util/fakeimagemetadataprovider"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,17 +31,17 @@ func TestCompressDecompress(t *testing.T) {
 		compressed []byte
 	}{
 		{
-			name:       "Text",
+			name:       "When compressing text data, it should encode it correctly",
 			payload:    []byte("The quick brown fox jumps over the lazy dog."),
 			compressed: []byte("H4sIAAAAAAAC/wrJSFUoLM1MzlZIKsovz1NIy69QyCrNLShWyC9LLVIoyUhVyEmsqlRIyU/XAwQAAP//6SWQUSwAAAA="),
 		},
 		{
-			name:       "Empty",
+			name:       "When compressing empty data, it should return empty data",
 			payload:    []byte{},
 			compressed: []byte{},
 		},
 		{
-			name:       "Nil",
+			name:       "When compressing nil data, it should return nil",
 			payload:    nil,
 			compressed: nil,
 		},
@@ -70,11 +73,11 @@ func TestConvertRegistryOverridesToCommandLineFlag(t *testing.T) {
 		expectedFlag      string
 	}{
 		{
-			name:         "No registry overrides",
+			name:         "When there are no registry overrides it should return empty flag",
 			expectedFlag: "=",
 		},
 		{
-			name: "Registry overrides with single mirrors",
+			name: "When registry overrides have single mirrors it should return correct flag",
 			registryOverrides: map[string]string{
 				"registry1": "mirror1.1",
 				"registry2": "mirror2.1",
@@ -103,11 +106,11 @@ func TestConvertOpenShiftImageRegistryOverridesToCommandLineFlag(t *testing.T) {
 		expectedFlag      string
 	}{
 		{
-			name:         "No registry overrides",
+			name:         "When there are no registry overrides it should return empty flag",
 			expectedFlag: "=",
 		},
 		{
-			name: "Registry overrides with single mirrors",
+			name: "When registry overrides have single mirrors it should return correct flag",
 			registryOverrides: map[string][]string{
 				"registry1": {
 					"mirror1.1",
@@ -122,7 +125,7 @@ func TestConvertOpenShiftImageRegistryOverridesToCommandLineFlag(t *testing.T) {
 			expectedFlag: "registry1=mirror1.1,registry2=mirror2.1,registry3=mirror3.1",
 		},
 		{
-			name: "Registry overrides with multiple mirrors",
+			name: "When registry overrides have multiple mirrors it should return correct flag",
 			registryOverrides: map[string][]string{
 				"registry1": {
 					"mirror1.1",
@@ -138,6 +141,21 @@ func TestConvertOpenShiftImageRegistryOverridesToCommandLineFlag(t *testing.T) {
 				},
 			},
 			expectedFlag: "registry1=mirror1.1,registry1=mirror1.2,registry1=mirror1.3,registry2=mirror2.1,registry2=mirror2.2,registry3=mirror3.1",
+		},
+		{
+			name: "When mirrors are in non-alphabetical order, it should sort them deterministically",
+			registryOverrides: map[string][]string{
+				"cp.icr.io/cp": {
+					"mirror-c.example.com",
+					"mirror-a.example.com",
+					"mirror-b.example.com",
+				},
+				"icr.io/cpopen": {
+					"mirror-z.example.com",
+					"mirror-x.example.com",
+				},
+			},
+			expectedFlag: "cp.icr.io/cp=mirror-a.example.com,cp.icr.io/cp=mirror-b.example.com,cp.icr.io/cp=mirror-c.example.com,icr.io/cpopen=mirror-x.example.com,icr.io/cpopen=mirror-z.example.com",
 		},
 	}
 
@@ -160,16 +178,16 @@ func TestConvertImageRegistryOverrideStringToMap(t *testing.T) {
 		input          string
 	}{
 		{
-			name:  "Empty string",
+			name:  "When input is empty string, it should return nil",
 			input: "",
 		},
 		{
-			name:  "No registry overrides",
+			name:  "When input has no registry overrides, it should return nil",
 			input: "=",
 			//expectedOutput: make(map[string][]string),
 		},
 		{
-			name: "Registry overrides with single mirrors",
+			name: "When input has single mirrors, it should return correct map",
 			expectedOutput: map[string][]string{
 				"registry1": {
 					"mirror1.1",
@@ -185,7 +203,7 @@ func TestConvertImageRegistryOverrideStringToMap(t *testing.T) {
 			input: "registry1=mirror1.1,registry2=mirror2.1,registry3=mirror3.1",
 		},
 		{
-			name: "Registry overrides with multiple mirrors",
+			name: "When input has multiple mirrors, it should return correct map",
 			expectedOutput: map[string][]string{
 				"registry1": {
 					"mirror1.1",
@@ -263,112 +281,6 @@ func testDecompressFuncErr(t *testing.T, payload []byte) {
 	g.Expect(out.String()).To(BeEmpty(), "should be an empty string")
 }
 
-func TestFirstUsableIP(t *testing.T) {
-	tests := []struct {
-		name    string
-		cidr    string
-		want    string
-		wantErr bool
-	}{
-		{
-			name:    "Given IPv4 CIDR, it should return the first ip of the network range",
-			cidr:    "192.168.1.0/24",
-			want:    "192.168.1.1",
-			wantErr: false,
-		},
-		{
-			name:    "Given IPv6 CIDR, it should return the first ip of the network range",
-			cidr:    "2000::/3",
-			want:    "2000::1",
-			wantErr: false,
-		},
-		{
-			name:    "Given a malformed IPv4 CIDR, it should return empty string and err",
-			cidr:    "192.168.1.35.53/24",
-			want:    "",
-			wantErr: true,
-		},
-		{
-			name:    "Given a malformed IPv6 CIDR, it should return empty string and err",
-			cidr:    "2001::44444444444444/17",
-			want:    "",
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := FirstUsableIP(tt.cidr)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("FirstUsableIP() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if got != tt.want {
-				t.Errorf("FirstUsableIP() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestParseNodeSelector(t *testing.T) {
-	tests := []struct {
-		name string
-		str  string
-		want map[string]string
-	}{
-		{
-			name: "Given a valid node selector string, it should return a map of key value pairs",
-			str:  "key1=value1,key2=value2,key3=value3",
-			want: map[string]string{
-				"key1": "value1",
-				"key2": "value2",
-				"key3": "value3",
-			},
-		},
-		{
-			name: "Given a valid node selector string with empty values, it should return a map of key value pairs",
-			str:  "key1=,key2=value2,key3=",
-			want: map[string]string{
-				"key2": "value2",
-			},
-		},
-		{
-			name: "Given a valid node selector string with empty keys, it should return a map of key value pairs",
-			str:  "=value1,key2=value2,=value3",
-			want: map[string]string{
-				"key2": "value2",
-			},
-		},
-		{
-			name: "Given a valid node selector string with empty string, it should return an empty map",
-			str:  "",
-			want: nil,
-		},
-		{
-			name: "Given a valid node selector string with invalid key value pairs, it should return a map of key value pairs",
-			str:  "key1=value1,key2,key3=value3",
-			want: map[string]string{
-				"key1": "value1",
-				"key3": "value3",
-			},
-		},
-		{
-			name: "Given a valid node selector string with values that include =, it should return a map of key value pairs",
-			str:  "key1=value1=one,key2,key3=value3=three",
-			want: map[string]string{
-				"key1": "value1=one",
-				"key3": "value3=three",
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			g := NewWithT(t)
-			got := ParseNodeSelector(tt.str)
-			g.Expect(got).To(Equal(tt.want))
-		})
-	}
-}
-
 func TestSanitizeIgnitionPayload(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -376,27 +288,27 @@ func TestSanitizeIgnitionPayload(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:    "Simple valid Ignition payload",
+			name:    "When payload is a simple valid Ignition config, it should not return error",
 			payload: []byte(`{"ignition": {"version": "3.0.0"}}`),
 			wantErr: false,
 		},
 		{
-			name:    "More complex valid Ignition payload",
+			name:    "When payload is a complex valid Ignition config, it should not return error",
 			payload: []byte(`{"ignition":{"version":"3.0.0"},"storage":{"files":[{"path":"/etc/someconfig","mode":420,"contents":{"source":"data:,example%20file%0A"}}]}}`),
 			wantErr: false,
 		},
 		{
-			name:    "Simple invalid Ignition payload (missing closing brace)",
+			name:    "When payload is missing a closing brace, it should return error",
 			payload: []byte(`{"ignition": {"version": "3.0.0"`),
 			wantErr: true,
 		},
 		{
-			name:    "Empty payload",
+			name:    "When payload is empty, it should return error",
 			payload: []byte(``),
 			wantErr: true,
 		},
 		{
-			name:    "Nil payload",
+			name:    "When payload is nil, it should return error",
 			payload: nil,
 			wantErr: true,
 		},
@@ -418,7 +330,7 @@ func TestSanitizeIgnitionPayload(t *testing.T) {
 }
 
 func TestGetMgmtClusterCPUArch(t *testing.T) {
-	fakeKubeClient := fakekubeclient.NewSimpleClientset()
+	fakeKubeClient := fakekubeclient.NewClientset()
 	fakeDiscovery, ok := fakeKubeClient.Discovery().(*fakediscovery.FakeDiscovery)
 
 	if !ok {
@@ -465,7 +377,7 @@ func TestGetPullSecretBytes(t *testing.T) {
 		expectErr bool
 	}{
 		{
-			name: "HC has right pull secret info; no err",
+			name: "When HC has right pull secret info, it should not return error",
 			hc: &hyperv1.HostedCluster{
 				TypeMeta: metav1.TypeMeta{},
 				ObjectMeta: metav1.ObjectMeta{
@@ -488,7 +400,7 @@ func TestGetPullSecretBytes(t *testing.T) {
 			expectErr: false,
 		},
 		{
-			name: "HC has wrong pull secret name; err",
+			name: "When HC has wrong pull secret name, it should return error",
 			hc: &hyperv1.HostedCluster{
 				TypeMeta: metav1.TypeMeta{},
 				ObjectMeta: metav1.ObjectMeta{
@@ -511,7 +423,7 @@ func TestGetPullSecretBytes(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			name: "HC has right pull secret name; pull secret missing key; err",
+			name: "When HC has right pull secret name but pull secret is missing key, it should return error",
 			hc: &hyperv1.HostedCluster{
 				TypeMeta: metav1.TypeMeta{},
 				ObjectMeta: metav1.ObjectMeta{
@@ -561,33 +473,39 @@ func TestGetImageArchitecture(t *testing.T) {
 		name                  string
 		image                 string
 		pullSecretBytes       []byte
-		imageMetadataProvider *RegistryClientImageMetadataProvider
+		imageMetadataProvider ImageMetadataProvider
 		expectedArch          hyperv1.PayloadArchType
 		expectErr             bool
 	}{
 		{
-			name:                  "Bad pull secret, cache empty; err",
-			image:                 "quay.io/openshift-release-dev/ocp-release:4.16.11-ppc64le",
-			pullSecretBytes:       []byte(""),
-			imageMetadataProvider: &RegistryClientImageMetadataProvider{},
-			expectedArch:          "",
-			expectErr:             true,
+			name:            "When providing an empty pull secret, it should return an error",
+			image:           "quay.io/openshift-release-dev/ocp-release:4.16.11-ppc64le",
+			pullSecretBytes: []byte(""),
+			imageMetadataProvider: &fakeimagemetadataprovider.FakeRegistryClientImageMetadataProvider{
+				Err: fmt.Errorf("empty pull secret"),
+			},
+			expectedArch: "",
+			expectErr:    true,
 		},
 		{
-			name:                  "Get amd64 from amd64 image; no err",
-			image:                 "quay.io/openshift-release-dev/ocp-release:4.16.10-x86_64",
-			pullSecretBytes:       pullSecretBytes,
-			imageMetadataProvider: &RegistryClientImageMetadataProvider{},
-			expectedArch:          hyperv1.AMD64,
-			expectErr:             false,
+			name:            "When resolving an amd64 image, it should return AMD64",
+			image:           "quay.io/openshift-release-dev/ocp-release:4.16.10-x86_64",
+			pullSecretBytes: pullSecretBytes,
+			imageMetadataProvider: &fakeimagemetadataprovider.FakeRegistryClientImageMetadataProvider{
+				Result: &dockerv1client.DockerImageConfig{Architecture: "amd64"},
+			},
+			expectedArch: hyperv1.AMD64,
+			expectErr:    false,
 		},
 		{
-			name:                  "Get ppc64le from ppc64le image; no err",
-			image:                 "quay.io/openshift-release-dev/ocp-release:4.16.11-ppc64le",
-			pullSecretBytes:       pullSecretBytes,
-			imageMetadataProvider: &RegistryClientImageMetadataProvider{},
-			expectedArch:          hyperv1.PPC64LE,
-			expectErr:             false,
+			name:            "When resolving a ppc64le image, it should return PPC64LE",
+			image:           "quay.io/openshift-release-dev/ocp-release:4.16.11-ppc64le",
+			pullSecretBytes: pullSecretBytes,
+			imageMetadataProvider: &fakeimagemetadataprovider.FakeRegistryClientImageMetadataProvider{
+				Result: &dockerv1client.DockerImageConfig{Architecture: "ppc64le"},
+			},
+			expectedArch: hyperv1.PPC64LE,
+			expectErr:    false,
 		},
 	}
 
@@ -612,12 +530,12 @@ func TestDetermineHostedClusterPayloadArch(t *testing.T) {
 		name                  string
 		hc                    *hyperv1.HostedCluster
 		secret                *corev1.Secret
-		imageMetadataProvider *RegistryClientImageMetadataProvider
+		imageMetadataProvider ImageMetadataProvider
 		expectedPayloadType   hyperv1.PayloadArchType
 		expectErr             bool
 	}{
 		{
-			name: "Get amd64 from amd64 image; no err",
+			name: "When resolving an amd64 image, it should return AMD64",
 			hc: &hyperv1.HostedCluster{
 				TypeMeta: metav1.TypeMeta{},
 				ObjectMeta: metav1.ObjectMeta{
@@ -640,12 +558,15 @@ func TestDetermineHostedClusterPayloadArch(t *testing.T) {
 					corev1.DockerConfigJsonKey: pullSecretBytes,
 				},
 			},
-			imageMetadataProvider: &RegistryClientImageMetadataProvider{},
-			expectedPayloadType:   hyperv1.AMD64,
-			expectErr:             false,
+			imageMetadataProvider: &fakeimagemetadataprovider.FakeRegistryClientImageMetadataProvider{
+				Result:    &dockerv1client.DockerImageConfig{Architecture: "amd64"},
+				MediaType: "application/vnd.docker.distribution.manifest.v2+json",
+			},
+			expectedPayloadType: hyperv1.AMD64,
+			expectErr:           false,
 		},
 		{
-			name: "Get multi payload from multi image; no err",
+			name: "When resolving a multi-arch image, it should return Multi",
 			hc: &hyperv1.HostedCluster{
 				TypeMeta: metav1.TypeMeta{},
 				ObjectMeta: metav1.ObjectMeta{
@@ -668,9 +589,12 @@ func TestDetermineHostedClusterPayloadArch(t *testing.T) {
 					corev1.DockerConfigJsonKey: pullSecretBytes,
 				},
 			},
-			imageMetadataProvider: &RegistryClientImageMetadataProvider{},
-			expectedPayloadType:   hyperv1.Multi,
-			expectErr:             false,
+			imageMetadataProvider: &fakeimagemetadataprovider.FakeRegistryClientImageMetadataProvider{
+				Result:    &dockerv1client.DockerImageConfig{Architecture: "multi"},
+				MediaType: "application/vnd.docker.distribution.manifest.list.v2+json",
+			},
+			expectedPayloadType: hyperv1.Multi,
+			expectErr:           false,
 		},
 	}
 
@@ -693,86 +617,6 @@ func TestDetermineHostedClusterPayloadArch(t *testing.T) {
 	}
 }
 
-func TestIsIPv4CIDR(t *testing.T) {
-	tests := []struct {
-		input       string
-		expected    bool
-		expectError bool
-	}{
-		// Valid IPv4 CIDRs
-		{"192.168.1.0/24", true, false},
-		{"10.0.0.0/8", true, false},
-
-		// Valid IPv6 CIDRs
-		{"2001:db8::/32", false, false},
-		{"fd00::/8", false, false},
-
-		// Invalid inputs
-		{"invalid", false, true},
-		{"192.168.1.1/33", false, true},  // Invalid CIDR prefix
-		{"", false, true},                // Empty input
-		{"1234::5678::/64", false, true}, // Malformed IP
-
-		// Edge cases
-		{"0.0.0.0/0", true, false},
-		{"255.255.255.255/32", true, false},
-	}
-
-	for _, test := range tests {
-		t.Run(test.input, func(t *testing.T) {
-			g := NewWithT(t)
-			result, err := IsIPv4CIDR(test.input)
-			if test.expectError {
-				g.Expect(err).To(HaveOccurred(), "Expected an error for input '%s'", test.input)
-			} else {
-				g.Expect(err).ToNot(HaveOccurred(), "Did not expect an error for input '%s'", test.input)
-			}
-
-			g.Expect(result).To(Equal(test.expected), "Unexpected result for input '%s'", test.input)
-		})
-	}
-}
-
-func TestIsIPv4Address(t *testing.T) {
-	tests := []struct {
-		input       string
-		expected    bool
-		expectError bool
-	}{
-		// Valid IPv4 addresses
-		{"192.168.1.1", true, false},
-		{"10.0.0.1", true, false},
-
-		// Valid IPv6 addresses
-		{"2001:db8::1", false, false},
-		{"fd00::1", false, false},
-
-		// Invalid inputs
-		{"invalid", false, true},
-		{"192.168.1.256", false, true}, // Invalid IPv4 address
-		{"", false, true},              // Empty input
-		{"1234::5678::1", false, true}, // Malformed IP
-
-		// Edge cases
-		{"0.0.0.0", true, false},
-		{"255.255.255.255", true, false},
-	}
-
-	for _, test := range tests {
-		t.Run(test.input, func(t *testing.T) {
-			g := NewWithT(t)
-			result, err := IsIPv4Address(test.input)
-			if test.expectError {
-				g.Expect(err).To(HaveOccurred(), "Expected an error for input '%s'", test.input)
-			} else {
-				g.Expect(err).ToNot(HaveOccurred(), "Did not expect an error for input '%s'", test.input)
-			}
-
-			g.Expect(result).To(Equal(test.expected), "Unexpected result for input '%s'", test.input)
-		})
-	}
-}
-
 func TestRemoveEmptyJSONField(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -781,74 +625,74 @@ func TestRemoveEmptyJSONField(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "Remove empty field from JSON - at the end",
+			name:     "When empty field is at the end, it should remove it",
 			input:    `{"field1": "value1", "field2": ""}`,
 			field:    "field2",
 			expected: `{"field1": "value1"}`,
 		},
 		{
-			name:     "Remove empty field from JSON - at the beginning",
+			name:     "When empty field is at the beginning, it should remove it",
 			input:    `{"field1": "", "field2": "value2"}`,
 			field:    "field1",
 			expected: `{"field2": "value2"}`,
 		},
 		{
-			name:     "Remove empty field from JSON - in the middle",
+			name:     "When empty field is in the middle, it should remove it",
 			input:    `{"field1": "value1", "field2": "", "field3": "value3"}`,
 			field:    "field2",
 			expected: `{"field1": "value1", "field3": "value3"}`,
 		},
 		{
-			name:     "Remove empty field from JSON - without spaces - at the beginning",
+			name:     "When empty field without spaces is at the beginning, it should remove it",
 			input:    `{"field1":"","field2":"value2"}`,
 			field:    "field1",
 			expected: `{"field2":"value2"}`,
 		},
 		{
-			name:     "Remove empty field from JSON - without spaces - in the middle",
+			name:     "When empty field without spaces is in the middle, it should remove it",
 			input:    `{"field1":"value1","field2":"","field3":"value3"}`,
 			field:    "field2",
 			expected: `{"field1":"value1","field3":"value3"}`,
 		},
 		{
-			name:     "Remove empty field from JSON - without spaces - at the end",
+			name:     "When empty field without spaces is at the end, it should remove it",
 			input:    `{"field1":"value1","field2":""}`,
 			field:    "field2",
 			expected: `{"field1":"value1"}`,
 		},
 
 		{
-			name:     "Keep non-empty field from JSON",
+			name:     "When field is non-empty, it should keep it",
 			input:    `{"field1": "value1", "field2": "value2"}`,
 			field:    "field2",
 			expected: `{"field1": "value1", "field2": "value2"}`,
 		},
 		{
-			name:     "Remove non-existent field from JSON returns the same JSON",
+			name:     "When field does not exist, it should return the same JSON",
 			input:    `{"field1": "value1"}`,
 			field:    "field2",
 			expected: `{"field1": "value1"}`,
 		},
 		{
-			name:     "Empty JSON returns empty JSON",
+			name:     "When JSON is empty, it should return empty JSON",
 			input:    `{}`,
 			field:    "field1",
 			expected: `{}`,
 		},
 		{
-			name:     "Empty JSON returns empty JSON - empty field",
+			name:     "When JSON is empty and field is empty, it should return empty JSON",
 			input:    `{}`,
 			field:    "",
 			expected: `{}`,
 		},
 		{
-			name:     "Remove nested empty field from JSON",
+			name:     "When nested field is empty, it should remove it",
 			input:    `{"field1": "value1", "field2": {"field3": ""}}`,
 			field:    "field3",
 			expected: `{"field1": "value1", "field2": {}}`,
 		},
 		{
-			name:     "Remove nested empty field from JSON - in the middle",
+			name:     "When nested empty field is in the middle, it should remove it",
 			input:    `{"field1": "value1", "field2": {"field3": "value3", "field4": "value4", "field5": ""}}`,
 			field:    "field5",
 			expected: `{"field1": "value1", "field2": {"field3": "value3", "field4": "value4"}}`,
@@ -864,37 +708,6 @@ func TestRemoveEmptyJSONField(t *testing.T) {
 	}
 }
 
-func TestHostFromURL(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-		wantErr  bool
-	}{
-		{"http://example.com", "example.com", false},
-		{"https://example.com:443", "example.com", false},
-		{"http://localhost:8080", "localhost", false},
-		{"https://127.0.0.1:9000", "127.0.0.1", false},
-		{"ftp://example.org:21", "example.org", false},
-		{"http://[::1]:8080", "::1", false},                // IPv6 localhost
-		{"http://[2001:db8::1]:443", "2001:db8::1", false}, // IPv6 example
-		{"??", "", true},           // Invalid URL
-		{"http://:8080", "", true}, // Missing hostname
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			g := NewWithT(t)
-			result, err := HostFromURL(tt.input)
-			if tt.wantErr {
-				g.Expect(err).To(HaveOccurred())
-			} else {
-				g.Expect(err).ToNot(HaveOccurred())
-			}
-			g.Expect(result).To(Equal(tt.expected))
-		})
-	}
-}
-
 func TestCountAvailableNodes(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
@@ -906,7 +719,7 @@ func TestCountAvailableNodes(t *testing.T) {
 		expectErr bool
 	}{
 		{
-			name: "all nodes ready and schedulable",
+			name: "When all nodes are ready and schedulable, it should count all of them",
 			nodes: []corev1.Node{
 				{
 					ObjectMeta: metav1.ObjectMeta{Name: "node1"},
@@ -930,7 +743,7 @@ func TestCountAvailableNodes(t *testing.T) {
 			expected: 2,
 		},
 		{
-			name: "one node cordoned",
+			name: "When one node is cordoned, it should exclude it from the count",
 			nodes: []corev1.Node{
 				{
 					ObjectMeta: metav1.ObjectMeta{Name: "node1"},
@@ -954,7 +767,7 @@ func TestCountAvailableNodes(t *testing.T) {
 			expected: 1,
 		},
 		{
-			name: "one node not ready",
+			name: "When one node is not ready, it should exclude it from the count",
 			nodes: []corev1.Node{
 				{
 					ObjectMeta: metav1.ObjectMeta{Name: "node1"},
@@ -978,7 +791,7 @@ func TestCountAvailableNodes(t *testing.T) {
 			expected: 1,
 		},
 		{
-			name:     "no nodes",
+			name:     "When there are no nodes, it should return zero",
 			nodes:    []corev1.Node{},
 			expected: 0,
 		},
@@ -1008,4 +821,53 @@ func TestCountAvailableNodes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHashConfigMapData(t *testing.T) {
+	testCases := []struct {
+		name string
+		data map[string]string
+	}{
+		{
+			name: "When data is nil, it should return empty string",
+			data: nil,
+		},
+		{
+			name: "When data is empty, it should return empty string",
+			data: map[string]string{},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+			g.Expect(HashConfigMapData(tc.data)).To(Equal(""))
+		})
+	}
+
+	t.Run("When data has entries, it should return a non-empty hash", func(t *testing.T) {
+		g := NewWithT(t)
+		hash := HashConfigMapData(map[string]string{"key": "value"})
+		g.Expect(hash).NotTo(BeEmpty())
+	})
+
+	t.Run("When same keys are inserted in different order, it should return the same hash", func(t *testing.T) {
+		g := NewWithT(t)
+		h1 := HashConfigMapData(map[string]string{"a": "1", "b": "2", "c": "3"})
+		h2 := HashConfigMapData(map[string]string{"c": "3", "a": "1", "b": "2"})
+		g.Expect(h1).To(Equal(h2))
+	})
+
+	t.Run("When keys and values could collide without delimiters, it should produce different hashes", func(t *testing.T) {
+		g := NewWithT(t)
+		h1 := HashConfigMapData(map[string]string{"ab": "c"})
+		h2 := HashConfigMapData(map[string]string{"a": "bc"})
+		g.Expect(h1).NotTo(Equal(h2))
+	})
+
+	t.Run("When data differs, it should return different hashes", func(t *testing.T) {
+		g := NewWithT(t)
+		h1 := HashConfigMapData(map[string]string{"key": "value1"})
+		h2 := HashConfigMapData(map[string]string{"key": "value2"})
+		g.Expect(h1).NotTo(Equal(h2))
+	})
 }

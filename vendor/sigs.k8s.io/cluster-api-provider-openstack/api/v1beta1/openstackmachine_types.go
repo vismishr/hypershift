@@ -20,7 +20,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	clusterv1beta1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 
 	capoerrors "sigs.k8s.io/cluster-api-provider-openstack/pkg/utils/errors"
 	"sigs.k8s.io/cluster-api-provider-openstack/pkg/utils/optional"
@@ -185,11 +185,26 @@ type ServerMetadata struct {
 	Value string `json:"value"`
 }
 
+// MachineInitialization contains information about the initialization status of the machine.
+type MachineInitialization struct {
+	// Provisioned is set to true when the initial provisioning of the machine infrastructure is completed.
+	// The value of this field is never updated after provisioning is completed.
+	// +optional
+	Provisioned bool `json:"provisioned,omitempty"`
+}
+
 // OpenStackMachineStatus defines the observed state of OpenStackMachine.
 type OpenStackMachineStatus struct {
 	// Ready is true when the provider resource is ready.
+	//
+	// Deprecated: This field is deprecated and will be removed in a future API version.
+	// Use status.conditions to determine the ready state of the machine.
 	// +optional
 	Ready bool `json:"ready"`
+
+	// Initialization contains information about the initialization status of the machine.
+	// +optional
+	Initialization *MachineInitialization `json:"initialization,omitempty"`
 
 	// InstanceID is the OpenStack instance ID for this machine.
 	// +optional
@@ -213,6 +228,11 @@ type OpenStackMachineStatus struct {
 	// +optional
 	Resources *MachineResources `json:"resources,omitempty"`
 
+	// FailureReason explains the reson behind a failure.
+	//
+	// Deprecated: This field is deprecated and will be removed in a future API version.
+	// Use status.conditions to report failures.
+	// +optional
 	FailureReason *capoerrors.DeprecatedCAPIMachineStatusError `json:"failureReason,omitempty"`
 
 	// FailureMessage will be set in the event that there is a terminal problem
@@ -231,10 +251,18 @@ type OpenStackMachineStatus struct {
 	// Any transient errors that occur during the reconciliation of Machines
 	// can be added as events to the Machine object and/or logged in the
 	// controller's output.
+	//
+	// Deprecated: This field is deprecated and will be removed in a future API version.
+	// Use status.conditions to report failures.
 	// +optional
 	FailureMessage *string `json:"failureMessage,omitempty"`
 
-	Conditions clusterv1.Conditions `json:"conditions,omitempty"`
+	// Conditions defines current service state of the OpenStackMachine.
+	// This field surfaces into Machine's status.conditions[InfrastructureReady] condition.
+	// The Ready condition must surface issues during the entire lifecycle of the OpenStackMachine
+	// (both during initial provisioning and after the initial provisioning is completed).
+	// +optional
+	Conditions clusterv1beta1.Conditions `json:"conditions,omitempty"`
 }
 
 // +genclient
@@ -267,12 +295,12 @@ type OpenStackMachineList struct {
 }
 
 // GetConditions returns the observations of the operational state of the OpenStackMachine resource.
-func (r *OpenStackMachine) GetConditions() clusterv1.Conditions {
+func (r *OpenStackMachine) GetConditions() clusterv1beta1.Conditions {
 	return r.Status.Conditions
 }
 
 // SetConditions sets the underlying service state of the OpenStackMachine to the predescribed clusterv1.Conditions.
-func (r *OpenStackMachine) SetConditions(conditions clusterv1.Conditions) {
+func (r *OpenStackMachine) SetConditions(conditions clusterv1beta1.Conditions) {
 	r.Status.Conditions = conditions
 }
 

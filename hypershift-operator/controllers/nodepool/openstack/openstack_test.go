@@ -13,8 +13,9 @@ import (
 
 	capiopenstackv1beta1 "sigs.k8s.io/cluster-api-provider-openstack/api/v1beta1"
 
+	"github.com/coreos/stream-metadata-go/stream"
 	"github.com/google/go-cmp/cmp"
-	orc "github.com/k-orc/openstack-resource-controller/api/v1alpha1"
+	orc "github.com/k-orc/openstack-resource-controller/v2/api/v1alpha1"
 )
 
 const flavor = "m1.xlarge"
@@ -29,7 +30,7 @@ func TestOpenStackMachineTemplate(t *testing.T) {
 		checkError          func(*testing.T, error)
 	}{
 		{
-			name: "basic valid node pool",
+			name: "When a basic valid node pool is configured, it should create the expected template",
 			nodePool: hyperv1.NodePoolSpec{
 				ClusterName: "",
 				Replicas:    nil,
@@ -60,7 +61,7 @@ func TestOpenStackMachineTemplate(t *testing.T) {
 			},
 		},
 		{
-			name: "basic additional port",
+			name: "When an additional port is configured, it should include it in the template",
 			nodePool: hyperv1.NodePoolSpec{
 				ClusterName: "",
 				Replicas:    nil,
@@ -107,7 +108,7 @@ func TestOpenStackMachineTemplate(t *testing.T) {
 			},
 		},
 		{
-			name: "additional port for SR-IOV",
+			name: "When an additional port is configured for SR-IOV, it should set VNICType and disable port security",
 			nodePool: hyperv1.NodePoolSpec{
 				ClusterName: "",
 				Replicas:    nil,
@@ -184,7 +185,7 @@ func TestOpenStackMachineTemplate(t *testing.T) {
 						Name: "tests",
 					},
 					Spec: tc.nodePool,
-				}, &releaseinfo.ReleaseImage{})
+				}, &releaseinfo.ReleaseImage{}, "")
 			if tc.checkError != nil {
 				tc.checkError(t, err)
 			} else {
@@ -205,23 +206,24 @@ func TestOpenstackDefaultImage(t *testing.T) {
 	testCases := []struct {
 		name          string
 		releaseImage  *releaseinfo.ReleaseImage
+		streamName    string
 		expectedURL   string
 		expectedHash  string
 		expectedError bool
 	}{
 		{
-			name: "valid metadata",
+			name: "When valid metadata is provided, it should return the image URL and hash",
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							Artifacts: map[string]releaseinfo.CoreOSArtifact{
+							Artifacts: map[string]stream.PlatformArtifacts{
 								"openstack": {
-									Formats: map[string]map[string]releaseinfo.CoreOSFormat{
+									Formats: map[string]stream.ImageFormat{
 										"qcow2.gz": {
-											"disk": {
+											Disk: &stream.Artifact{
 												Location: "https://example.com/image.qcow2.gz",
-												SHA256:   "abcdef1234567890",
+												Sha256:   "abcdef1234567890",
 											},
 										},
 									},
@@ -236,29 +238,29 @@ func TestOpenstackDefaultImage(t *testing.T) {
 			expectedError: false,
 		},
 		{
-			name:          "missing architecture",
-			releaseImage:  &releaseinfo.ReleaseImage{StreamMetadata: &releaseinfo.CoreOSStreamMetadata{Architectures: map[string]releaseinfo.CoreOSArchitecture{}}},
+			name:          "When architecture is missing, it should return error",
+			releaseImage:  &releaseinfo.ReleaseImage{StreamMetadata: &stream.Stream{Architectures: map[string]stream.Arch{}}},
 			expectedError: true,
 		},
 		{
-			name: "missing openstack artifact",
+			name: "When openstack artifact is missing, it should return error",
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
-						"x86_64": {Artifacts: map[string]releaseinfo.CoreOSArtifact{}},
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
+						"x86_64": {Artifacts: map[string]stream.PlatformArtifacts{}},
 					},
 				},
 			},
 			expectedError: true,
 		},
 		{
-			name: "missing qcow2.gz format",
+			name: "When qcow2.gz format is missing, it should return error",
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							Artifacts: map[string]releaseinfo.CoreOSArtifact{
-								"openstack": {Formats: map[string]map[string]releaseinfo.CoreOSFormat{}},
+							Artifacts: map[string]stream.PlatformArtifacts{
+								"openstack": {Formats: map[string]stream.ImageFormat{}},
 							},
 						},
 					},
@@ -267,14 +269,14 @@ func TestOpenstackDefaultImage(t *testing.T) {
 			expectedError: true,
 		},
 		{
-			name: "missing disk artifact",
+			name: "When disk artifact is missing, it should return error",
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							Artifacts: map[string]releaseinfo.CoreOSArtifact{
+							Artifacts: map[string]stream.PlatformArtifacts{
 								"openstack": {
-									Formats: map[string]map[string]releaseinfo.CoreOSFormat{
+									Formats: map[string]stream.ImageFormat{
 										"qcow2.gz": {},
 									},
 								},
@@ -285,11 +287,39 @@ func TestOpenstackDefaultImage(t *testing.T) {
 			},
 			expectedError: true,
 		},
+		{
+			name: "When named stream is used with multi-stream ReleaseImage it should resolve from the named stream",
+			releaseImage: &releaseinfo.ReleaseImage{
+				OSStreams: map[string]*stream.Stream{
+					"rhel-9": {
+						Architectures: map[string]stream.Arch{
+							"x86_64": {
+								Artifacts: map[string]stream.PlatformArtifacts{
+									"openstack": {
+										Formats: map[string]stream.ImageFormat{
+											"qcow2.gz": {
+												Disk: &stream.Artifact{
+													Location: "https://example.com/rhel9-image.qcow2.gz",
+													Sha256:   "rhel9hash1234",
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			streamName:   "rhel-9",
+			expectedURL:  "https://example.com/rhel9-image.qcow2.gz",
+			expectedHash: "rhel9hash1234",
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			url, hash, err := OpenstackDefaultImage(tc.releaseImage)
+			url, hash, err := OpenstackDefaultImage(tc.releaseImage, tc.streamName)
 			if tc.expectedError {
 				if err == nil {
 					t.Error("expected error but got nil")
@@ -313,16 +343,17 @@ func TestOpenStackReleaseImage(t *testing.T) {
 	testCases := []struct {
 		name           string
 		releaseImage   *releaseinfo.ReleaseImage
+		streamName     string
 		expectedResult string
 		expectedError  bool
 	}{
 		{
-			name: "valid metadata",
+			name: "When valid metadata is provided, it should return the release version",
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							Artifacts: map[string]releaseinfo.CoreOSArtifact{
+							Artifacts: map[string]stream.PlatformArtifacts{
 								"openstack": {
 									Release: "4.9.0",
 								},
@@ -335,26 +366,46 @@ func TestOpenStackReleaseImage(t *testing.T) {
 			expectedError:  false,
 		},
 		{
-			name:          "missing architecture",
-			releaseImage:  &releaseinfo.ReleaseImage{StreamMetadata: &releaseinfo.CoreOSStreamMetadata{Architectures: map[string]releaseinfo.CoreOSArchitecture{}}},
+			name:          "When architecture is missing, it should return error",
+			releaseImage:  &releaseinfo.ReleaseImage{StreamMetadata: &stream.Stream{Architectures: map[string]stream.Arch{}}},
 			expectedError: true,
 		},
 		{
-			name: "missing openstack artifact",
+			name: "When openstack artifact is missing, it should return error",
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
-						"x86_64": {Artifacts: map[string]releaseinfo.CoreOSArtifact{}},
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
+						"x86_64": {Artifacts: map[string]stream.PlatformArtifacts{}},
 					},
 				},
 			},
 			expectedError: true,
 		},
+		{
+			name: "When named stream is used with multi-stream ReleaseImage it should resolve from the named stream",
+			releaseImage: &releaseinfo.ReleaseImage{
+				OSStreams: map[string]*stream.Stream{
+					"rhel-9": {
+						Architectures: map[string]stream.Arch{
+							"x86_64": {
+								Artifacts: map[string]stream.PlatformArtifacts{
+									"openstack": {
+										Release: "9.6.20250701",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			streamName:     "rhel-9",
+			expectedResult: "9.6.20250701",
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := OpenStackReleaseImage(tc.releaseImage)
+			result, err := OpenStackReleaseImage(tc.releaseImage, tc.streamName)
 			if tc.expectedError {
 				if err == nil {
 					t.Error("expected error but got nil")
@@ -380,7 +431,7 @@ func TestReconcileOpenStackImageSpec(t *testing.T) {
 		expectedErrorSubstring string
 	}{
 		{
-			name: "valid configuration",
+			name: "When valid configuration is provided, it should reconcile the image spec",
 			hostedCluster: &hyperv1.HostedCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-cluster",
@@ -397,17 +448,17 @@ func TestReconcileOpenStackImageSpec(t *testing.T) {
 				},
 			},
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							Artifacts: map[string]releaseinfo.CoreOSArtifact{
+							Artifacts: map[string]stream.PlatformArtifacts{
 								"openstack": {
 									Release: "4.9.0",
-									Formats: map[string]map[string]releaseinfo.CoreOSFormat{
+									Formats: map[string]stream.ImageFormat{
 										"qcow2.gz": {
-											"disk": {
+											Disk: &stream.Artifact{
 												Location: "https://example.com/image.qcow2.gz",
-												SHA256:   "abcdef1234567890",
+												Sha256:   "abcdef1234567890",
 											},
 										},
 									},
@@ -423,7 +474,7 @@ func TestReconcileOpenStackImageSpec(t *testing.T) {
 					CloudName:  "test-cloud",
 				},
 				Resource: &orc.ImageResourceSpec{
-					Name: "test-cluster-rhcos-4.9.0",
+					Name: ptr.To(orc.OpenStackName("test-cluster-rhcos-4.9.0")),
 					Content: &orc.ImageContent{
 						ContainerFormat: "bare",
 						DiskFormat:      "qcow2",
@@ -440,7 +491,7 @@ func TestReconcileOpenStackImageSpec(t *testing.T) {
 			},
 		},
 		{
-			name: "release image error",
+			name: "When release image has missing architecture, it should return error",
 			hostedCluster: &hyperv1.HostedCluster{
 				Spec: hyperv1.HostedClusterSpec{
 					Platform: hyperv1.PlatformSpec{
@@ -454,8 +505,8 @@ func TestReconcileOpenStackImageSpec(t *testing.T) {
 				},
 			},
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						// Missing x86_64 architecture data will cause the OpenstackDefaultImage to fail
 					},
 				},
@@ -468,7 +519,7 @@ func TestReconcileOpenStackImageSpec(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			imageSpec := &orc.ImageSpec{}
-			err := ReconcileOpenStackImageSpec(tc.hostedCluster, imageSpec, tc.releaseImage)
+			err := ReconcileOpenStackImageSpec(tc.hostedCluster, imageSpec, tc.releaseImage, "")
 
 			if tc.expectedError {
 				if err == nil {
@@ -498,11 +549,11 @@ func TestClusterImageName(t *testing.T) {
 		name           string
 		hostedCluster  *hyperv1.HostedCluster
 		releaseImage   *releaseinfo.ReleaseImage
-		expectedResult string
+		expectedResult orc.OpenStackName
 		expectedError  bool
 	}{
 		{
-			name: "valid release image",
+			name: "When valid release image is provided, it should return the cluster image name",
 			hostedCluster: &hyperv1.HostedCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-cluster",
@@ -510,10 +561,10 @@ func TestClusterImageName(t *testing.T) {
 				},
 			},
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							Artifacts: map[string]releaseinfo.CoreOSArtifact{
+							Artifacts: map[string]stream.PlatformArtifacts{
 								"openstack": {
 									Release: "4.19.0",
 								},
@@ -522,11 +573,11 @@ func TestClusterImageName(t *testing.T) {
 					},
 				},
 			},
-			expectedResult: "test-cluster-rhcos-4.19.0",
+			expectedResult: orc.OpenStackName("test-cluster-rhcos-4.19.0"),
 			expectedError:  false,
 		},
 		{
-			name: "missing architecture",
+			name: "When architecture is missing, it should return error",
 			hostedCluster: &hyperv1.HostedCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-cluster",
@@ -534,14 +585,14 @@ func TestClusterImageName(t *testing.T) {
 				},
 			},
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{},
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{},
 				},
 			},
 			expectedError: true,
 		},
 		{
-			name: "missing openstack artifact",
+			name: "When openstack artifact is missing, it should return error",
 			hostedCluster: &hyperv1.HostedCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-cluster",
@@ -549,10 +600,10 @@ func TestClusterImageName(t *testing.T) {
 				},
 			},
 			releaseImage: &releaseinfo.ReleaseImage{
-				StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-					Architectures: map[string]releaseinfo.CoreOSArchitecture{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
 						"x86_64": {
-							Artifacts: map[string]releaseinfo.CoreOSArtifact{},
+							Artifacts: map[string]stream.PlatformArtifacts{},
 						},
 					},
 				},
@@ -563,7 +614,7 @@ func TestClusterImageName(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := PrefixedClusterImageName(tc.hostedCluster, tc.releaseImage)
+			result, err := PrefixedClusterImageName(tc.hostedCluster, tc.releaseImage, "")
 			if tc.expectedError {
 				if err == nil {
 					t.Error("expected error but got nil")

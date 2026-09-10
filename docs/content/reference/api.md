@@ -21,6 +21,81 @@ OpenShift clusters at scale.</p>
 worker nodes and their kubelets, and the infrastructure on which they run). This
 enables &ldquo;hosted control plane as a service&rdquo; use cases.</p>
 </p>
+##AzurePrivateLinkService { #hypershift.openshift.io/v1beta1.AzurePrivateLinkService }
+<p>
+<p>AzurePrivateLinkService represents Azure Private Link Service infrastructure
+for private connectivity to hosted cluster API servers.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>apiVersion</code></br>
+string</td>
+<td>
+<code>
+hypershift.openshift.io/v1beta1
+</code>
+</td>
+</tr>
+<tr>
+<td>
+<code>kind</code></br>
+string
+</td>
+<td><code>AzurePrivateLinkService</code></td>
+</tr>
+<tr>
+<td>
+<code>metadata</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta">
+Kubernetes meta/v1.ObjectMeta
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>metadata is the metadata for the AzurePrivateLinkService.</p>
+Refer to the Kubernetes API documentation for the fields of the
+<code>metadata</code> field.
+</td>
+</tr>
+<tr>
+<td>
+<code>spec,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzurePrivateLinkServiceSpec">
+AzurePrivateLinkServiceSpec
+</a>
+</em>
+</td>
+<td>
+<p>spec is the specification for the AzurePrivateLinkService.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>status,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzurePrivateLinkServiceStatus">
+AzurePrivateLinkServiceStatus
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>status is the status of the AzurePrivateLinkService.</p>
+</td>
+</tr>
+</tbody>
+</table>
 ##CertificateSigningRequestApproval { #hypershift.openshift.io/v1beta1.CertificateSigningRequestApproval }
 <p>
 <p>CertificateSigningRequestApproval defines the desired state of CertificateSigningRequestApproval</p>
@@ -178,7 +253,9 @@ This value must be a valid IPv4 or IPv6 address.</p>
 <td>
 <code>forwardingRuleName</code></br>
 <em>
-string
+<a href="#hypershift.openshift.io/v1beta1.GCPResourceName">
+GCPResourceName
+</a>
 </em>
 </td>
 <td>
@@ -195,15 +272,19 @@ Populated by the reconciler via GCP API lookup</p>
 </em>
 </td>
 <td>
-<p>consumerAcceptList specifies which customer projects can connect
-Accepts both project IDs (e.g. &ldquo;my-project-123&rdquo;) and project numbers (e.g. &ldquo;123456789012&rdquo;)</p>
+<p>consumerAcceptList specifies which customer projects can connect.
+Accepts both project IDs (e.g. &ldquo;my-project-123&rdquo;) and project numbers (e.g. &ldquo;123456789012&rdquo;).
+A maximum of 50 entries are allowed.
+See <a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">https://cloud.google.com/resource-manager/docs/creating-managing-projects</a> for project ID and number formats.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>natSubnet</code></br>
 <em>
-string
+<a href="#hypershift.openshift.io/v1beta1.GCPResourceName">
+GCPResourceName
+</a>
 </em>
 </td>
 <td>
@@ -227,6 +308,81 @@ GCPPrivateServiceConnectStatus
 <td>
 <em>(Optional)</em>
 <p>status is the status of the GCPPrivateServiceConnect.</p>
+</td>
+</tr>
+</tbody>
+</table>
+##HCPEtcdBackup { #hypershift.openshift.io/v1beta1.HCPEtcdBackup }
+<p>
+<p>HCPEtcdBackup represents a request to back up etcd for a hosted control plane.
+This resource is feature-gated behind the HCPEtcdBackup feature gate.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>apiVersion</code></br>
+string</td>
+<td>
+<code>
+hypershift.openshift.io/v1beta1
+</code>
+</td>
+</tr>
+<tr>
+<td>
+<code>kind</code></br>
+string
+</td>
+<td><code>HCPEtcdBackup</code></td>
+</tr>
+<tr>
+<td>
+<code>metadata</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#objectmeta-v1-meta">
+Kubernetes meta/v1.ObjectMeta
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>metadata is the metadata for the HCPEtcdBackup.</p>
+Refer to the Kubernetes API documentation for the fields of the
+<code>metadata</code> field.
+</td>
+</tr>
+<tr>
+<td>
+<code>spec,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupSpec">
+HCPEtcdBackupSpec
+</a>
+</em>
+</td>
+<td>
+<p>spec is the specification for the HCPEtcdBackup.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>status,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupStatus">
+HCPEtcdBackupStatus
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>status is the status of the HCPEtcdBackup.</p>
 </td>
 </tr>
 </tbody>
@@ -508,7 +664,7 @@ associated with this HostedCluster.</p>
 </tr>
 <tr>
 <td>
-<code>autoNode</code></br>
+<code>autoNode,omitzero</code></br>
 <em>
 <a href="#hypershift.openshift.io/v1beta1.AutoNode">
 AutoNode
@@ -570,10 +726,11 @@ Kubernetes core/v1.LocalObjectReference
 <p>pullSecret is a local reference to a Secret that must have a &ldquo;.dockerconfigjson&rdquo; key whose content must be a valid Openshift pull secret JSON.
 If the reference is set but none of the above requirements are met, the HostedCluster will enter a degraded state.
 TODO(alberto): Signal this in a condition.
-This pull secret will be part of every payload generated by the controllers for any NodePool of the HostedCluster
-and it will be injected into the container runtime of all NodePools.
-Changing this value will trigger a rollout for all existing NodePools in the cluster.
-Changing the content of the secret inplace will not trigger a rollout and might result in unpredictable behaviour.
+This pull secret is included in NodePool ignition/bootstrap payloads and applied to the container runtime when nodes provision.
+Changing this value will trigger a rollout for all existing NodePools in the cluster (for both replace and inplace upgrade types).
+Updating the referenced Secret&rsquo;s data in place (without changing this reference) does not trigger that rollout.
+In AWS and Azure NodePools using the Replace upgrade strategy, the Secret&rsquo;s data in place changes
+will still propagate the updated credentials down to the guest cluster and kubelet config.
 TODO(alberto): have our own local reference type to include our opinions and avoid transparent changes.</p>
 </td>
 </tr>
@@ -612,7 +769,8 @@ ServiceAccount tokens generated by the control plane API server via &ndash;servi
 The default value is kubernetes.default.svc, which only works for in-cluster
 validation.
 If the platform is AWS and this value is set, the controller will update an s3 object with the appropriate OIDC documents (using the serviceAccountSigningKey info) into that issuerURL.
-The expectation is for this s3 url to be backed by an OIDC provider in the AWS IAM.</p>
+The expectation is for this s3 url to be backed by an OIDC provider in the AWS IAM.
+Once set, this value is immutable.</p>
 </td>
 </tr>
 <tr>
@@ -845,6 +1003,24 @@ Capabilities
 <em>(Optional)</em>
 <p>capabilities allows for disabling optional components at cluster install time.
 This field is optional and once set cannot be changed.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>monitoring,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.MonitoringSpec">
+MonitoringSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>monitoring configures monitoring for the hosted cluster, including
+forwarding of control plane metrics to the hosted cluster&rsquo;s monitoring stack.
+When omitted, metrics forwarding behavior is determined by the
+hypershift.openshift.io/enable-metrics-forwarding annotation for backward compatibility.
+If neither is set, metrics forwarding is disabled.</p>
 </td>
 </tr>
 </table>
@@ -1160,6 +1336,32 @@ TODO: This is set as optional to prevent validation from failing due to a limita
 <a href="https://github.com/kubernetes/kubernetes/issues/108768#issuecomment-1253912215">https://github.com/kubernetes/kubernetes/issues/108768#issuecomment-1253912215</a></p>
 </td>
 </tr>
+<tr>
+<td>
+<code>osImageStream,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.OSImageStreamReference">
+OSImageStreamReference
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>osImageStream specifies an OS stream to be used for nodes in this pool.</p>
+<p>This field can be optionally set to a known OSImageStream name to change
+the OS and Extension images with a well-known, tested, release-provided
+set of images. This enables a streamlined way of switching the pool&rsquo;s
+node OS to a different version than the cluster default, such as
+transitioning to a major RHEL version.</p>
+<p>When set, the referenced stream overrides the default OS images for the
+pool. When omitted, the pool uses the release version&rsquo;s default stream
+(rhel-9 for OCP &lt; 5.0, rhel-10 for OCP &gt;= 5.0).
+Changing this field triggers a rollout. Forward transitions
+(rhel-9 -&gt; rhel-10) are allowed; backward transitions
+(rhel-10 -&gt; rhel-9) are rejected by CEL validation because
+in-place OS downgrades are not supported.</p>
+</td>
+</tr>
 </table>
 </td>
 </tr>
@@ -1175,6 +1377,50 @@ NodePoolStatus
 <td>
 <em>(Optional)</em>
 <p>status is the latest observed status of the NodePool.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###AESCBCKeyStatus { #hypershift.openshift.io/v1beta1.AESCBCKeyStatus }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.SecretEncryptionKeyStatus">SecretEncryptionKeyStatus</a>)
+</p>
+<p>
+<p>AESCBCKeyStatus contains a reference to the AESCBC key secret and a SHA-256 hash
+of its contents for fingerprinting.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>secret,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.SecretReference">
+SecretReference
+</a>
+</em>
+</td>
+<td>
+<p>secret is a reference to the secret containing the AESCBC key.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>dataHash</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>dataHash is the hex-encoded SHA-256 hash of the secret&rsquo;s &ldquo;key&rdquo; data field
+at the time re-encryption completed.</p>
 </td>
 </tr>
 </tbody>
@@ -1221,6 +1467,8 @@ Kubernetes core/v1.LocalObjectReference
 <em>(Optional)</em>
 <p>backupKey defines the old key during the rotation process so previously created
 secrets can continue to be decrypted until they are all re-encrypted with the active key.</p>
+<p>Deprecated: This field will be ignored when status.secretEncryption.activeKey is set.
+The system automatically manages the previous key via the status field.</p>
 </td>
 </tr>
 </tbody>
@@ -1352,6 +1600,74 @@ string
 </tr>
 </tbody>
 </table>
+###AWSClusterResourceTag { #hypershift.openshift.io/v1beta1.AWSClusterResourceTag }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AWSPlatformSpec">AWSPlatformSpec</a>)
+</p>
+<p>
+<p>AWSClusterResourceTag is a tag to apply to AWS resources created for a
+HostedCluster. It extends the base tag with an overridePolicy field that
+controls whether NodePool-level tags can override this tag.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>key</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>key is the key of the tag.
+Must be between 1 and 128 characters and may only contain letters, digits,
+spaces, and the characters _ . : / = + - @</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>value</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>value is the value of the tag.
+Must be between 1 and 256 characters and may only contain letters, digits,
+spaces, and the characters _ . : / = + - @</p>
+<p>Some AWS service do not support empty values. Since tags are added to
+resources in many services, the length of the tag value must meet the
+requirements of all services.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>overridePolicy</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AWSResourceTagOverridePolicy">
+AWSResourceTagOverridePolicy
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>overridePolicy controls whether a NodePool-level tag with the same key can
+override this HostedCluster-level tag.</p>
+<p>When set to &ldquo;Allow&rdquo;, a NodePool tag with the same key will take precedence
+over this HostedCluster tag. When set to &ldquo;Deny&rdquo; or omitted, the
+HostedCluster value is preserved and the NodePool tag is ignored for that
+key.</p>
+</td>
+</tr>
+</tbody>
+</table>
 ###AWSEndpointAccessType { #hypershift.openshift.io/v1beta1.AWSEndpointAccessType }
 <p>
 (<em>Appears on:</em>
@@ -1451,7 +1767,8 @@ string
 ###AWSKMSKeyEntry { #hypershift.openshift.io/v1beta1.AWSKMSKeyEntry }
 <p>
 (<em>Appears on:</em>
-<a href="#hypershift.openshift.io/v1beta1.AWSKMSSpec">AWSKMSSpec</a>)
+<a href="#hypershift.openshift.io/v1beta1.AWSKMSSpec">AWSKMSSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.SecretEncryptionKeyStatus">SecretEncryptionKeyStatus</a>)
 </p>
 <p>
 <p>AWSKMSKeyEntry defines metadata to locate the encryption key in AWS</p>
@@ -1530,6 +1847,8 @@ AWSKMSKeyEntry
 <em>(Optional)</em>
 <p>backupKey defines the old key during the rotation process so previously created
 secrets can continue to be decrypted until they are all re-encrypted with the active key.</p>
+<p>Deprecated: This field will be ignored when status.secretEncryption.activeKey is set.
+The system automatically manages the previous key via the status field.</p>
 </td>
 </tr>
 <tr>
@@ -1665,18 +1984,26 @@ Volume
 <td>
 <code>resourceTags</code></br>
 <em>
-<a href="#hypershift.openshift.io/v1beta1.AWSResourceTag">
-[]AWSResourceTag
+<a href="#hypershift.openshift.io/v1beta1.AWSNodePoolResourceTag">
+[]AWSNodePoolResourceTag
 </a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
-<p>resourceTags is an optional list of additional tags to apply to AWS node
-instances. Changes to this field will be propagated in-place to AWS EC2 instances and their initial EBS volumes.
-Volumes created by the storage operator and attached to instances after they are created do not get these tags applied.</p>
-<p>These will be merged with HostedCluster scoped tags, which take precedence in case of conflicts.
-These take precedence over tags defined out of band (i.e., tags added manually or by other tools outside of HyperShift) in AWS in case of conflicts.</p>
+<p>resourceTags is a list of additional tags to apply to AWS resources created
+for the NodePool. Changes to this field will be propagated in-place to AWS
+EC2 instances and their initial EBS volumes. Volumes created by the storage
+operator and attached to instances after they are created do not get these
+tags applied.
+These are merged with HostedCluster-level tags. By default, HostedCluster
+tags take precedence when both specify the same key. To allow a NodePool
+tag to override a specific HostedCluster tag, set overridePolicy to &ldquo;Allow&rdquo;
+on the HostedCluster tag.
+Tags that only exist at the NodePool level (no conflict) are always applied.
+These take precedence over tags defined out of band (i.e., tags added
+manually or by other tools outside of HyperShift) in AWS in case of
+conflicts.</p>
 <p>See <a href="https://docs.aws.amazon.com/general/latest/gr/aws_tagging.html">https://docs.aws.amazon.com/general/latest/gr/aws_tagging.html</a> for
 information on tagging AWS resources. AWS supports a maximum of 50 tags per
 resource. OpenShift reserves 25 tags for its use, leaving 25 tags available
@@ -1695,6 +2022,57 @@ PlacementOptions
 <td>
 <em>(Optional)</em>
 <p>placement specifies the placement options for the EC2 instances.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###AWSNodePoolResourceTag { #hypershift.openshift.io/v1beta1.AWSNodePoolResourceTag }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AWSNodePoolPlatform">AWSNodePoolPlatform</a>)
+</p>
+<p>
+<p>AWSNodePoolResourceTag is a tag to apply to AWS resources created for a
+NodePool. These tags are merged with HostedCluster-level tags. By default,
+HostedCluster tags take precedence when both specify the same key. To allow
+a NodePool tag to override a specific HostedCluster tag, set overridePolicy
+to &ldquo;Allow&rdquo; on the HostedCluster tag.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>key</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>key is the key of the tag.
+Must be between 1 and 128 characters and may only contain letters, digits,
+spaces, and the characters _ . : / = + - @</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>value</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>value is the value of the tag.
+Must be between 1 and 256 characters and may only contain letters, digits,
+spaces, and the characters _ . : / = + - @</p>
+<p>Some AWS service do not support empty values. Since tags are added to
+resources in many services, the length of the tag value must meet the
+requirements of all services.</p>
 </td>
 </tr>
 </tbody>
@@ -1780,8 +2158,8 @@ integrations such as OIDC.</p>
 <td>
 <code>resourceTags</code></br>
 <em>
-<a href="#hypershift.openshift.io/v1beta1.AWSResourceTag">
-[]AWSResourceTag
+<a href="#hypershift.openshift.io/v1beta1.AWSClusterResourceTag">
+[]AWSClusterResourceTag
 </a>
 </em>
 </td>
@@ -1796,6 +2174,10 @@ for the user.
 Changes to this field will be propagated in-place to AWS resources (VPC Endpoints, EC2 instances, initial EBS volumes and default/endpoint security groups).
 These tags will be propagated to the infrastructure CR in the guest cluster, where other OCP operators might choose to honor this input to reconcile AWS resources created by them.
 Please consult the official documentation for a list of all AWS resources that support in-place tag updates.
+For NodePool-created resources (EC2 instances and their initial EBS volumes), these will be merged with NodePool-scoped tags.
+By default, HostedCluster tags take precedence over NodePool tags when both specify the same key.
+To allow a NodePool tag to override a specific HostedCluster tag, set overridePolicy to &ldquo;Allow&rdquo; on that tag.
+Cluster-scoped resources (VPC endpoints, security groups) only receive HostedCluster tags.
 These take precedence over tags defined out of band (i.e., tags added manually or by other tools outside of HyperShift) in AWS in case of conflicts.</p>
 </td>
 </tr>
@@ -1967,12 +2349,12 @@ They are applied according to the rules defined by the AWS API:
 </table>
 ###AWSResourceTag { #hypershift.openshift.io/v1beta1.AWSResourceTag }
 <p>
-(<em>Appears on:</em>
-<a href="#hypershift.openshift.io/v1beta1.AWSNodePoolPlatform">AWSNodePoolPlatform</a>, 
-<a href="#hypershift.openshift.io/v1beta1.AWSPlatformSpec">AWSPlatformSpec</a>)
-</p>
-<p>
 <p>AWSResourceTag is a tag to apply to AWS resources created for the cluster.</p>
+<p>Deprecated: Use AWSClusterResourceTag, AWSNodePoolResourceTag, or
+AWSEndpointServiceResourceTag instead. AWSClusterResourceTag preserves the
+existing tag precedence (HostedCluster wins by default) and adds an optional
+overridePolicy field. Set overridePolicy to &ldquo;Allow&rdquo; on a HostedCluster tag
+to permit NodePool tags to override it.</p>
 </p>
 <table>
 <thead>
@@ -1990,7 +2372,9 @@ string
 </em>
 </td>
 <td>
-<p>key is the key of the tag.</p>
+<p>key is the key of the tag.
+Must be between 1 and 128 characters and may only contain letters, digits,
+spaces, and the characters _ . : / = + - @</p>
 </td>
 </tr>
 <tr>
@@ -2001,13 +2385,43 @@ string
 </em>
 </td>
 <td>
-<p>value is the value of the tag.</p>
+<p>value is the value of the tag.
+Must be between 1 and 256 characters and may only contain letters, digits,
+spaces, and the characters _ . : / = + - @</p>
 <p>Some AWS service do not support empty values. Since tags are added to
 resources in many services, the length of the tag value must meet the
 requirements of all services.</p>
 </td>
 </tr>
 </tbody>
+</table>
+###AWSResourceTagOverridePolicy { #hypershift.openshift.io/v1beta1.AWSResourceTagOverridePolicy }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AWSClusterResourceTag">AWSClusterResourceTag</a>)
+</p>
+<p>
+<p>AWSResourceTagOverridePolicy specifies whether a HostedCluster-level AWS resource tag
+can be overridden by a NodePool-level tag with the same key.
+This field is only meaningful on HostedCluster-level tags (AWSClusterResourceTag).</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr><td><p>&#34;Allow&#34;</p></td>
+<td><p>AWSResourceTagOverridePolicyAllow permits a NodePool tag to override this
+HostedCluster tag when both share the same key.</p>
+</td>
+</tr><tr><td><p>&#34;Deny&#34;</p></td>
+<td><p>AWSResourceTagOverridePolicyDeny prevents a NodePool tag from overriding
+this HostedCluster tag when both share the same key. The HostedCluster
+value is preserved. This is the default behavior when the field is unset.</p>
+</td>
+</tr></tbody>
 </table>
 ###AWSRoleCredentials { #hypershift.openshift.io/v1beta1.AWSRoleCredentials }
 <p>
@@ -2892,6 +3306,67 @@ ProvisionerConfig
 </tr>
 </tbody>
 </table>
+###AutoNodeStatus { #hypershift.openshift.io/v1beta1.AutoNodeStatus }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.HostedClusterStatus">HostedClusterStatus</a>, 
+<a href="#hypershift.openshift.io/v1beta1.HostedControlPlaneStatus">HostedControlPlaneStatus</a>)
+</p>
+<p>
+<p>AutoNodeStatus contains the observed state of the AutoNode provisioner.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>nodeCount</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>nodeCount is the number of nodes fully provisioned by Karpenter.
+These are node objects that exist in the cluster and carry the karpenter.sh/nodepool label.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>nodeClaimCount</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>nodeClaimCount is the total number of NodeClaims managed by Karpenter.
+This represents what Karpenter intends to provision, whether or not the node object exists yet.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>vcpus</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>vcpus is the total number of virtual CPUs across all Karpenter-managed nodes
+that have registered and reported capacity. This is the sum of CPU capacity
+from each NodeClaim whose corresponding node exists (status.nodeName is set).
+This value is 0 when no Karpenter nodes are provisioned.
+Used by the metrics collector for billing aggregation.</p>
+</td>
+</tr>
+</tbody>
+</table>
 ###AvailabilityPolicy { #hypershift.openshift.io/v1beta1.AvailabilityPolicy }
 <p>
 (<em>Appears on:</em>
@@ -3026,6 +3501,107 @@ This is only valid for self-managed Azure.</p>
 <p>
 <p>AzureClientID is a string that represents the client ID of a managed identity.</p>
 </p>
+###AzureContainerRegistryConfig { #hypershift.openshift.io/v1beta1.AzureContainerRegistryConfig }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AzurePlatformSpec">AzurePlatformSpec</a>)
+</p>
+<p>
+<p>AzureContainerRegistryConfig configures Azure Container Registry integration for a hosted cluster.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>credentials,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzureContainerRegistryCredentialConfig">
+AzureContainerRegistryCredentialConfig
+</a>
+</em>
+</td>
+<td>
+<p>credentials configures authentication for worker nodes pulling images from ACR
+using a user-assigned managed identity.
+The identity does not need to be in the same subscription or resource group as the
+HostedCluster, but it must be in the same Azure AD tenant. The management cluster&rsquo;s
+CAPZ identity must have Microsoft.ManagedIdentity/userAssignedIdentities/*/assign/action
+on the identity&rsquo;s scope to attach it to worker virtual machines at creation time.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###AzureContainerRegistryCredentialConfig { #hypershift.openshift.io/v1beta1.AzureContainerRegistryCredentialConfig }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AzureContainerRegistryConfig">AzureContainerRegistryConfig</a>)
+</p>
+<p>
+<p>AzureContainerRegistryCredentialConfig configures authentication credentials for Azure Container Registry.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>type</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzureContainerRegistryCredentialType">
+AzureContainerRegistryCredentialType
+</a>
+</em>
+</td>
+<td>
+<p>type specifies the credential type used for ACR image pulls.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>managedIdentity,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.UserAssignedManagedIdentity">
+UserAssignedManagedIdentity
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>managedIdentity identifies the user-assigned managed identity used for ACR image pulls.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###AzureContainerRegistryCredentialType { #hypershift.openshift.io/v1beta1.AzureContainerRegistryCredentialType }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AzureContainerRegistryCredentialConfig">AzureContainerRegistryCredentialConfig</a>)
+</p>
+<p>
+<p>AzureContainerRegistryCredentialType identifies the type of credential used for ACR image pulls.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr><td><p>&#34;ManagedIdentity&#34;</p></td>
+<td><p>AzureContainerRegistryCredentialManagedIdentity uses a user-assigned managed identity for ACR authentication.</p>
+</td>
+</tr></tbody>
+</table>
 ###AzureDiagnosticsStorageAccountType { #hypershift.openshift.io/v1beta1.AzureDiagnosticsStorageAccountType }
 <p>
 (<em>Appears on:</em>
@@ -3106,9 +3682,11 @@ applications and dev/test.</p>
 ###AzureKMSKey { #hypershift.openshift.io/v1beta1.AzureKMSKey }
 <p>
 (<em>Appears on:</em>
-<a href="#hypershift.openshift.io/v1beta1.AzureKMSSpec">AzureKMSSpec</a>)
+<a href="#hypershift.openshift.io/v1beta1.AzureKMSSpec">AzureKMSSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.SecretEncryptionKeyStatus">SecretEncryptionKeyStatus</a>)
 </p>
 <p>
+<p>AzureKMSKey defines an Azure Key Vault or Managed HSM key used for KMS encryption.</p>
 </p>
 <table>
 <thead>
@@ -3126,8 +3704,8 @@ string
 </em>
 </td>
 <td>
-<p>keyVaultName is the name of the keyvault. Must match criteria specified at <a href="https://docs.microsoft.com/en-us/azure/key-vault/general/about-keys-secrets-certificates#vault-name-and-object-name">https://docs.microsoft.com/en-us/azure/key-vault/general/about-keys-secrets-certificates#vault-name-and-object-name</a>
-Your Microsoft Entra application used to create the cluster must be authorized to access this keyvault, e.g using the AzureCLI:
+<p>keyVaultName is the name of the Key Vault or Managed HSM. Must match criteria specified at <a href="https://docs.microsoft.com/en-us/azure/key-vault/general/about-keys-secrets-certificates#vault-name-and-object-name">https://docs.microsoft.com/en-us/azure/key-vault/general/about-keys-secrets-certificates#vault-name-and-object-name</a>
+Your Microsoft Entra application used to create the cluster must be authorized to access this resource, e.g using the AzureCLI:
 <code>az keyvault set-policy -n $KEYVAULT_NAME --key-permissions decrypt encrypt --spn &lt;YOUR APPLICATION CLIENT ID&gt;</code></p>
 </td>
 </tr>
@@ -3139,7 +3717,7 @@ string
 </em>
 </td>
 <td>
-<p>keyName is the name of the keyvault key used for encrypt/decrypt</p>
+<p>keyName is the name of the key used for encrypt/decrypt.</p>
 </td>
 </tr>
 <tr>
@@ -3155,13 +3733,36 @@ string
 </tr>
 </tbody>
 </table>
+###AzureKMSKeyVaultType { #hypershift.openshift.io/v1beta1.AzureKMSKeyVaultType }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AzureKMSSpec">AzureKMSSpec</a>)
+</p>
+<p>
+<p>AzureKMSKeyVaultType specifies the Azure service that hosts a KMS key.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr><td><p>&#34;KeyVault&#34;</p></td>
+<td><p>AzureKMSKeyVaultTypeKeyVault indicates that the key is hosted by Azure Key Vault.</p>
+</td>
+</tr><tr><td><p>&#34;ManagedHSM&#34;</p></td>
+<td><p>AzureKMSKeyVaultTypeManagedHSM indicates that the key is hosted by Azure Managed HSM.</p>
+</td>
+</tr></tbody>
+</table>
 ###AzureKMSSpec { #hypershift.openshift.io/v1beta1.AzureKMSSpec }
 <p>
 (<em>Appears on:</em>
 <a href="#hypershift.openshift.io/v1beta1.KMSSpec">KMSSpec</a>)
 </p>
 <p>
-<p>AzureKMSSpec defines metadata about the configuration of the Azure KMS Secret Encryption provider using Azure key vault</p>
+<p>AzureKMSSpec defines metadata about the configuration of the Azure KMS Secret Encryption provider using Azure Key Vault or Managed HSM.</p>
 </p>
 <table>
 <thead>
@@ -3197,11 +3798,13 @@ AzureKMSKey
 <em>(Optional)</em>
 <p>backupKey defines the old key during the rotation process so previously created
 secrets can continue to be decrypted until they are all re-encrypted with the active key.</p>
+<p>Deprecated: This field will be ignored when status.secretEncryption.activeKey is set.
+The system automatically manages the previous key via the status field.</p>
 </td>
 </tr>
 <tr>
 <td>
-<code>kms</code></br>
+<code>kms,omitzero</code></br>
 <em>
 <a href="#hypershift.openshift.io/v1beta1.ManagedIdentity">
 ManagedIdentity
@@ -3209,7 +3812,46 @@ ManagedIdentity
 </em>
 </td>
 <td>
-<p>kms is a pre-existing managed identity used to authenticate with Azure KMS.</p>
+<em>(Optional)</em>
+<p>kms is a pre-existing managed identity used to authenticate with Azure KMS.
+This is used for managed Azure (ARO HCP) clusters.
+kms and workloadIdentity are mutually exclusive.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>workloadIdentity,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.WorkloadIdentity">
+WorkloadIdentity
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>workloadIdentity contains the workload identity used to authenticate
+with Azure Key Vault for KMS encryption via a token-minter sidecar.
+This identity must have &ldquo;Key Vault Crypto User&rdquo; role on the Key Vault.
+kms and workloadIdentity are mutually exclusive.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>keyVaultType</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzureKMSKeyVaultType">
+AzureKMSKeyVaultType
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>keyVaultType specifies whether activeKey and backupKey are hosted by Azure Key Vault or Azure Managed HSM.
+Valid values are &ldquo;KeyVault&rdquo; and &ldquo;ManagedHSM&rdquo;.
+When set to &ldquo;KeyVault&rdquo;, both keys are hosted by Azure Key Vault.
+When set to &ldquo;ManagedHSM&rdquo;, both keys are hosted by Azure Managed HSM.
+The type is immutable; key rotation must remain within the same service.
+When omitted, the keys are treated as Key Vault keys.</p>
 </td>
 </tr>
 <tr>
@@ -3255,6 +3897,15 @@ and traffic must be routed through the private router (Swift).</p>
 </td>
 </tr></tbody>
 </table>
+###AzureManagedIdentityResourceID { #hypershift.openshift.io/v1beta1.AzureManagedIdentityResourceID }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.UserAssignedManagedIdentity">UserAssignedManagedIdentity</a>)
+</p>
+<p>
+<p>AzureManagedIdentityResourceID is an ARM resource ID for a user-assigned managed identity
+in the format /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/{name}.</p>
+</p>
 ###AzureMarketplaceImage { #hypershift.openshift.io/v1beta1.AzureMarketplaceImage }
 <p>
 (<em>Appears on:</em>
@@ -3606,7 +4257,7 @@ string
 </td>
 <td>
 <em>(Optional)</em>
-<p>cloud is the cloud environment identifier, valid values could be found here: <a href="https://github.com/Azure/go-autorest/blob/4c0e21ca2bbb3251fe7853e6f9df6397f53dd419/autorest/azure/environments.go#L33">https://github.com/Azure/go-autorest/blob/4c0e21ca2bbb3251fe7853e6f9df6397f53dd419/autorest/azure/environments.go#L33</a></p>
+<p>cloud is the Azure cloud environment identifier.</p>
 </td>
 </tr>
 <tr>
@@ -3721,7 +4372,534 @@ string
 <p>tenantID is a unique identifier for the tenant where Azure resources will be created and managed in.</p>
 </td>
 </tr>
+<tr>
+<td>
+<code>containerRegistry,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzureContainerRegistryConfig">
+AzureContainerRegistryConfig
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>containerRegistry configures how worker nodes authenticate to Azure Container Registry (ACR).
+When set, the managed identity is attached to worker virtual machines and its resource ID is
+written into the worker cloud provider config so kubelet&rsquo;s ACR credential provider can
+authenticate without image pull secrets.
+Changing this value will trigger a rollout for all existing NodePools in the cluster.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>topology</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzureTopologyType">
+AzureTopologyType
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>topology specifies the network topology of the API server endpoint for the hosted cluster.
+- Public: The API server is accessible only via a public endpoint.
+- PublicAndPrivate: The API server is accessible via both public and private endpoints.
+- Private: The API server is accessible only via a private endpoint.
+When omitted, this means no opinion and the platform is left to choose a reasonable
+default, which is subject to change over time. The current default is Public.
+This field must be set explicitly for self-hosted environments (WorkloadIdentities).
+Transitions between PublicAndPrivate and Private are allowed after creation.
+Transitions from Public to non-Public (or vice versa) are not allowed.
+When set to Private or PublicAndPrivate, the private field must be provided.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>private,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzurePrivateSpec">
+AzurePrivateSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>private configures private connectivity to the hosted cluster&rsquo;s API server.
+This field is required when topology is Private or PublicAndPrivate, and must
+not be set when topology is Public.
+Once set at cluster creation, this field cannot be removed, and it cannot be
+added to an existing cluster that was created without it.</p>
+</td>
+</tr>
 </tbody>
+</table>
+###AzurePrivateLinkServiceSpec { #hypershift.openshift.io/v1beta1.AzurePrivateLinkServiceSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AzurePrivateLinkService">AzurePrivateLinkService</a>)
+</p>
+<p>
+<p>AzurePrivateLinkServiceSpec defines the desired state of AzurePrivateLinkService</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>loadBalancerIP</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>loadBalancerIP is the frontend IP address of the internal load balancer that
+fronts the hosted control plane&rsquo;s API server. This field is populated automatically
+by the control plane operator from the kube-apiserver service status.
+It is not set by users directly.
+When set, the value must be a valid IPv4 or IPv6 address.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>subscriptionID</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzureSubscriptionID">
+AzureSubscriptionID
+</a>
+</em>
+</td>
+<td>
+<p>subscriptionID is the Azure subscription ID where the Private Link Service
+resources will be created. Must be a valid UUID consisting of hexadecimal
+characters and hyphens in the format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+where x is a hexadecimal digit <a href="e.g.," title="550e8400-e29b-41d4-a716-446655440000">0-9a-f</a>.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>resourceGroupName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>resourceGroupName is the name of the Azure resource group where the Private Link
+Service resources will be created. Must be 1-90 characters consisting of
+alphanumerics, underscores, hyphens, periods, and parentheses. Cannot end with a period.
+See <a href="https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/resource-name-rules">https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/resource-name-rules</a></p>
+</td>
+</tr>
+<tr>
+<td>
+<code>location</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>location is the Azure region where the Private Link Service resources will be
+created (e.g., &ldquo;eastus&rdquo;, &ldquo;westeurope&rdquo;, &ldquo;centralus&rdquo;). Must match the region
+of the management cluster.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>natSubnetID</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzureSubnetResourceID">
+AzureSubnetResourceID
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>natSubnetID is the full Azure resource ID of the subnet used for Private Link Service
+NAT IP allocation. This subnet must have privateLinkServiceNetworkPolicies disabled.
+If not provided, the controller will auto-create a NAT subnet in the HC&rsquo;s VNet.
+The expected format is:
+/subscriptions/{subscriptionID}/resourceGroups/{resourceGroup}/providers/Microsoft.Network/virtualNetworks/{vnetName}/subnets/{subnetName}</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>additionalAllowedSubscriptions</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzureSubscriptionID">
+[]AzureSubscriptionID
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>additionalAllowedSubscriptions is an optional list of additional Azure subscription IDs
+permitted to create Private Endpoints to the Private Link Service. The guest cluster&rsquo;s
+own subscription (derived from guestSubnetID) is always automatically allowed, so it
+does not need to be listed here.
+Each entry must be a valid UUID of exactly 36 characters consisting of
+lowercase hexadecimal characters and hyphens in the format
+xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx where x is a hexadecimal digit <a href="e.g.," title="550e8400-e29b-41d4-a716-446655440000">0-9a-f</a>.
+A maximum of 50 subscriptions may be specified.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>guestSubnetID</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzureSubnetResourceID">
+AzureSubnetResourceID
+</a>
+</em>
+</td>
+<td>
+<p>guestSubnetID is the full Azure resource ID of the subnet in the guest VNet where
+the Private Endpoint will be created.
+The expected format is:
+/subscriptions/{subscriptionID}/resourceGroups/{resourceGroup}/providers/Microsoft.Network/virtualNetworks/{vnetName}/subnets/{subnetName}</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>guestVNetID</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzureVNetResourceID">
+AzureVNetResourceID
+</a>
+</em>
+</td>
+<td>
+<p>guestVNetID is the full Azure resource ID of the guest VNet for Private DNS zone linking.
+The expected format is:
+/subscriptions/{subscriptionID}/resourceGroups/{resourceGroup}/providers/Microsoft.Network/virtualNetworks/{vnetName}</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>baseDomain</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>baseDomain is the cluster&rsquo;s base domain (e.g., &ldquo;example.hypershift.azure.devcluster.openshift.com&rdquo;).
+Used to create a Private DNS Zone so that worker VMs can resolve the API and OAuth
+hostnames (api-<name>.<baseDomain>, oauth-<name>.<baseDomain>) to the Private Endpoint IP.
+Persisted in spec so that deletion does not depend on the HostedControlPlane still existing.
+baseDomain must be at most 253 characters in length and must consist only of
+lowercase alphanumeric characters, hyphens, and periods. Each period-separated segment
+must start and end with an alphanumeric character.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###AzurePrivateLinkServiceStatus { #hypershift.openshift.io/v1beta1.AzurePrivateLinkServiceStatus }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AzurePrivateLinkService">AzurePrivateLinkService</a>)
+</p>
+<p>
+<p>AzurePrivateLinkServiceStatus defines the observed state of AzurePrivateLinkService</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>conditions</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#condition-v1-meta">
+[]Kubernetes meta/v1.Condition
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>conditions represent the current state of PLS infrastructure.
+Current condition types are: &ldquo;AzurePrivateLinkServiceAvailable&rdquo;, &ldquo;AzureInternalLoadBalancerAvailable&rdquo;,
+&ldquo;AzurePLSCreated&rdquo;, &ldquo;AzurePrivateEndpointAvailable&rdquo;, &ldquo;AzurePrivateDNSAvailable&rdquo;</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>internalLoadBalancerID</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>internalLoadBalancerID is the Azure resource ID of the internal load balancer
+fronting the hosted control plane. The expected format is:
+/subscriptions/{subscriptionID}/resourceGroups/{resourceGroup}/providers/Microsoft.Network/loadBalancers/{loadBalancerName}
+where subscriptionID is a UUID, resourceGroup is up to 90 characters, and
+loadBalancerName is up to 80 characters.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>privateLinkServiceID</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>privateLinkServiceID is the Azure resource ID of the Private Link Service.
+The expected format is:
+/subscriptions/{subscriptionID}/resourceGroups/{resourceGroup}/providers/Microsoft.Network/privateLinkServices/{plsName}</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>privateLinkServiceAlias</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>privateLinkServiceAlias is the globally unique alias for the Private Link Service,
+auto-generated by Azure in the format {plsName}.{guid}.{region}.azure.privatelinkservice.
+MaxLength=170 covers: PLS name (80) + GUID (36) + region (19, e.g. &ldquo;southcentralusstage&rdquo;)</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>privateEndpointID</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>privateEndpointID is the Azure resource ID of the Private Endpoint.
+The expected format is:
+/subscriptions/{subscriptionID}/resourceGroups/{resourceGroup}/providers/Microsoft.Network/privateEndpoints/{endpointName}</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>privateEndpointIP</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>privateEndpointIP is the private IP address assigned to the Private Endpoint.
+Must be a valid IPv4 (e.g., &ldquo;10.0.1.4&rdquo;) or IPv6 address.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>privateDNSZoneID</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>privateDNSZoneID is the Azure resource ID of the Private DNS Zone.
+The expected format is:
+/subscriptions/{subscriptionID}/resourceGroups/{resourceGroup}/providers/Microsoft.Network/privateDnsZones/{zoneName}</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>dnsZoneName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>dnsZoneName is the Private DNS zone name (derived from the KAS hostname).
+Persisted at creation time so that deletion does not depend on the
+HostedControlPlane still existing.
+Must be a valid DNS domain name consisting of alphanumeric characters, hyphens,
+and periods, where each segment starts and ends with an alphanumeric character
+(e.g., &ldquo;api-mycluster.example.hypershift.azure.devcluster.openshift.com&rdquo;).</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>baseDomainDNSZoneID</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>baseDomainDNSZoneID is the Azure resource ID of the base domain Private DNS Zone.
+The expected format is:
+/subscriptions/{subscriptionID}/resourceGroups/{resourceGroup}/providers/Microsoft.Network/privateDnsZones/{zoneName}</p>
+</td>
+</tr>
+</tbody>
+</table>
+###AzurePrivateLinkSpec { #hypershift.openshift.io/v1beta1.AzurePrivateLinkSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AzurePrivateSpec">AzurePrivateSpec</a>)
+</p>
+<p>
+<p>AzurePrivateLinkSpec configures Azure Private Link Service connectivity.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>natSubnetID</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzureSubnetResourceID">
+AzureSubnetResourceID
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>natSubnetID is the Azure resource ID of the subnet used for Private Link Service NAT IP allocation.
+This subnet must have privateLinkServiceNetworkPolicies disabled.
+If not provided, the controller will auto-create a NAT subnet in the HC&rsquo;s VNet.
+The expected format is:
+/subscriptions/{subscriptionID}/resourceGroups/{resourceGroup}/providers/Microsoft.Network/virtualNetworks/{vnetName}/subnets/{subnetName}
+The maximum length is 355 characters.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>additionalAllowedSubscriptions</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzureSubscriptionID">
+[]AzureSubscriptionID
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>additionalAllowedSubscriptions is an optional list of additional Azure subscription IDs
+permitted to create Private Endpoints to the Private Link Service. The guest cluster&rsquo;s
+own subscription is always automatically allowed, so it does not need to be listed here.
+Each item must be a valid UUID consisting of lowercase hexadecimal characters and hyphens,
+in the format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+(e.g., &ldquo;550e8400-e29b-41d4-a716-446655440000&rdquo;). A maximum of 50 subscriptions may be specified.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###AzurePrivateSpec { #hypershift.openshift.io/v1beta1.AzurePrivateSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AzurePlatformSpec">AzurePlatformSpec</a>)
+</p>
+<p>
+<p>AzurePrivateSpec configures private connectivity to an Azure hosted cluster&rsquo;s API server.
+It is a discriminated union keyed on the type field, which selects the private connectivity
+mechanism.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>type</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzurePrivateType">
+AzurePrivateType
+</a>
+</em>
+</td>
+<td>
+<p>type specifies the private connectivity mechanism used for the hosted cluster&rsquo;s API server.
+&ldquo;PrivateLink&rdquo; selects Azure Private Link Service for private API server access.
+&ldquo;Swift&rdquo; selects Azure Swift pod networking for private API server access, used by ARO HCP.
+This field is immutable once set.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>privateLink,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzurePrivateLinkSpec">
+AzurePrivateLinkSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>privateLink configures Azure Private Link Service for private API server access.
+This field is required when type is &ldquo;PrivateLink&rdquo; and must not be set otherwise.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>swift,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzureSwiftSpec">
+AzureSwiftSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>swift configures Azure Swift pod networking for private API server access.
+Swift networking requires the management cluster to be pre-configured with
+Azure Swift support; this is not provisioned by HyperShift automatically.
+This field is required when type is &ldquo;Swift&rdquo; and must not be set otherwise.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###AzurePrivateType { #hypershift.openshift.io/v1beta1.AzurePrivateType }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AzurePrivateSpec">AzurePrivateSpec</a>)
+</p>
+<p>
+<p>AzurePrivateType specifies the type of private connectivity mechanism used for the Azure
+hosted cluster&rsquo;s API server. This acts as the discriminator for the AzurePrivateSpec union.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr><td><p>&#34;PrivateLink&#34;</p></td>
+<td><p>AzurePrivateTypePrivateLink specifies private connectivity using Azure Private Link Service.
+In this mode, the operator creates a Private Link Service backed by the management cluster&rsquo;s
+internal load balancer, and a Private Endpoint in the guest VNet for private API server access.</p>
+</td>
+</tr><tr><td><p>&#34;Swift&#34;</p></td>
+<td><p>AzurePrivateTypeSwift specifies private connectivity using Azure Swift pod networking.
+In this mode, Azure Swift assigns a private IP from the customer VNet directly
+to the hosted cluster&rsquo;s router pods, providing private API server access without a
+separate Private Link Service. This is used by ARO HCP managed clusters.</p>
+</td>
+</tr></tbody>
 </table>
 ###AzureResourceManagedIdentities { #hypershift.openshift.io/v1beta1.AzureResourceManagedIdentities }
 <p>
@@ -3769,6 +4947,91 @@ Azure&rsquo;s API.</p>
 </td>
 </tr>
 </tbody>
+</table>
+###AzureSubnetResourceID { #hypershift.openshift.io/v1beta1.AzureSubnetResourceID }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AzurePrivateLinkServiceSpec">AzurePrivateLinkServiceSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.AzurePrivateLinkSpec">AzurePrivateLinkSpec</a>)
+</p>
+<p>
+<p>AzureSubnetResourceID is a full Azure resource ID for a subnet.
+The expected format is:</p>
+<pre><code>/subscriptions/{subscriptionID}/resourceGroups/{resourceGroup}/providers/Microsoft.Network/virtualNetworks/{vnetName}/subnets/{subnetName}
+</code></pre>
+</p>
+###AzureSubscriptionID { #hypershift.openshift.io/v1beta1.AzureSubscriptionID }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AzurePrivateLinkServiceSpec">AzurePrivateLinkServiceSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.AzurePrivateLinkSpec">AzurePrivateLinkSpec</a>)
+</p>
+<p>
+<p>AzureSubscriptionID is an Azure subscription ID in UUID format.
+Must be exactly 36 characters consisting of hexadecimal digits [0-9a-fA-F] and hyphens
+in the format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (e.g., &ldquo;550e8400-e29b-41d4-a716-446655440000&rdquo;).</p>
+</p>
+###AzureSwiftSpec { #hypershift.openshift.io/v1beta1.AzureSwiftSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AzurePrivateSpec">AzurePrivateSpec</a>)
+</p>
+<p>
+<p>AzureSwiftSpec configures Azure Swift pod networking for private API server access.
+Swift assigns a private IP from the customer VNet directly to the hosted cluster&rsquo;s
+router pods, providing private connectivity without a separate Private Link Service.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>podNetworkInstance</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>podNetworkInstance is the name of a PodNetworkInstance custom resource in the
+hosted control plane namespace. This resource configures Azure Swift pod networking
+for private connectivity to the hosted cluster&rsquo;s router pods.
+The value must be a valid Kubernetes object name (RFC 1123 DNS label): lowercase
+alphanumeric characters or hyphens, must start and end with an alphanumeric character.
+This field is immutable once set.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###AzureTopologyType { #hypershift.openshift.io/v1beta1.AzureTopologyType }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AzurePlatformSpec">AzurePlatformSpec</a>)
+</p>
+<p>
+<p>AzureTopologyType specifies the network topology of the Azure API server endpoint.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr><td><p>&#34;Private&#34;</p></td>
+<td><p>AzureTopologyPrivate indicates the API server is accessible only via a private endpoint.</p>
+</td>
+</tr><tr><td><p>&#34;Public&#34;</p></td>
+<td><p>AzureTopologyPublic indicates the API server is accessible only via a public endpoint.</p>
+</td>
+</tr><tr><td><p>&#34;PublicAndPrivate&#34;</p></td>
+<td><p>AzureTopologyPublicAndPrivate indicates the API server is accessible via both public and private endpoints.</p>
+</td>
+</tr></tbody>
 </table>
 ###AzureVMImage { #hypershift.openshift.io/v1beta1.AzureVMImage }
 <p>
@@ -3883,6 +5146,17 @@ Valid values are ImageID and AzureMarketplace.</p>
 </td>
 </tr></tbody>
 </table>
+###AzureVNetResourceID { #hypershift.openshift.io/v1beta1.AzureVNetResourceID }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AzurePrivateLinkServiceSpec">AzurePrivateLinkServiceSpec</a>)
+</p>
+<p>
+<p>AzureVNetResourceID is a full Azure resource ID for a virtual network.
+The expected format is:</p>
+<pre><code>/subscriptions/{subscriptionID}/resourceGroups/{resourceGroup}/providers/Microsoft.Network/virtualNetworks/{vnetName}
+</code></pre>
+</p>
 ###AzureWorkloadIdentities { #hypershift.openshift.io/v1beta1.AzureWorkloadIdentities }
 <p>
 (<em>Appears on:</em>
@@ -3996,6 +5270,21 @@ WorkloadIdentity
 <td>
 <p>network is the client ID of a federated managed identity, associated with cluster-network-operator, used in
 workload identity authentication.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>controlPlaneOperator,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.WorkloadIdentity">
+WorkloadIdentity
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>controlPlaneOperator is the client ID of a federated managed identity, associated with control-plane-operator,
+used in workload identity authentication for Azure Private Link Service operations.</p>
 </td>
 </tr>
 </tbody>
@@ -4402,7 +5691,9 @@ github.com/openshift/api/config/v1.AuthenticationSpec
 <td>
 <em>(Optional)</em>
 <p>authentication specifies cluster-wide settings for authentication (like OAuth and
-webhook token authenticators).</p>
+webhook token authenticators).
+Note: the serviceAccountIssuer field within this configuration is ignored; the
+HostedCluster&rsquo;s spec.issuerURL is always used as the service account issuer instead.</p>
 </td>
 </tr>
 <tr>
@@ -4901,6 +6192,54 @@ or invalid channel has been specified.</p>
 </tr>
 </tbody>
 </table>
+###ComponentLogLevelSpec { #hypershift.openshift.io/v1beta1.ComponentLogLevelSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.EtcdOperatorSpec">EtcdOperatorSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.KubeAPIServerOperatorSpec">KubeAPIServerOperatorSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.KubeControllerManagerOperatorSpec">KubeControllerManagerOperatorSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.KubeSchedulerOperatorSpec">KubeSchedulerOperatorSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.OAuthServerOperatorSpec">OAuthServerOperatorSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.OpenShiftAPIServerOperatorSpec">OpenShiftAPIServerOperatorSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.OpenShiftControllerManagerOperatorSpec">OpenShiftControllerManagerOperatorSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.OpenShiftOAuthAPIServerOperatorSpec">OpenShiftOAuthAPIServerOperatorSpec</a>)
+</p>
+<p>
+<p>ComponentLogLevelSpec configures the log verbosity for a hosted control plane component.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>logLevel</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.LogLevel">
+LogLevel
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>logLevel sets the log verbosity for the component.
+Valid values are: &ldquo;Normal&rdquo;, &ldquo;Debug&rdquo;, &ldquo;Trace&rdquo;, &ldquo;TraceAll&rdquo;.
+When set to Normal, standard operational log messages are produced for auditing and common operations.
+When set to Debug, more verbose logging is enabled for diagnosing problems.
+When set to Trace, very verbose logging is enabled including function-level tracing.
+When set to TraceAll, the most verbose logging is used, including full API body content,
+this can cause significant performance impact and produce large volumes of logs.
+When omitted, this means the user has no opinion and the platform
+chooses a reasonable default, which is subject to change over time.
+The current default log level is Normal.</p>
+</td>
+</tr>
+</tbody>
+</table>
 ###ComponentResource { #hypershift.openshift.io/v1beta1.ComponentResource }
 <p>
 (<em>Appears on:</em>
@@ -4982,6 +6321,30 @@ created in the guest VPC</p>
 <td><p>AWSEndpointServiceAvailable indicates whether the AWS Endpoint Service
 has been created for the specified NLB in the management VPC</p>
 </td>
+</tr><tr><td><p>&#34;AutoNodeEnabled&#34;</p></td>
+<td><p>AutoNodeEnabled indicates whether AutoNode is configured and operational for this HostedCluster.
+<strong>True</strong> means AutoNode is configured in the HostedCluster spec and the Karpenter components are fully rolled out and ready.
+<strong>False / AutoNodeProgressing</strong> means AutoNode is being enabled or disabled — the operation is in progress.
+<strong>False / AutoNodeNotConfigured</strong> means AutoNode is not configured in the spec and all Karpenter components have been removed.</p>
+</td>
+</tr><tr><td><p>&#34;AzureInternalLoadBalancerAvailable&#34;</p></td>
+<td><p>AzureInternalLoadBalancerAvailable indicates the ILB has been provisioned with a frontend IP</p>
+</td>
+</tr><tr><td><p>&#34;AzurePLSCreated&#34;</p></td>
+<td><p>AzurePLSCreated indicates the Azure Private Link Service has been created in the management cluster resource group</p>
+</td>
+</tr><tr><td><p>&#34;AzurePrivateDNSAvailable&#34;</p></td>
+<td><p>AzurePrivateDNSAvailable indicates the Private DNS zone and A records have been created</p>
+</td>
+</tr><tr><td><p>&#34;AzurePrivateEndpointAvailable&#34;</p></td>
+<td><p>AzurePrivateEndpointAvailable indicates the Private Endpoint has been created in the guest VNet</p>
+</td>
+</tr><tr><td><p>&#34;AzurePrivateLinkServiceAvailable&#34;</p></td>
+<td><p>AzurePrivateLinkServiceAvailable indicates overall PLS infrastructure availability</p>
+</td>
+</tr><tr><td><p>&#34;BackupCompleted&#34;</p></td>
+<td><p>BackupCompleted indicates whether the etcd backup has completed.</p>
+</td>
 </tr><tr><td><p>&#34;CVOScaledDown&#34;</p></td>
 <td></td>
 </tr><tr><td><p>&#34;CloudResourcesDestroyed&#34;</p></td>
@@ -5014,6 +6377,14 @@ underlying cluster&rsquo;s ClusterVersion.</p>
 <td><p>ClusterVersionUpgradeable indicates the Upgradeable condition in the
 underlying cluster&rsquo;s ClusterVersion.</p>
 </td>
+</tr><tr><td><p>&#34;ConfigOperatorReconciliationSucceeded&#34;</p></td>
+<td><p>ConfigOperatorReconciliationSucceeded indicates if the HostedCluster Config
+Operator (HCCO) reconciliation succeeded. The HCCO is responsible for
+reconciling resources inside the hosted cluster (e.g. global configuration,
+CRDs, RBAC, and connectivity checks).
+A failure here often means a software bug, a non-stable cluster, or
+connectivity issues between the control plane and the hosted cluster.</p>
+</td>
 </tr><tr><td><p>&#34;Available&#34;</p></td>
 <td><p>ControlPlaneComponentAvailable indicates whether the ControlPlaneComponent is available.</p>
 </td>
@@ -5045,6 +6416,18 @@ components like the konnectivity-agent workload.
 </tr><tr><td><p>&#34;EtcdAvailable&#34;</p></td>
 <td><p>EtcdAvailable bubbles up the same condition from HCP. It signals if etcd is available.
 A failure here often means a software bug or a non-stable cluster.</p>
+</td>
+</tr><tr><td><p>&#34;EtcdBackupSucceeded&#34;</p></td>
+<td><p>EtcdBackupSucceeded bubbles up from HCP. It indicates the result of the
+most recent etcd backup. True means the last backup completed successfully;
+False means a backup is in progress or the last backup failed.</p>
+</td>
+</tr><tr><td><p>&#34;EtcdDataEncryptionUpToDate&#34;</p></td>
+<td><p>EtcdDataEncryptionUpToDate indicates whether all etcd data is encrypted with the
+currently active encryption key.
+True: all data confirmed encrypted with the active key.
+False: re-encryption is in progress or has failed.
+Absent: encryption is not configured.</p>
 </td>
 </tr><tr><td><p>&#34;EtcdRecoveryActive&#34;</p></td>
 <td><p>EtcdRecoveryActive indicates that the Etcd cluster is failing and the
@@ -5127,6 +6510,12 @@ hosted cluster can be live migrated without experiencing a node restart</p>
 desired platform are valid.
 A failure here is unlikely to resolve without the changing user input.</p>
 </td>
+</tr><tr><td><p>&#34;PublicEndpointExposed&#34;</p></td>
+<td><p>PublicEndpointExposed indicates whether public API server endpoints are
+currently configured and exposed for this cluster via the management
+cluster&rsquo;s shared ingress. Status reflects observed state: True means
+public endpoints are reachable, False means they are not.</p>
+</td>
 </tr><tr><td><p>&#34;ReconciliationActive&#34;</p></td>
 <td><p>ReconciliationActive indicates if reconciliation of the HostedCluster is
 active or paused hostedCluster.spec.pausedUntil.</p>
@@ -5206,6 +6595,15 @@ e.g. the user-provided IDP configuration provided is invalid or the IDP is not r
 <td><p>ValidKubeVirtInfraNetworkMTU indicates if the MTU configured on an infra cluster
 hosting a guest cluster utilizing kubevirt platform is a sufficient value that will avoid
 performance degradation due to fragmentation of the double encapsulation in ovn-kubernetes</p>
+</td>
+</tr><tr><td><p>&#34;ValidKubeVirtInfraNetworkPolicyRBAC&#34;</p></td>
+<td><p>ValidKubeVirtInfraNetworkPolicyRBAC indicates whether the external infra
+kubeconfig has sufficient permissions to create/update the virt-launcher network policy
+on the infrastructure cluster. This covers both reading the
+cluster network configuration (networks.config.openshift.io) for CIDR-
+based egress blocking and creating/updating NetworkPolicy resources in
+the infra namespace. When false, tenant isolation may be weaker: the
+NetworkPolicy may be missing or lack CIDR-based egress restrictions.</p>
 </td>
 </tr><tr><td><p>&#34;ValidOIDCConfiguration&#34;</p></td>
 <td><p>ValidOIDCConfiguration indicates if an AWS cluster&rsquo;s OIDC condition is
@@ -5363,7 +6761,7 @@ ControlPlaneComponentStatus
 <em>(Optional)</em>
 <p>conditions contains details for the current state of the ControlPlane Component.
 If there is an error, then the Available condition will be false.</p>
-<p>Current condition types are: &ldquo;Available&rdquo;</p>
+<p>Current condition types are: &ldquo;Available&rdquo;, &ldquo;RolloutComplete&rdquo;</p>
 </td>
 </tr>
 <tr>
@@ -5390,6 +6788,18 @@ string
 <td>
 <em>(Optional)</em>
 <p>resources is a list of the resources reconciled by this component.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>observedGeneration</code></br>
+<em>
+int64
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>observedGeneration reports which generation of the HostedControlPlane spec has been reconciled by this component.</p>
 </td>
 </tr>
 </tbody>
@@ -5537,6 +6947,156 @@ ManagedIdentity
 </tr>
 </tbody>
 </table>
+###ControlPlaneUpdateHistory { #hypershift.openshift.io/v1beta1.ControlPlaneUpdateHistory }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.ControlPlaneVersionStatus">ControlPlaneVersionStatus</a>)
+</p>
+<p>
+<p>ControlPlaneUpdateHistory is a record of a single version transition for management-side
+control plane components. Each entry captures the target version, its release image, when
+the rollout started, and when (or whether) it completed.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>state</code></br>
+<em>
+<a href="https://docs.openshift.com/container-platform/4.10/rest_api/config_apis/config-apis-index.html">
+github.com/openshift/api/config/v1.UpdateState
+</a>
+</em>
+</td>
+<td>
+<p>state reflects whether the update was fully applied. The Partial state
+indicates the update is not fully applied, while the Completed state
+indicates the update was successfully rolled out.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>startedTime,omitempty,omitzero</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+<p>startedTime is the time at which the update was started.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>completionTime,omitempty,omitzero</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>completionTime is the time at which the update completed. It is set
+when all management-side components have reached the target version.
+It is not set while the update is in progress.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>version</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>version is a semantic version string identifying the update version
+(e.g. &ldquo;4.20.1&rdquo;).</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>image</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>image is the release image pullspec used for this update.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###ControlPlaneVersionStatus { #hypershift.openshift.io/v1beta1.ControlPlaneVersionStatus }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.HostedClusterStatus">HostedClusterStatus</a>, 
+<a href="#hypershift.openshift.io/v1beta1.HostedControlPlaneStatus">HostedControlPlaneStatus</a>)
+</p>
+<p>
+<p>ControlPlaneVersionStatus tracks the rollout state of management-side control plane components.
+It records the desired release, a pruned history of version transitions (newest first), and
+the last observed generation of the HostedControlPlane spec.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>desired,omitempty,omitzero</code></br>
+<em>
+<a href="https://docs.openshift.com/container-platform/4.10/rest_api/config_apis/config-apis-index.html">
+github.com/openshift/api/config/v1.Release
+</a>
+</em>
+</td>
+<td>
+<p>desired is the release version that the control plane is reconciling towards.
+It is derived from the HostedControlPlane release image fields.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>history</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.ControlPlaneUpdateHistory">
+[]ControlPlaneUpdateHistory
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>history contains a list of versions applied to management-side control plane components. The newest entry is
+first in the list. Entries have state Completed when all ControlPlaneComponent resources report the target
+version with RolloutComplete=True. Entries have state Partial when the rollout is in progress or has failed.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>observedGeneration,omitempty,omitzero</code></br>
+<em>
+int64
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>observedGeneration reports which generation of the HostedControlPlane spec is being synced.</p>
+</td>
+</tr>
+</tbody>
+</table>
 ###DNSSpec { #hypershift.openshift.io/v1beta1.DNSSpec }
 <p>
 (<em>Appears on:</em>
@@ -5597,6 +7157,11 @@ string
 <p>publicZoneID is the Hosted Zone ID where all the DNS records that are publicly accessible to the internet exist.
 This field is optional and mainly leveraged in cloud environments where the DNS records for the .baseDomain are created by controllers in this zone.
 Once set, this value is immutable.</p>
+<p>On Azure, this is a full Azure resource ID for a DNS Zone in the format:
+/subscriptions/{subscriptionID}/resourceGroups/{resourceGroup}/providers/Microsoft.Network/dnsZones/{zoneName}
+The maximum length of 258 is derived from Azure resource naming limits
+(see <a href="https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/resource-name-rules):">https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/resource-name-rules):</a>
+/subscriptions/ (15) + UUID (36) + /resourceGroups/ (16) + resource group name (90)</p>
 </td>
 </tr>
 <tr>
@@ -5611,6 +7176,11 @@ string
 <p>privateZoneID is the Hosted Zone ID where all the DNS records that are only available internally to the cluster exist.
 This field is optional and mainly leveraged in cloud environments where the DNS records for the .baseDomain are created by controllers in this zone.
 Once set, this value is immutable.</p>
+<p>On Azure, this is a full Azure resource ID for a Private DNS Zone in the format:
+/subscriptions/{subscriptionID}/resourceGroups/{resourceGroup}/providers/Microsoft.Network/privateDnsZones/{zoneName}
+The maximum length of 265 is derived from Azure resource naming limits
+(see <a href="https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/resource-name-rules):">https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/resource-name-rules):</a>
+/subscriptions/ (15) + UUID (36) + /resourceGroups/ (16) + resource group name (90)</p>
 </td>
 </tr>
 </tbody>
@@ -5756,6 +7326,168 @@ UserManagedDiagnostics
 </tr>
 </tbody>
 </table>
+###EncryptionKeyReference { #hypershift.openshift.io/v1beta1.EncryptionKeyReference }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.EncryptionMigrationHistory">EncryptionMigrationHistory</a>)
+</p>
+<p>
+<p>EncryptionKeyReference identifies an encryption key by its provider and fingerprint.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>provider</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.SecretEncryptionProvider">
+SecretEncryptionProvider
+</a>
+</em>
+</td>
+<td>
+<p>provider identifies the encryption provider.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>fingerprint</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>fingerprint is the hex-encoded SHA-256 hash of the key&rsquo;s identity fields.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###EncryptionMigrationHistory { #hypershift.openshift.io/v1beta1.EncryptionMigrationHistory }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.SecretEncryptionStatus">SecretEncryptionStatus</a>)
+</p>
+<p>
+<p>EncryptionMigrationHistory records a key rotation, including in-progress rotations.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>from,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.EncryptionKeyReference">
+EncryptionKeyReference
+</a>
+</em>
+</td>
+<td>
+<p>from is the key that data was migrated from (the previous active key).</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>to,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.EncryptionKeyReference">
+EncryptionKeyReference
+</a>
+</em>
+</td>
+<td>
+<p>to is the key that data was migrated to (the target key).</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>state</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.EncryptionMigrationState">
+EncryptionMigrationState
+</a>
+</em>
+</td>
+<td>
+<p>state tracks the current phase of this rotation.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>startedTime,omitzero</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+<p>startedTime is when the rotation was initiated.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>completionTime,omitzero</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#time-v1-meta">
+Kubernetes meta/v1.Time
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>completionTime is when the rotation finished. Not set while the rotation is in progress.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###EncryptionMigrationState { #hypershift.openshift.io/v1beta1.EncryptionMigrationState }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.EncryptionMigrationHistory">EncryptionMigrationHistory</a>)
+</p>
+<p>
+<p>EncryptionMigrationState tracks the lifecycle of a key rotation.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr><td><p>&#34;Completed&#34;</p></td>
+<td><p>EncryptionMigrationStateCompleted means all data was successfully re-encrypted with the target key.</p>
+</td>
+</tr><tr><td><p>&#34;Interrupted&#34;</p></td>
+<td><p>EncryptionMigrationStateInterrupted means the rotation was abandoned before data was encrypted
+with the target key (e.g., targetKey replaced during ReadOnlyDeploy).</p>
+</td>
+</tr><tr><td><p>&#34;Migrating&#34;</p></td>
+<td><p>EncryptionMigrationStateMigrating means all KAS replicas have converged on the new write
+provider and re-encryption (StorageVersionMigration) is in progress.</p>
+</td>
+</tr><tr><td><p>&#34;ReadOnlyDeploy&#34;</p></td>
+<td><p>EncryptionMigrationStateReadOnlyDeploy means the new key is being deployed as a read-only
+provider. The old key remains the write provider.</p>
+</td>
+</tr><tr><td><p>&#34;WritePromote&#34;</p></td>
+<td><p>EncryptionMigrationStateWritePromote means the new key is being promoted to write provider.
+The old key becomes read-only.</p>
+</td>
+</tr></tbody>
+</table>
 ###EtcdManagementType { #hypershift.openshift.io/v1beta1.EtcdManagementType }
 <p>
 (<em>Appears on:</em>
@@ -5780,6 +7512,151 @@ automatically.</p>
 and the user is responsible for doing so.</p>
 </td>
 </tr></tbody>
+</table>
+###EtcdOperatorSpec { #hypershift.openshift.io/v1beta1.EtcdOperatorSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.OperatorConfiguration">OperatorConfiguration</a>)
+</p>
+<p>
+<p>EtcdOperatorSpec specifies the configuration for the etcd.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>ComponentLogLevelSpec</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.ComponentLogLevelSpec">
+ComponentLogLevelSpec
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ComponentLogLevelSpec</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+</tbody>
+</table>
+###EtcdShardResource { #hypershift.openshift.io/v1beta1.EtcdShardResource }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.ManagedEtcdShardSpec">ManagedEtcdShardSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.UnmanagedEtcdShardSpec">UnmanagedEtcdShardSpec</a>)
+</p>
+<p>
+<p>EtcdShardResource identifies a Kubernetes resource type to be routed to an
+etcd shard. It is used to build the KAS &ndash;etcd-servers-overrides flag.
+The combination of apiGroup and resource uniquely identifies a resource type.</p>
+<p>Routing only takes effect for resource types compiled into the
+kube-apiserver binary (built-in types such as events, pods, or
+coordination.k8s.io/leases). This is a kube-apiserver limitation:
+&ndash;etcd-servers-overrides does not apply to other resource types. In
+particular, resources backed by CustomResourceDefinitions and resources
+served by aggregated API servers (such as the openshift.io groups served
+by openshift-apiserver and oauth-apiserver) are NOT routed: entries for
+such resources are accepted but have no effect, and their data remains in
+the default shard while the configured shard stays empty.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>apiGroup</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>apiGroup is the API group of the resource (e.g., &ldquo;coordination.k8s.io&rdquo;
+for leases). An empty string designates the core API group (e.g.,
+events, pods, configmaps). For core-group resources, specify
+apiGroup: &ldquo;&rdquo; explicitly (e.g., {apiGroup: &ldquo;&rdquo;, resource: &ldquo;events&rdquo;}).
+When non-empty, must be at most 253 characters in length and consist
+of only lowercase alphanumeric characters, hyphens and periods. Each
+period separated segment must start and end with an alphanumeric
+character.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>resource</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>resource is the plural resource name (e.g., &ldquo;events&rdquo;, &ldquo;leases&rdquo;,
+&ldquo;configmaps&rdquo;). Must be a valid DNS label (RFC 1123): lowercase
+alphanumeric characters or hyphens, starting and ending with an
+alphanumeric character, max 63 characters.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###EtcdShardSchedulingSpec { #hypershift.openshift.io/v1beta1.EtcdShardSchedulingSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.ManagedEtcdShardSpec">ManagedEtcdShardSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.ManagedEtcdSpec">ManagedEtcdSpec</a>)
+</p>
+<p>
+<p>EtcdShardSchedulingSpec configures pod placement for a single etcd shard.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>nodeSelector</code></br>
+<em>
+map[string]string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>nodeSelector constrains this shard&rsquo;s pods to nodes matching the
+specified labels, in addition to the framework&rsquo;s control plane node
+selector. Keys and values must be valid Kubernetes label key/value
+pairs. Maximum 16 entries.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>tolerations</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#toleration-v1-core">
+[]Kubernetes core/v1.Toleration
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>tolerations allows this shard&rsquo;s pods to schedule on nodes with
+matching taints, in addition to the framework&rsquo;s control plane
+tolerations. Maximum 16 entries.</p>
+</td>
+</tr>
+</tbody>
 </table>
 ###EtcdSpec { #hypershift.openshift.io/v1beta1.EtcdSpec }
 <p>
@@ -6073,7 +7950,7 @@ If not specified, defaults to &ldquo;pd-balanced&rdquo;.</p>
 </tr>
 <tr>
 <td>
-<code>encryptionKey</code></br>
+<code>encryptionKey,omitzero</code></br>
 <em>
 <a href="#hypershift.openshift.io/v1beta1.GCPDiskEncryptionKey">
 GCPDiskEncryptionKey
@@ -6162,7 +8039,7 @@ private node communication with the control plane via Private Service Connect.</
 <tbody>
 <tr>
 <td>
-<code>network</code></br>
+<code>network,omitzero</code></br>
 <em>
 <a href="#hypershift.openshift.io/v1beta1.GCPResourceReference">
 GCPResourceReference
@@ -6175,7 +8052,7 @@ GCPResourceReference
 </tr>
 <tr>
 <td>
-<code>privateServiceConnectSubnet</code></br>
+<code>privateServiceConnectSubnet,omitzero</code></br>
 <em>
 <a href="#hypershift.openshift.io/v1beta1.GCPResourceReference">
 GCPResourceReference
@@ -6240,7 +8117,9 @@ See <a href="https://cloud.google.com/compute/docs/regions-zones">https://cloud.
 <td>
 <code>subnet</code></br>
 <em>
-string
+<a href="#hypershift.openshift.io/v1beta1.GCPResourceName">
+GCPResourceName
+</a>
 </em>
 </td>
 <td>
@@ -6321,7 +8200,9 @@ taking precedence in case of conflicts.</p>
 <td>
 <code>networkTags</code></br>
 <em>
-[]string
+<a href="#hypershift.openshift.io/v1beta1.GCPResourceName">
+[]GCPResourceName
+</a>
 </em>
 </td>
 <td>
@@ -6357,7 +8238,9 @@ If not specified, defaults to &ldquo;Standard&rdquo;.</p>
 <td>
 <code>onHostMaintenance</code></br>
 <em>
-string
+<a href="#hypershift.openshift.io/v1beta1.GCPOnHostMaintenance">
+GCPOnHostMaintenance
+</a>
 </em>
 </td>
 <td>
@@ -6390,7 +8273,9 @@ If not specified, defaults to &ldquo;MIGRATE&rdquo; for Standard instances and &
 <td>
 <code>email</code></br>
 <em>
-string
+<a href="#hypershift.openshift.io/v1beta1.GCPServiceAccountEmail">
+GCPServiceAccountEmail
+</a>
 </em>
 </td>
 <td>
@@ -6424,6 +8309,10 @@ Common scopes include:
 </tbody>
 </table>
 ###GCPOnHostMaintenance { #hypershift.openshift.io/v1beta1.GCPOnHostMaintenance }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.GCPNodePoolPlatform">GCPNodePoolPlatform</a>)
+</p>
 <p>
 <p>GCPOnHostMaintenance defines the behavior when a host maintenance event occurs.</p>
 </p>
@@ -6471,7 +8360,8 @@ A valid project ID must satisfy the following rules:
 length: Must be between 6 and 30 characters, inclusive
 characters: Only lowercase letters (<code>a-z</code>), digits (<code>0-9</code>), and hyphens (<code>-</code>) are allowed
 start and end: Must begin with a lowercase letter and must not end with a hyphen
-valid examples: &ldquo;my-project&rdquo;, &ldquo;my-project-1&rdquo;, &ldquo;my-project-123&rdquo;.</p>
+valid examples: &ldquo;my-project&rdquo;, &ldquo;my-project-1&rdquo;, &ldquo;my-project-123&rdquo;.
+See <a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">https://cloud.google.com/resource-manager/docs/creating-managing-projects</a> for project ID naming rules.</p>
 </td>
 </tr>
 <tr>
@@ -6482,18 +8372,14 @@ string
 </em>
 </td>
 <td>
-<p>region is the GCP region in which the cluster resides.
-Must be in the form of <geographic-area>-<location><number> (e.g., us-central1, europe-west12).
-Must contain exactly one hyphen separating the geographic area from the location.
-Must end with one or more digits.
-Valid examples: &ldquo;us-central1&rdquo;, &ldquo;europe-west2&rdquo;, &ldquo;europe-west12&rdquo;, &ldquo;northamerica-northeast1&rdquo;
-Invalid examples: &ldquo;us1&rdquo; (no hyphen), &ldquo;us-central&rdquo; (no trailing digits), &ldquo;us-central1-a&rdquo; (zone suffix)
+<p>region is the GCP region in which the cluster resides (e.g., us-central1, europe-west2).
+Must start with lowercase letters, contain exactly one hyphen, and end with digits.
 For a full list of valid regions, see: <a href="https://cloud.google.com/compute/docs/regions-zones">https://cloud.google.com/compute/docs/regions-zones</a>.</p>
 </td>
 </tr>
 <tr>
 <td>
-<code>networkConfig</code></br>
+<code>networkConfig,omitzero</code></br>
 <em>
 <a href="#hypershift.openshift.io/v1beta1.GCPNetworkConfig">
 GCPNetworkConfig
@@ -6595,7 +8481,9 @@ This value must be a valid IPv4 or IPv6 address.</p>
 <td>
 <code>forwardingRuleName</code></br>
 <em>
-string
+<a href="#hypershift.openshift.io/v1beta1.GCPResourceName">
+GCPResourceName
+</a>
 </em>
 </td>
 <td>
@@ -6612,15 +8500,19 @@ Populated by the reconciler via GCP API lookup</p>
 </em>
 </td>
 <td>
-<p>consumerAcceptList specifies which customer projects can connect
-Accepts both project IDs (e.g. &ldquo;my-project-123&rdquo;) and project numbers (e.g. &ldquo;123456789012&rdquo;)</p>
+<p>consumerAcceptList specifies which customer projects can connect.
+Accepts both project IDs (e.g. &ldquo;my-project-123&rdquo;) and project numbers (e.g. &ldquo;123456789012&rdquo;).
+A maximum of 50 entries are allowed.
+See <a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">https://cloud.google.com/resource-manager/docs/creating-managing-projects</a> for project ID and number formats.</p>
 </td>
 </tr>
 <tr>
 <td>
 <code>natSubnet</code></br>
 <em>
-string
+<a href="#hypershift.openshift.io/v1beta1.GCPResourceName">
+GCPResourceName
+</a>
 </em>
 </td>
 <td>
@@ -6683,8 +8575,9 @@ string
 </td>
 <td>
 <em>(Optional)</em>
-<p>serviceAttachmentURI is the URI customers use to connect
-Format: projects/{project}/regions/{region}/serviceAttachments/{name}</p>
+<p>serviceAttachmentURI is the URI customers use to connect.
+Format: projects/{project}/regions/{region}/serviceAttachments/{name}
+See <a href="https://cloud.google.com/vpc/docs/configure-private-service-connect-producer">https://cloud.google.com/vpc/docs/configure-private-service-connect-producer</a> for service attachment details.</p>
 </td>
 </tr>
 <tr>
@@ -6784,7 +8677,8 @@ For Compute Engine resources (VMs, disks, networks created by CAPG), keys must:
 - Contain only lowercase letters, digits, underscores, or hyphens
 - End with a lowercase letter or digit (not a hyphen or underscore)
 - Be 1-63 characters long
-GCP reserves the &lsquo;goog&rsquo; prefix for system labels.
+GCP reserves the &lsquo;goog&rsquo; prefix for system labels, with the exception of
+&lsquo;goog-partner-solution&rsquo; which Google requires for partner attribution tracking.
 See <a href="https://cloud.google.com/compute/docs/labeling-resources">https://cloud.google.com/compute/docs/labeling-resources</a> for Compute Engine label requirements.</p>
 </td>
 </tr>
@@ -6796,7 +8690,6 @@ string
 </em>
 </td>
 <td>
-<em>(Optional)</em>
 <p>value is the value part of the label. A label value can have a maximum of 63 characters.
 Empty values are allowed by GCP. If non-empty, it must start with a lowercase letter,
 contain only lowercase letters, digits, underscores, or hyphens, and end with a lowercase letter or digit.
@@ -6805,6 +8698,19 @@ See <a href="https://cloud.google.com/compute/docs/labeling-resources">https://c
 </tr>
 </tbody>
 </table>
+###GCPResourceName { #hypershift.openshift.io/v1beta1.GCPResourceName }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.GCPNodePoolPlatform">GCPNodePoolPlatform</a>, 
+<a href="#hypershift.openshift.io/v1beta1.GCPPrivateServiceConnectSpec">GCPPrivateServiceConnectSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.GCPResourceReference">GCPResourceReference</a>)
+</p>
+<p>
+<p>GCPResourceName is the name of a GCP resource following RFC 1035 naming conventions.
+Must start with a lowercase letter, contain only lowercase letters, digits, and hyphens,
+must not end with a hyphen, and be 1-63 characters long.
+See <a href="https://cloud.google.com/compute/docs/naming-resources">https://cloud.google.com/compute/docs/naming-resources</a> for details.</p>
+</p>
 ###GCPResourceReference { #hypershift.openshift.io/v1beta1.GCPResourceReference }
 <p>
 (<em>Appears on:</em>
@@ -6827,7 +8733,9 @@ See <a href="https://google.aip.dev/122">https://google.aip.dev/122</a> for GCP 
 <td>
 <code>name</code></br>
 <em>
-string
+<a href="#hypershift.openshift.io/v1beta1.GCPResourceName">
+GCPResourceName
+</a>
 </em>
 </td>
 <td>
@@ -6840,6 +8748,17 @@ See <a href="https://cloud.google.com/compute/docs/naming-resources">https://clo
 </tr>
 </tbody>
 </table>
+###GCPServiceAccountEmail { #hypershift.openshift.io/v1beta1.GCPServiceAccountEmail }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.GCPNodeServiceAccount">GCPNodeServiceAccount</a>, 
+<a href="#hypershift.openshift.io/v1beta1.GCPServiceAccountsEmails">GCPServiceAccountsEmails</a>)
+</p>
+<p>
+<p>GCPServiceAccountEmail is the email address of a Google Service Account.
+Format: service-account-name@project-id.iam.gserviceaccount.com
+See <a href="https://cloud.google.com/iam/docs/service-accounts-create">https://cloud.google.com/iam/docs/service-accounts-create</a> for service account naming rules.</p>
+</p>
 ###GCPServiceAccountsEmails { #hypershift.openshift.io/v1beta1.GCPServiceAccountsEmails }
 <p>
 (<em>Appears on:</em>
@@ -6861,7 +8780,9 @@ Each service account should have the appropriate IAM permissions for its specifi
 <td>
 <code>nodePool</code></br>
 <em>
-string
+<a href="#hypershift.openshift.io/v1beta1.GCPServiceAccountEmail">
+GCPServiceAccountEmail
+</a>
 </em>
 </td>
 <td>
@@ -6882,7 +8803,9 @@ the required service accounts with appropriate IAM roles and WIF bindings.</p>
 <td>
 <code>controlPlane</code></br>
 <em>
-string
+<a href="#hypershift.openshift.io/v1beta1.GCPServiceAccountEmail">
+GCPServiceAccountEmail
+</a>
 </em>
 </td>
 <td>
@@ -6903,7 +8826,9 @@ the required service accounts with appropriate IAM roles and WIF bindings.</p>
 <td>
 <code>cloudController</code></br>
 <em>
-string
+<a href="#hypershift.openshift.io/v1beta1.GCPServiceAccountEmail">
+GCPServiceAccountEmail
+</a>
 </em>
 </td>
 <td>
@@ -6924,7 +8849,9 @@ the required service accounts with appropriate IAM roles and WIF bindings.</p>
 <td>
 <code>storage</code></br>
 <em>
-string
+<a href="#hypershift.openshift.io/v1beta1.GCPServiceAccountEmail">
+GCPServiceAccountEmail
+</a>
 </em>
 </td>
 <td>
@@ -6946,7 +8873,9 @@ the required service accounts with appropriate IAM roles and WIF bindings.</p>
 <td>
 <code>imageRegistry</code></br>
 <em>
-string
+<a href="#hypershift.openshift.io/v1beta1.GCPServiceAccountEmail">
+GCPServiceAccountEmail
+</a>
 </em>
 </td>
 <td>
@@ -6954,6 +8883,28 @@ string
 that manages GCS storage for the internal container image registry.
 This GSA requires the following IAM roles:
 - roles/storage.admin (Storage Admin - for creating and managing GCS buckets and objects)
+See cmd/infra/gcp/iam-bindings.json for the authoritative role definitions.
+Format: service-account-name@project-id.iam.gserviceaccount.com</p>
+<p>This is a user-provided value referencing a pre-created Google Service Account.
+Typically obtained from the output of <code>hypershift infra create gcp</code> which creates
+the required service accounts with appropriate IAM roles and WIF bindings.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>network</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.GCPServiceAccountEmail">
+GCPServiceAccountEmail
+</a>
+</em>
+</td>
+<td>
+<p>network is the Google Service Account email for the Cloud Network Config Controller
+that manages cloud-level network configurations (egress IPs, subnets).
+This GSA requires the following IAM roles:
+- roles/compute.instanceAdmin.v1 (Compute Instance Admin - for managing network interfaces)
+- roles/compute.networkUser (Compute Network User - for using subnets)
 See cmd/infra/gcp/iam-bindings.json for the authoritative role definitions.
 Format: service-account-name@project-id.iam.gserviceaccount.com</p>
 <p>This is a user-provided value referencing a pre-created Google Service Account.
@@ -6991,7 +8942,8 @@ string
 <td>
 <p>projectNumber is the numeric GCP project identifier for WIF configuration.
 This differs from the project ID and is required for workload identity pools.
-Must be a numeric string representing the GCP project number.</p>
+Must be a numeric string representing the GCP project number.
+See <a href="https://cloud.google.com/resource-manager/docs/creating-managing-projects">https://cloud.google.com/resource-manager/docs/creating-managing-projects</a> for project number details.</p>
 <p>This is a user-provided value obtained from GCP (found in GCP Console or via <code>gcloud projects describe PROJECT_ID</code>).
 Also available in the output of <code>hypershift infra create gcp</code>.</p>
 </td>
@@ -7009,7 +8961,8 @@ This pool is used to manage external identity mappings.
 Must be 4-32 characters and start with a lowercase letter.
 Allowed characters: lowercase letters (a-z), digits (0-9), hyphens (-).
 Cannot start or end with a hyphen.
-The prefix &ldquo;gcp-&rdquo; is reserved by Google and cannot be used.</p>
+The prefix &ldquo;gcp-&rdquo; is reserved by Google and cannot be used.
+See <a href="https://cloud.google.com/iam/docs/manage-workload-identity-pools-providers">https://cloud.google.com/iam/docs/manage-workload-identity-pools-providers</a> for naming rules.</p>
 <p>This is a user-provided value referencing a pre-created Workload Identity Pool.
 Typically obtained from the output of <code>hypershift infra create gcp</code> which creates
 the WIF infrastructure and generates appropriate pool IDs.</p>
@@ -7028,7 +8981,8 @@ This provider handles the token exchange between external and GCP identities.
 Must be 4-32 characters and start with a lowercase letter.
 Allowed characters: lowercase letters (a-z), digits (0-9), hyphens (-).
 Cannot start or end with a hyphen.
-The prefix &ldquo;gcp-&rdquo; is reserved by Google and cannot be used.</p>
+The prefix &ldquo;gcp-&rdquo; is reserved by Google and cannot be used.
+See <a href="https://cloud.google.com/iam/docs/manage-workload-identity-pools-providers">https://cloud.google.com/iam/docs/manage-workload-identity-pools-providers</a> for naming rules.</p>
 <p>This is a user-provided value referencing a pre-created OIDC Provider within the WIF Pool.
 Typically obtained from the output of <code>hypershift infra create gcp</code>.</p>
 </td>
@@ -7049,6 +9003,631 @@ This follows the AWS pattern of having different roles for different purposes.</
 </td>
 </tr>
 </tbody>
+</table>
+###HCPEtcdBackupAzureBlob { #hypershift.openshift.io/v1beta1.HCPEtcdBackupAzureBlob }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupStorage">HCPEtcdBackupStorage</a>)
+</p>
+<p>
+<p>HCPEtcdBackupAzureBlob defines the Azure Blob storage configuration for etcd backups.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>container</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>container is the name of the Azure Blob container where backups are stored.
+Must be 3-63 characters, lowercase letters, numbers, and hyphens only.
+Must start and end with a letter or number. Consecutive hyphens are not allowed.
+See <a href="https://learn.microsoft.com/en-us/rest/api/storageservices/naming-and-referencing-containers--blobs--and-metadata#container-names">https://learn.microsoft.com/en-us/rest/api/storageservices/naming-and-referencing-containers&ndash;blobs&ndash;and-metadata#container-names</a></p>
+</td>
+</tr>
+<tr>
+<td>
+<code>storageAccount</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>storageAccount is the name of the Azure Storage Account.
+Must be 3-24 characters, lowercase letters and numbers only.
+See <a href="https://learn.microsoft.com/en-us/azure/storage/common/storage-account-overview#storage-account-name">https://learn.microsoft.com/en-us/azure/storage/common/storage-account-overview#storage-account-name</a></p>
+</td>
+</tr>
+<tr>
+<td>
+<code>keyPrefix</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>keyPrefix is the blob name prefix for the backup file.
+Must consist of valid blob name characters: alphanumeric characters, forward slashes,
+hyphens, underscores, and periods.
+See <a href="https://learn.microsoft.com/en-us/rest/api/storageservices/naming-and-referencing-containers--blobs--and-metadata#blob-names">https://learn.microsoft.com/en-us/rest/api/storageservices/naming-and-referencing-containers&ndash;blobs&ndash;and-metadata#blob-names</a></p>
+</td>
+</tr>
+<tr>
+<td>
+<code>credentials,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.SecretReference">
+SecretReference
+</a>
+</em>
+</td>
+<td>
+<p>credentials references a Secret containing Azure credentials for uploading
+to Blob Storage. The Secret must exist in the Hypershift Operator namespace.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>encryptionKeyURL</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>encryptionKeyURL is the URL of the Azure Key Vault or Managed HSM key used for encryption.
+Key Vault URLs are supported in Azure Public Cloud (vault.azure.net), Azure US Government Cloud (vault.usgovcloudapi.net), Azure China Cloud (vault.azure.cn), Azure German Cloud (vault.microsoftazure.de), and Azure Bleu Cloud (vault.sovcloud-api.fr).
+Managed HSM URLs are supported in Azure Public Cloud (managedhsm.azure.net), Azure US Government Cloud (managedhsm.usgovcloudapi.net), Azure China Cloud (managedhsm.azure.cn), Azure German Cloud (managedhsm.microsoftazure.de), and Azure Bleu Cloud (managedhsm.sovcloud-api.fr).
+Supporting another cloud requires adding its DNS suffix to this validation and the Azure endpoint resolver.
+This field is immutable once set and cannot be removed.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###HCPEtcdBackupConfig { #hypershift.openshift.io/v1beta1.HCPEtcdBackupConfig }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.ManagedEtcdSpec">ManagedEtcdSpec</a>)
+</p>
+<p>
+<p>HCPEtcdBackupConfig defines the backup encryption configuration that is propagated
+from the HostedCluster to the HostedControlPlane via ManagedEtcdSpec.
+Exactly one platform-specific block must be specified, matching the platform discriminator.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>platform</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupConfigPlatform">
+HCPEtcdBackupConfigPlatform
+</a>
+</em>
+</td>
+<td>
+<p>platform specifies the cloud platform for backup encryption configuration.
+Valid values are &ldquo;AWS&rdquo; for AWS KMS encryption and &ldquo;Azure&rdquo; for Azure Key Vault encryption.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>aws,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupConfigAWS">
+HCPEtcdBackupConfigAWS
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>aws contains AWS-specific backup encryption configuration.
+Required when platform is &ldquo;AWS&rdquo;, and forbidden otherwise.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>azure,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupConfigAzure">
+HCPEtcdBackupConfigAzure
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>azure contains Azure-specific backup encryption configuration.
+Required when platform is &ldquo;Azure&rdquo;, and forbidden otherwise.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###HCPEtcdBackupConfigAWS { #hypershift.openshift.io/v1beta1.HCPEtcdBackupConfigAWS }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupConfig">HCPEtcdBackupConfig</a>)
+</p>
+<p>
+<p>HCPEtcdBackupConfigAWS defines AWS-specific encryption settings for etcd backups.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>kmsKeyARN</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>kmsKeyARN is the ARN of the AWS KMS key to use for encrypting etcd backup artifacts in S3.
+Must be a valid AWS KMS key ARN in the format
+&ldquo;arn:<partition>:kms:<region>:<account-id>:key/<key-id>&rdquo;
+where partition is one of aws, aws-cn, or aws-us-gov.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###HCPEtcdBackupConfigAzure { #hypershift.openshift.io/v1beta1.HCPEtcdBackupConfigAzure }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupConfig">HCPEtcdBackupConfig</a>)
+</p>
+<p>
+<p>HCPEtcdBackupConfigAzure defines Azure-specific encryption settings for etcd backups.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>encryptionKeyURL</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>encryptionKeyURL is the URL of the Azure Key Vault or Managed HSM key to use for encrypting etcd backup artifacts.
+Key Vault URLs are supported in Azure Public Cloud (vault.azure.net), Azure US Government Cloud (vault.usgovcloudapi.net), Azure China Cloud (vault.azure.cn), Azure German Cloud (vault.microsoftazure.de), and Azure Bleu Cloud (vault.sovcloud-api.fr).
+Managed HSM URLs are supported in Azure Public Cloud (managedhsm.azure.net), Azure US Government Cloud (managedhsm.usgovcloudapi.net), Azure China Cloud (managedhsm.azure.cn), Azure German Cloud (managedhsm.microsoftazure.de), and Azure Bleu Cloud (managedhsm.sovcloud-api.fr).
+Supporting another cloud requires adding its DNS suffix to this validation and the Azure endpoint resolver.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###HCPEtcdBackupConfigPlatform { #hypershift.openshift.io/v1beta1.HCPEtcdBackupConfigPlatform }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupConfig">HCPEtcdBackupConfig</a>)
+</p>
+<p>
+<p>HCPEtcdBackupConfigPlatform identifies the cloud platform for backup encryption configuration.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr><td><p>&#34;AWS&#34;</p></td>
+<td><p>AWSBackupConfigPlatform indicates AWS KMS encryption for backup artifacts.</p>
+</td>
+</tr><tr><td><p>&#34;Azure&#34;</p></td>
+<td><p>AzureBackupConfigPlatform indicates Azure Key Vault encryption for backup artifacts.</p>
+</td>
+</tr></tbody>
+</table>
+###HCPEtcdBackupEncryptionMetadata { #hypershift.openshift.io/v1beta1.HCPEtcdBackupEncryptionMetadata }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupStatus">HCPEtcdBackupStatus</a>)
+</p>
+<p>
+<p>HCPEtcdBackupEncryptionMetadata contains platform-specific metadata about the
+encryption applied to the backup artifact in cloud storage.
+The presence of a platform block indicates that encryption was applied.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>aws,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupEncryptionMetadataAWS">
+HCPEtcdBackupEncryptionMetadataAWS
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>aws contains AWS-specific encryption metadata for the backup.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>azure,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupEncryptionMetadataAzure">
+HCPEtcdBackupEncryptionMetadataAzure
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>azure contains Azure-specific encryption metadata for the backup.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###HCPEtcdBackupEncryptionMetadataAWS { #hypershift.openshift.io/v1beta1.HCPEtcdBackupEncryptionMetadataAWS }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupEncryptionMetadata">HCPEtcdBackupEncryptionMetadata</a>)
+</p>
+<p>
+<p>HCPEtcdBackupEncryptionMetadataAWS contains AWS-specific encryption metadata.
+The values here reflect the encryption settings from the HCPEtcdBackupConfig input.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>kmsKeyARN</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>kmsKeyARN is the ARN of the KMS key used for server-side encryption of the backup in S3.
+Must be a valid AWS KMS key ARN in the format
+&ldquo;arn:<partition>:kms:<region>:<account-id>:key/<key-id>&rdquo;
+where partition is one of aws, aws-cn, or aws-us-gov.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###HCPEtcdBackupEncryptionMetadataAzure { #hypershift.openshift.io/v1beta1.HCPEtcdBackupEncryptionMetadataAzure }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupEncryptionMetadata">HCPEtcdBackupEncryptionMetadata</a>)
+</p>
+<p>
+<p>HCPEtcdBackupEncryptionMetadataAzure contains Azure-specific encryption metadata.
+The values here reflect the encryption settings from the HCPEtcdBackupConfig input.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>encryptionKeyURL</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>encryptionKeyURL is the URL of the Azure Key Vault or Managed HSM key used for encryption of the backup.
+Key Vault URLs are supported in Azure Public Cloud (vault.azure.net), Azure US Government Cloud (vault.usgovcloudapi.net), Azure China Cloud (vault.azure.cn), Azure German Cloud (vault.microsoftazure.de), and Azure Bleu Cloud (vault.sovcloud-api.fr).
+Managed HSM URLs are supported in Azure Public Cloud (managedhsm.azure.net), Azure US Government Cloud (managedhsm.usgovcloudapi.net), Azure China Cloud (managedhsm.azure.cn), Azure German Cloud (managedhsm.microsoftazure.de), and Azure Bleu Cloud (managedhsm.sovcloud-api.fr).
+Supporting another cloud requires adding its DNS suffix to this validation and the Azure endpoint resolver.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###HCPEtcdBackupS3 { #hypershift.openshift.io/v1beta1.HCPEtcdBackupS3 }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupStorage">HCPEtcdBackupStorage</a>)
+</p>
+<p>
+<p>HCPEtcdBackupS3 defines the S3 storage configuration for etcd backups.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>bucket</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>bucket is the name of the S3 bucket where backups are stored.
+Must be 3-63 characters, lowercase letters, numbers, hyphens, and periods only.
+Must start and end with a letter or number. Consecutive periods are not allowed.
+See <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html">https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html</a></p>
+</td>
+</tr>
+<tr>
+<td>
+<code>region</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>region is the AWS region where the S3 bucket is located (e.g. &ldquo;us-east-1&rdquo;).
+Must be a valid AWS region identifier: lowercase letters, digits, and hyphens.
+Must start and end with an alphanumeric character, no consecutive hyphens.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>keyPrefix</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>keyPrefix is the S3 key prefix for the backup file.
+Must consist of safe S3 object key characters: alphanumeric characters,
+forward slashes, hyphens, underscores, periods, exclamation marks,
+asterisks, single quotes, and parentheses.
+See <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html">https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html</a></p>
+</td>
+</tr>
+<tr>
+<td>
+<code>credentials,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.SecretReference">
+SecretReference
+</a>
+</em>
+</td>
+<td>
+<p>credentials references a Secret containing AWS credentials for uploading
+to S3. The Secret must exist in the Hypershift Operator namespace and contain a
+&lsquo;credentials&rsquo; key with a valid AWS credentials file.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>kmsKeyARN</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>kmsKeyARN is the ARN of the KMS key used for server-side encryption of the backup.
+Must be a valid AWS KMS key ARN in the format
+&ldquo;arn:<partition>:kms:<region>:<account-id>:key/<key-id>&rdquo;
+where partition is one of aws, aws-cn, or aws-us-gov.
+This field is immutable once set and cannot be removed.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###HCPEtcdBackupSpec { #hypershift.openshift.io/v1beta1.HCPEtcdBackupSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackup">HCPEtcdBackup</a>)
+</p>
+<p>
+<p>HCPEtcdBackupSpec defines the desired state of HCPEtcdBackup.
+HCPEtcdBackup is a one-shot backup request; the entire spec is immutable once created.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>storage,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupStorage">
+HCPEtcdBackupStorage
+</a>
+</em>
+</td>
+<td>
+<p>storage defines the cloud storage backend where the etcd snapshot will be uploaded.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###HCPEtcdBackupStatus { #hypershift.openshift.io/v1beta1.HCPEtcdBackupStatus }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackup">HCPEtcdBackup</a>)
+</p>
+<p>
+<p>HCPEtcdBackupStatus defines the observed state of HCPEtcdBackup.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>conditions</code></br>
+<em>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.22/#condition-v1-meta">
+[]Kubernetes meta/v1.Condition
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>conditions contains details for the current state of the etcd backup.
+The following condition types are expected:
+- &ldquo;BackupCompleted&rdquo;: indicates whether the etcd backup has completed (True=success, False=failure).</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>snapshotURL</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>snapshotURL is the URL of the completed backup snapshot in cloud storage.
+Must be a valid URL with scheme https or s3.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>encryptionMetadata,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupEncryptionMetadata">
+HCPEtcdBackupEncryptionMetadata
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>encryptionMetadata contains metadata about the encryption of the backup.
+When present, at least one platform-specific encryption block must be set.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###HCPEtcdBackupStorage { #hypershift.openshift.io/v1beta1.HCPEtcdBackupStorage }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupSpec">HCPEtcdBackupSpec</a>)
+</p>
+<p>
+<p>HCPEtcdBackupStorage defines the cloud storage backend configuration for the backup.
+Exactly one storage backend must be specified, matching the storageType discriminator.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>storageType</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupStorageType">
+HCPEtcdBackupStorageType
+</a>
+</em>
+</td>
+<td>
+<p>storageType specifies the type of cloud storage backend for the etcd backup.
+Valid values are &ldquo;S3&rdquo; for AWS S3 storage and &ldquo;AzureBlob&rdquo; for Azure Blob Storage.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>s3,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupS3">
+HCPEtcdBackupS3
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>s3 specifies the S3 storage configuration for the etcd backup.
+Required when storageType is &ldquo;S3&rdquo;, and forbidden otherwise.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>azureBlob,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupAzureBlob">
+HCPEtcdBackupAzureBlob
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>azureBlob specifies the Azure Blob storage configuration for the etcd backup.
+Required when storageType is &ldquo;AzureBlob&rdquo;, and forbidden otherwise.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###HCPEtcdBackupStorageType { #hypershift.openshift.io/v1beta1.HCPEtcdBackupStorageType }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupStorage">HCPEtcdBackupStorage</a>)
+</p>
+<p>
+<p>HCPEtcdBackupStorageType is the type of storage for etcd backups.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr><td><p>&#34;AzureBlob&#34;</p></td>
+<td><p>AzureBlobBackupStorage indicates that the backup is stored in Azure Blob Storage.</p>
+</td>
+</tr><tr><td><p>&#34;S3&#34;</p></td>
+<td><p>S3BackupStorage indicates that the backup is stored in AWS S3.</p>
+</td>
+</tr></tbody>
 </table>
 ###HostedClusterSpec { #hypershift.openshift.io/v1beta1.HostedClusterSpec }
 <p>
@@ -7278,7 +9857,7 @@ associated with this HostedCluster.</p>
 </tr>
 <tr>
 <td>
-<code>autoNode</code></br>
+<code>autoNode,omitzero</code></br>
 <em>
 <a href="#hypershift.openshift.io/v1beta1.AutoNode">
 AutoNode
@@ -7340,10 +9919,11 @@ Kubernetes core/v1.LocalObjectReference
 <p>pullSecret is a local reference to a Secret that must have a &ldquo;.dockerconfigjson&rdquo; key whose content must be a valid Openshift pull secret JSON.
 If the reference is set but none of the above requirements are met, the HostedCluster will enter a degraded state.
 TODO(alberto): Signal this in a condition.
-This pull secret will be part of every payload generated by the controllers for any NodePool of the HostedCluster
-and it will be injected into the container runtime of all NodePools.
-Changing this value will trigger a rollout for all existing NodePools in the cluster.
-Changing the content of the secret inplace will not trigger a rollout and might result in unpredictable behaviour.
+This pull secret is included in NodePool ignition/bootstrap payloads and applied to the container runtime when nodes provision.
+Changing this value will trigger a rollout for all existing NodePools in the cluster (for both replace and inplace upgrade types).
+Updating the referenced Secret&rsquo;s data in place (without changing this reference) does not trigger that rollout.
+In AWS and Azure NodePools using the Replace upgrade strategy, the Secret&rsquo;s data in place changes
+will still propagate the updated credentials down to the guest cluster and kubelet config.
 TODO(alberto): have our own local reference type to include our opinions and avoid transparent changes.</p>
 </td>
 </tr>
@@ -7382,7 +9962,8 @@ ServiceAccount tokens generated by the control plane API server via &ndash;servi
 The default value is kubernetes.default.svc, which only works for in-cluster
 validation.
 If the platform is AWS and this value is set, the controller will update an s3 object with the appropriate OIDC documents (using the serviceAccountSigningKey info) into that issuerURL.
-The expectation is for this s3 url to be backed by an OIDC provider in the AWS IAM.</p>
+The expectation is for this s3 url to be backed by an OIDC provider in the AWS IAM.
+Once set, this value is immutable.</p>
 </td>
 </tr>
 <tr>
@@ -7617,6 +10198,24 @@ Capabilities
 This field is optional and once set cannot be changed.</p>
 </td>
 </tr>
+<tr>
+<td>
+<code>monitoring,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.MonitoringSpec">
+MonitoringSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>monitoring configures monitoring for the hosted cluster, including
+forwarding of control plane metrics to the hosted cluster&rsquo;s monitoring stack.
+When omitted, metrics forwarding behavior is determined by the
+hypershift.openshift.io/enable-metrics-forwarding annotation for backward compatibility.
+If neither is set, metrics forwarding is disabled.</p>
+</td>
+</tr>
 </tbody>
 </table>
 ###HostedClusterStatus { #hypershift.openshift.io/v1beta1.HostedClusterStatus }
@@ -7648,6 +10247,22 @@ This field is optional and once set cannot be changed.</p>
 <em>(Optional)</em>
 <p>conditions represents the latest available observations of a control
 plane&rsquo;s current state.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>controlPlaneVersion,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.ControlPlaneVersionStatus">
+ControlPlaneVersionStatus
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>controlPlaneVersion tracks the rollout status of the control plane
+components running on the management cluster, independently from
+the data-plane version reported in the version field.</p>
 </td>
 </tr>
 <tr>
@@ -7785,6 +10400,20 @@ PlatformStatus
 </tr>
 <tr>
 <td>
+<code>autoNode,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AutoNodeStatus">
+AutoNodeStatus
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>autoNode contains the observed state of the autoNode (Karpenter) provisioner.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>configuration</code></br>
 <em>
 <a href="#hypershift.openshift.io/v1beta1.ConfigurationStatus">
@@ -7795,6 +10424,34 @@ ConfigurationStatus
 <td>
 <em>(Optional)</em>
 <p>configuration contains the cluster configuration status of the HostedCluster</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>lastSuccessfulEtcdBackupURL</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>lastSuccessfulEtcdBackupURL is the cloud storage URL of the most recent
+successful etcd backup snapshot. Persisted here because HCPEtcdBackup CRs
+are ephemeral and may be deleted by retention policies.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>secretEncryption,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.SecretEncryptionStatus">
+SecretEncryptionStatus
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>secretEncryption tracks the state of secret encryption key rotation and re-encryption.</p>
 </td>
 </tr>
 </tbody>
@@ -8142,6 +10799,22 @@ OperatorConfiguration
 </tr>
 <tr>
 <td>
+<code>monitoring,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.MonitoringSpec">
+MonitoringSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>monitoring configures monitoring for the hosted cluster, including
+forwarding of control plane metrics to the hosted cluster&rsquo;s monitoring stack.
+When omitted, metrics forwarding is not configured and will be inactive.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>imageContentSources</code></br>
 <em>
 <a href="#hypershift.openshift.io/v1beta1.ImageContentSource">
@@ -8232,7 +10905,7 @@ associated with the control plane.</p>
 </tr>
 <tr>
 <td>
-<code>autoNode</code></br>
+<code>autoNode,omitzero</code></br>
 <em>
 <a href="#hypershift.openshift.io/v1beta1.AutoNode">
 AutoNode
@@ -8410,6 +11083,22 @@ This is populated after the infrastructure is ready.</p>
 </tr>
 <tr>
 <td>
+<code>controlPlaneVersion,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.ControlPlaneVersionStatus">
+ControlPlaneVersionStatus
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>controlPlaneVersion tracks the rollout status of the control plane
+components running on the management cluster, independently from
+the data-plane version reported in the version field.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>versionStatus</code></br>
 <em>
 <a href="#hypershift.openshift.io/v1beta1.ClusterVersionStatus">
@@ -8543,6 +11232,20 @@ int
 </tr>
 <tr>
 <td>
+<code>autoNode,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AutoNodeStatus">
+AutoNodeStatus
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>autoNode contains the observed state of the autoNode (Karpenter) provisioner.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>configuration</code></br>
 <em>
 <a href="#hypershift.openshift.io/v1beta1.ConfigurationStatus">
@@ -8553,6 +11256,20 @@ ConfigurationStatus
 <td>
 <em>(Optional)</em>
 <p>configuration contains the cluster configuration status of the HostedCluster</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>secretEncryption,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.SecretEncryptionStatus">
+SecretEncryptionStatus
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>secretEncryption tracks the state of secret encryption key rotation and re-encryption.</p>
 </td>
 </tr>
 </tbody>
@@ -8645,7 +11362,8 @@ authentication to interact with IBM Cloud KMS APIs</p>
 ###IBMCloudKMSKeyEntry { #hypershift.openshift.io/v1beta1.IBMCloudKMSKeyEntry }
 <p>
 (<em>Appears on:</em>
-<a href="#hypershift.openshift.io/v1beta1.IBMCloudKMSSpec">IBMCloudKMSSpec</a>)
+<a href="#hypershift.openshift.io/v1beta1.IBMCloudKMSSpec">IBMCloudKMSSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.SecretEncryptionKeyStatus">SecretEncryptionKeyStatus</a>)
 </p>
 <p>
 <p>IBMCloudKMSKeyEntry defines metadata for an IBM Cloud KMS encryption key</p>
@@ -9399,7 +12117,7 @@ PlatformType
 </tr>
 <tr>
 <td>
-<code>aws</code></br>
+<code>aws,omitzero</code></br>
 <em>
 <a href="#hypershift.openshift.io/v1beta1.KarpenterAWSConfig">
 KarpenterAWSConfig
@@ -9409,6 +12127,105 @@ KarpenterAWSConfig
 <td>
 <em>(Optional)</em>
 <p>aws specifies the AWS-specific configuration for Karpenter.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###KubeAPIServerOperatorSpec { #hypershift.openshift.io/v1beta1.KubeAPIServerOperatorSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.OperatorConfiguration">OperatorConfiguration</a>)
+</p>
+<p>
+<p>KubeAPIServerOperatorSpec specifies the configuration for the Kube API Server.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>ComponentLogLevelSpec</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.ComponentLogLevelSpec">
+ComponentLogLevelSpec
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ComponentLogLevelSpec</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+</tbody>
+</table>
+###KubeControllerManagerOperatorSpec { #hypershift.openshift.io/v1beta1.KubeControllerManagerOperatorSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.OperatorConfiguration">OperatorConfiguration</a>)
+</p>
+<p>
+<p>KubeControllerManagerOperatorSpec specifies the configuration for the Kube Controller Manager.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>ComponentLogLevelSpec</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.ComponentLogLevelSpec">
+ComponentLogLevelSpec
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ComponentLogLevelSpec</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+</tbody>
+</table>
+###KubeSchedulerOperatorSpec { #hypershift.openshift.io/v1beta1.KubeSchedulerOperatorSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.OperatorConfiguration">OperatorConfiguration</a>)
+</p>
+<p>
+<p>KubeSchedulerOperatorSpec specifies the configuration for the Kube Scheduler.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>ComponentLogLevelSpec</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.ComponentLogLevelSpec">
+ComponentLogLevelSpec
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ComponentLogLevelSpec</code> are embedded into this type.)
+</p>
 </td>
 </tr>
 </tbody>
@@ -10405,7 +13222,8 @@ If omitted, the value will be inferred from the corev1.Service Load balancer typ
 ###LogLevel { #hypershift.openshift.io/v1beta1.LogLevel }
 <p>
 (<em>Appears on:</em>
-<a href="#hypershift.openshift.io/v1beta1.ClusterVersionOperatorSpec">ClusterVersionOperatorSpec</a>)
+<a href="#hypershift.openshift.io/v1beta1.ClusterVersionOperatorSpec">ClusterVersionOperatorSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.ComponentLogLevelSpec">ComponentLogLevelSpec</a>)
 </p>
 <p>
 </p>
@@ -10480,6 +13298,223 @@ string
 </tr>
 </tbody>
 </table>
+###ManagedEtcdShardPersistentVolumeSpec { #hypershift.openshift.io/v1beta1.ManagedEtcdShardPersistentVolumeSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.ManagedEtcdShardStorageSpec">ManagedEtcdShardStorageSpec</a>)
+</p>
+<p>
+<p>ManagedEtcdShardPersistentVolumeSpec configures PVC storage for an etcd shard.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>storageClassName</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>storageClassName overrides the StorageClass for this shard&rsquo;s PVCs.
+If not specified, the parent ManagedEtcdSpec&rsquo;s storageClassName is used.
+Must be a valid DNS1123 subdomain (lowercase alphanumeric, hyphens, or
+dots, starting and ending with an alphanumeric character), max 253
+characters.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###ManagedEtcdShardSpec { #hypershift.openshift.io/v1beta1.ManagedEtcdShardSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.ManagedEtcdSpec">ManagedEtcdSpec</a>)
+</p>
+<p>
+<p>ManagedEtcdShardSpec defines the configuration for a single etcd shard
+within a managed etcd deployment.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>name</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>name is a unique identifier for this shard. It is used to derive
+resource names (e.g., StatefulSet &ldquo;etcd-{name}&rdquo;, Service
+&ldquo;etcd-client-{name}&rdquo;).
+Must be a valid DNS1123 label (lowercase alphanumeric with hyphens,
+starting and ending with an alphanumeric character), max 48 characters.
+Immutable once set.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>resources</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.EtcdShardResource">
+[]EtcdShardResource
+</a>
+</em>
+</td>
+<td>
+<p>resources is the list of Kubernetes resource types routed to this
+shard. Each entry identifies a resource by its API group and plural
+resource name. For example, events in the core group would be
+{apiGroup: &ldquo;&rdquo;, resource: &ldquo;events&rdquo;}, and leases in the coordination group would be
+{apiGroup: &ldquo;coordination.k8s.io&rdquo;, resource: &ldquo;leases&rdquo;}.
+Only resource types built into the kube-apiserver are routed; entries
+for CRD-backed or aggregated API resources have no effect (see
+EtcdShardResource).
+Minimum 1, maximum 20 entries. Immutable once set.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>storage,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.ManagedEtcdShardStorageSpec">
+ManagedEtcdShardStorageSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>storage configures the storage backend for this shard.
+If not specified, the shard inherits PersistentVolume storage from
+the parent ManagedEtcdSpec.Storage. Immutable once set.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>replicas</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<p>replicas is the number of etcd replicas for this shard. Must be 1 or 3.
+Immutable once set.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>scheduling,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.EtcdShardSchedulingSpec">
+EtcdShardSchedulingSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>scheduling configures per-shard pod placement constraints. These
+constraints are merged with the framework&rsquo;s control plane node
+isolation settings (nodeSelector, tolerations, topology spread).</p>
+</td>
+</tr>
+</tbody>
+</table>
+###ManagedEtcdShardStorageSpec { #hypershift.openshift.io/v1beta1.ManagedEtcdShardStorageSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.ManagedEtcdShardSpec">ManagedEtcdShardSpec</a>)
+</p>
+<p>
+<p>ManagedEtcdShardStorageSpec configures storage for a single etcd shard.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>type</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.ManagedEtcdShardStorageType">
+ManagedEtcdShardStorageType
+</a>
+</em>
+</td>
+<td>
+<p>type is the kind of storage backend to use for this shard.
+Valid values are PersistentVolume and EmptyDir.
+When set to PersistentVolume, a PersistentVolumeClaim is created for
+each etcd replica via the StatefulSet volumeClaimTemplates. The
+optional persistentVolume field can override the StorageClass for
+this shard; when persistentVolume is omitted, the shard inherits
+the StorageClass and size from the parent spec.etcd.managed.storage
+configuration.
+When set to EmptyDir, the shard uses memory-backed ephemeral
+storage (tmpfs). Data is lost when the pod restarts. This is
+suitable for shards holding expendable, high-churn data such as
+events or leases.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>persistentVolume,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.ManagedEtcdShardPersistentVolumeSpec">
+ManagedEtcdShardPersistentVolumeSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>persistentVolume configures PVC-based storage for this shard.
+Only valid when type is PersistentVolume.
+When omitted and type is PersistentVolume, the shard inherits the
+StorageClass and volume size from the parent
+spec.etcd.managed.storage.persistentVolume configuration.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###ManagedEtcdShardStorageType { #hypershift.openshift.io/v1beta1.ManagedEtcdShardStorageType }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.ManagedEtcdShardStorageSpec">ManagedEtcdShardStorageSpec</a>)
+</p>
+<p>
+<p>ManagedEtcdShardStorageType defines the type of storage for an etcd shard.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr><td><p>&#34;EmptyDir&#34;</p></td>
+<td><p>EmptyDirEtcdShardStorage uses memory-backed EmptyDir for shard storage.</p>
+</td>
+</tr><tr><td><p>&#34;PersistentVolume&#34;</p></td>
+<td><p>PersistentVolumeEtcdShardStorage uses PersistentVolumes for shard storage.</p>
+</td>
+</tr></tbody>
+</table>
 ###ManagedEtcdSpec { #hypershift.openshift.io/v1beta1.ManagedEtcdSpec }
 <p>
 (<em>Appears on:</em>
@@ -10508,6 +13543,60 @@ ManagedEtcdStorageSpec
 </td>
 <td>
 <p>storage specifies how etcd data is persisted.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>backup,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupConfig">
+HCPEtcdBackupConfig
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>backup defines the backup configuration for managed etcd, including
+optional KMS key settings for artifact encryption in cloud storage.
+This configuration is only used when an HCPEtcdBackup CR exists.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>scheduling,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.EtcdShardSchedulingSpec">
+EtcdShardSchedulingSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>scheduling specifies scheduling constraints for the default etcd shard pods.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>shards</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.ManagedEtcdShardSpec">
+[]ManagedEtcdShardSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>shards defines additional etcd shards for resource-level routing.
+The existing storage and scheduling fields above configure
+the default shard (catch-all for all resources not explicitly
+routed). Entries in this list define non-default shards,
+each deployed as an independent StatefulSet and ControlPlaneComponent.
+Minimum 1, maximum 10 entries. Resources must not overlap across
+shards. Immutable after creation: shards cannot be added, removed,
+or reordered.</p>
+<p>WARNING: In the current TechPreview implementation, shard data is NOT
+included in HCPEtcdBackup. Resources routed to shards will not be
+backed up. This will be addressed before promotion beyond TechPreview.</p>
 </td>
 </tr>
 </tbody>
@@ -10694,6 +13783,180 @@ credentialsSecretName must also be unique within the Azure Key Vault. See more d
 Spot instances use spare EC2 capacity at reduced prices but may be interrupted.</p>
 </td>
 </tr></tbody>
+</table>
+###MetricsForwardingMode { #hypershift.openshift.io/v1beta1.MetricsForwardingMode }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.MetricsForwardingSpec">MetricsForwardingSpec</a>)
+</p>
+<p>
+<p>MetricsForwardingMode controls whether metrics forwarding is active for a hosted cluster.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr><td><p>&#34;Forward&#34;</p></td>
+<td><p>MetricsForwardingModeForward indicates metrics forwarding is active.</p>
+</td>
+</tr><tr><td><p>&#34;None&#34;</p></td>
+<td><p>MetricsForwardingModeNone indicates metrics forwarding is inactive.</p>
+</td>
+</tr></tbody>
+</table>
+###MetricsForwardingSpec { #hypershift.openshift.io/v1beta1.MetricsForwardingSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.MonitoringSpec">MonitoringSpec</a>)
+</p>
+<p>
+<p>MetricsForwardingSpec configures metrics forwarding for the hosted cluster.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>mode</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.MetricsForwardingMode">
+MetricsForwardingMode
+</a>
+</em>
+</td>
+<td>
+<p>mode controls whether metrics forwarding is active for this hosted cluster.
+When set to &ldquo;Forward&rdquo;, metrics-proxy and endpoint-resolver are deployed in the
+control plane, and a metrics-forwarder is deployed in the hosted cluster.
+When set to &ldquo;None&rdquo;, metrics forwarding is inactive.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>metricsSet</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.MetricsSet">
+MetricsSet
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>metricsSet specifies which set of metrics to forward to the hosted
+cluster&rsquo;s monitoring stack. This controls only the metrics-proxy forwarding
+path and does not affect management-cluster-side ServiceMonitor/PodMonitor
+relabel configurations.
+When not specified, the value from monitoring.metricsSet is used, which itself
+falls back to the global METRICS_SET environment variable (default &ldquo;Telemetry&rdquo;).</p>
+<p>&ldquo;Telemetry&rdquo; forwards only the minimal set of metrics required for OpenShift Telemetry.
+&ldquo;SRE&rdquo; forwards the Telemetry set plus additional metrics defined in the sre-metric-set
+ConfigMap, needed for SRE dashboards and alerts.
+&ldquo;All&rdquo; forwards all metrics from control plane components without filtering,
+which produces significantly higher metrics volume.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###MetricsSet { #hypershift.openshift.io/v1beta1.MetricsSet }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.MetricsForwardingSpec">MetricsForwardingSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.MonitoringSpec">MonitoringSpec</a>)
+</p>
+<p>
+<p>MetricsSet specifies the set of metrics to collect and forward from hosted clusters.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr><td><p>&#34;All&#34;</p></td>
+<td><p>MetricsSetAll collects all metrics from control plane components without
+any filtering. Use this for debugging or when full metric visibility is
+needed, but be aware it produces significantly higher metrics volume.</p>
+</td>
+</tr><tr><td><p>&#34;SRE&#34;</p></td>
+<td><p>MetricsSetSRE collects the metrics defined in the sre-metric-set ConfigMap,
+which includes the Telemetry set plus additional metrics needed for SRE
+monitoring dashboards and alerts. Use this for clusters that require
+SRE observability.</p>
+</td>
+</tr><tr><td><p>&#34;Telemetry&#34;</p></td>
+<td><p>MetricsSetTelemetry collects only the minimal set of metrics required for
+OpenShift Telemetry. Use this to minimize metrics volume while still
+satisfying cluster telemetry requirements.</p>
+</td>
+</tr></tbody>
+</table>
+###MonitoringSpec { #hypershift.openshift.io/v1beta1.MonitoringSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.HostedClusterSpec">HostedClusterSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.HostedControlPlaneSpec">HostedControlPlaneSpec</a>)
+</p>
+<p>
+<p>MonitoringSpec configures monitoring for the hosted cluster.
+At least one field must be specified when this struct is present.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>metricsForwarding,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.MetricsForwardingSpec">
+MetricsForwardingSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>metricsForwarding configures forwarding of control plane metrics into
+the hosted cluster&rsquo;s monitoring stack.
+When omitted, metrics forwarding behavior is determined by the
+hypershift.openshift.io/enable-metrics-forwarding annotation for backward compatibility.
+If neither is set, metrics forwarding is disabled.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>metricsSet</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.MetricsSet">
+MetricsSet
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>metricsSet specifies which set of metrics to collect and forward.
+This overrides the global METRICS_SET environment variable configured on the HyperShift Operator.
+When not specified, the global METRICS_SET value is used, which defaults to &ldquo;Telemetry&rdquo;.</p>
+<p>&ldquo;Telemetry&rdquo; collects only the minimal set of metrics required for OpenShift Telemetry.
+&ldquo;SRE&rdquo; collects the Telemetry set plus additional metrics defined in the sre-metric-set ConfigMap,
+needed for SRE dashboards and alerts.
+&ldquo;All&rdquo; collects all metrics from control plane components without filtering,
+which produces significantly higher metrics volume.</p>
+</td>
+</tr>
+</tbody>
 </table>
 ###MultiQueueSetting { #hypershift.openshift.io/v1beta1.MultiQueueSetting }
 <p>
@@ -10894,7 +14157,7 @@ int32
 </td>
 <td>
 <p>min is the minimum number of nodes to maintain in the pool.
-Can be set to 0 for scale-from-zero for AWS platform.
+Can be set to 0 for scale-from-zero for AWS and Azure platforms.
 Must be &gt;= 0 and &lt;= .Max.</p>
 </td>
 </tr>
@@ -11101,6 +14364,39 @@ Enabling this feature will cause the controller to automatically delete unhealth
 The unhealthy criteria is reserved for the controller implementation and subject to change.
 But generally it&rsquo;s determined by checking the Node ready condition is true and a timeout that might vary depending on the platform provider.
 AutoRepair will no-op when more than 2 Nodes are unhealthy at the same time. Giving time for the cluster to stabilize or to the user to manually intervene.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###NodePoolNodesInfo { #hypershift.openshift.io/v1beta1.NodePoolNodesInfo }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.NodePoolStatus">NodePoolStatus</a>)
+</p>
+<p>
+<p>NodePoolNodesInfo aggregates observed information about nodes belonging to this NodePool.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>nodeVersions</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.NodeVersion">
+[]NodeVersion
+</a>
+</em>
+</td>
+<td>
+<p>nodeVersions summarizes the versions and health of nodes belonging
+to this NodePool. Each entry represents a distinct version combination
+and the number of ready/unready nodes running it.</p>
 </td>
 </tr>
 </tbody>
@@ -11529,6 +14825,32 @@ TODO: This is set as optional to prevent validation from failing due to a limita
 <a href="https://github.com/kubernetes/kubernetes/issues/108768#issuecomment-1253912215">https://github.com/kubernetes/kubernetes/issues/108768#issuecomment-1253912215</a></p>
 </td>
 </tr>
+<tr>
+<td>
+<code>osImageStream,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.OSImageStreamReference">
+OSImageStreamReference
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>osImageStream specifies an OS stream to be used for nodes in this pool.</p>
+<p>This field can be optionally set to a known OSImageStream name to change
+the OS and Extension images with a well-known, tested, release-provided
+set of images. This enables a streamlined way of switching the pool&rsquo;s
+node OS to a different version than the cluster default, such as
+transitioning to a major RHEL version.</p>
+<p>When set, the referenced stream overrides the default OS images for the
+pool. When omitted, the pool uses the release version&rsquo;s default stream
+(rhel-9 for OCP &lt; 5.0, rhel-10 for OCP &gt;= 5.0).
+Changing this field triggers a rollout. Forward transitions
+(rhel-9 -&gt; rhel-10) are allowed; backward transitions
+(rhel-10 -&gt; rhel-9) are rejected by CEL validation because
+in-place OS downgrades are not supported.</p>
+</td>
+</tr>
 </tbody>
 </table>
 ###NodePoolStatus { #hypershift.openshift.io/v1beta1.NodePoolStatus }
@@ -11574,6 +14896,21 @@ the NodePool.</p>
 </tr>
 <tr>
 <td>
+<code>nodesInfo,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.NodePoolNodesInfo">
+NodePoolNodesInfo
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>nodesInfo contains aggregated information observed from nodes belonging
+to this NodePool.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>platform</code></br>
 <em>
 <a href="#hypershift.openshift.io/v1beta1.NodePoolPlatformStatus">
@@ -11584,6 +14921,21 @@ NodePoolPlatformStatus
 <td>
 <em>(Optional)</em>
 <p>platform holds the specific statuses</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>osImageStream,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.OSImageStreamReference">
+OSImageStreamReference
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>osImageStream reports the OS stream observed on the nodes in this pool.</p>
+<p>When omitted, the pool is using the release version&rsquo;s default OS images.</p>
 </td>
 </tr>
 <tr>
@@ -11645,6 +14997,106 @@ assigned when the service is created.</p>
 </tr>
 </tbody>
 </table>
+###NodeVersion { #hypershift.openshift.io/v1beta1.NodeVersion }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.NodePoolNodesInfo">NodePoolNodesInfo</a>)
+</p>
+<p>
+<p>NodeVersion represents a version combination and the count of ready and unready nodes running it.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>ocpVersion</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>ocpVersion is the OpenShift release version this node was provisioned
+or upgraded with.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>kubeletVersion</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>kubeletVersion is the kubelet version reported by the node, as observed
+from Machine.Status.NodeInfo.KubeletVersion.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>readyNodeCount</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<p>readyNodeCount is the number of nodes running this version where the
+CAPI NodeHealthy condition is True.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>unreadyNodeCount</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<p>unreadyNodeCount is the number of nodes running this version where the
+CAPI NodeHealthy condition is not True. Useful for tracking upgrade
+progress and detecting stuck nodes.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###OAuthServerOperatorSpec { #hypershift.openshift.io/v1beta1.OAuthServerOperatorSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.OperatorConfiguration">OperatorConfiguration</a>)
+</p>
+<p>
+<p>OAuthServerOperatorSpec specifies the configuration for the OAuth Server.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>ComponentLogLevelSpec</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.ComponentLogLevelSpec">
+ComponentLogLevelSpec
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ComponentLogLevelSpec</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+</tbody>
+</table>
 ###OLMCatalogPlacement { #hypershift.openshift.io/v1beta1.OLMCatalogPlacement }
 <p>
 (<em>Appears on:</em>
@@ -11670,6 +15122,36 @@ the guest cluster.</p>
 the management cluster.</p>
 </td>
 </tr></tbody>
+</table>
+###OSImageStreamReference { #hypershift.openshift.io/v1beta1.OSImageStreamReference }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.NodePoolSpec">NodePoolSpec</a>, 
+<a href="#hypershift.openshift.io/v1beta1.NodePoolStatus">NodePoolStatus</a>)
+</p>
+<p>
+<p>OSImageStreamReference references an OSImageStream by name.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>name</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>name is a required reference to an OSImageStream to be used for the pool.</p>
+</td>
+</tr>
+</tbody>
 </table>
 ###OVNIPv4Config { #hypershift.openshift.io/v1beta1.OVNIPv4Config }
 <p>
@@ -11729,6 +15211,73 @@ The value must be in proper IPV4 CIDR format</p>
 </tr>
 </tbody>
 </table>
+###OVNIPv6Config { #hypershift.openshift.io/v1beta1.OVNIPv6Config }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.OVNKubernetesConfig">OVNKubernetesConfig</a>)
+</p>
+<p>
+<p>OVNIPv6Config contains IPv6-specific configuration options for OVN-Kubernetes.
+<a href="https://github.com/openshift/api/blob/6d3c4e25a8d3aeb57ad61649d80c38cbd27d1cc8/operator/v1/types_network.go#L541-L570">https://github.com/openshift/api/blob/6d3c4e25a8d3aeb57ad61649d80c38cbd27d1cc8/operator/v1/types_network.go#L541-L570</a></p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>internalTransitSwitchSubnet</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>internalTransitSwitchSubnet is a v6 subnet in IPv6 CIDR format used internally
+by OVN-Kubernetes for the distributed transit switch in the OVN Interconnect
+architecture that connects the cluster routers on each node together to enable
+east west traffic. The subnet chosen should not overlap with other networks
+specified for OVN-Kubernetes as well as other networks used on the host.
+When omitted, this means no opinion and the platform is left to choose a reasonable
+default which is subject to change over time.
+The current default subnet is fd97::/64.
+The subnet must be large enough to accommodate one IP per node in your cluster.
+The value must be a valid IPv6 CIDR (e.g. fd97::/64). IPv4 addresses,
+IPv4-mapped IPv6 addresses, and dual-stack addresses are not permitted.
+The prefix length must be in the range /0 to /125 inclusive.
+This field is immutable once set.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>internalJoinSubnet</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>internalJoinSubnet is a v6 subnet used internally by ovn-kubernetes in case the
+default one is being already used by something else. It must not overlap with
+any other subnet being used by OpenShift or by the node network. The size of the
+subnet must be larger than the number of nodes.
+The current default value is fd98::/64.
+For KubeVirt hosted clusters, if this field is not set, HyperShift will
+automatically use fd99::/64 to avoid collisions with the management cluster&rsquo;s
+default join subnet (fd98::/64).
+The subnet must be large enough to accommodate one IP per node in your cluster.
+The value must be a valid IPv6 CIDR (e.g. fd98::/64). IPv4 addresses,
+IPv4-mapped IPv6 addresses, and dual-stack addresses are not permitted.
+The prefix length must be in the range /0 to /125 inclusive.
+This field is immutable once set.</p>
+</td>
+</tr>
+</tbody>
+</table>
 ###OVNKubernetesConfig { #hypershift.openshift.io/v1beta1.OVNKubernetesConfig }
 <p>
 (<em>Appears on:</em>
@@ -11762,6 +15311,104 @@ this means no opinions and the default configuration is used. Check individual
 fields within ipv4 for details of default values.</p>
 </td>
 </tr>
+<tr>
+<td>
+<code>ipv6,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.OVNIPv6Config">
+OVNIPv6Config
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ipv6 allows users to configure IP settings for IPv6 connections. When omitted,
+this means no opinions and the default configuration is used. Check individual
+fields within ipv6 for details of default values.
+For KubeVirt hosted clusters using dual-stack networking, it is recommended to
+set ipv6.internalJoinSubnet to a value different from the management cluster&rsquo;s
+join subnet (default fd98::/64) to avoid IPv6 routing conflicts.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>mtu</code></br>
+<em>
+int32
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>mtu is the MTU to use for the tunnel interface on hosted cluster nodes.
+This must be 100 bytes smaller than the uplink MTU.
+When unset, the cluster-network-operator will determine the MTU automatically
+based on the infrastructure (e.g., for commercial AWS regions, it defaults
+to 8901 based on the 9001 uplink MTU minus 100 bytes overhead).
+Some non-commercial AWS regions do not support 9001 uplink MTU,
+requiring this field to be explicitly set to a lower value.
+The maximum is 9216, which is the standard jumbo frame upper limit
+supported by datacenter and cloud network interfaces.
+The minimum is 576, which is the minimum IPv4 MTU per RFC 791.
+This field is immutable once set.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>v4InternalSubnet</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>v4InternalSubnet configures the IPv4 subnet used by OVN-Kubernetes for gateway
+router logical router port (LRP) addresses and masquerade/SNAT traffic within
+the OVN logical topology. It must not overlap with any other subnet being used
+by OpenShift or by the node network. The size of the subnet must be larger than
+the number of nodes.
+This field is distinct from ipv4.internalJoinSubnet, which configures the subnet
+for the join switch that interconnects per-node gateway routers with the cluster
+router. Both default to 100.64.0.0/16 but control different OVN-Kubernetes
+internal networks and can be configured independently to avoid overlaps with
+existing network infrastructure.
+Once set, the value is immutable and cannot be modified in subsequent updates.
+The default is 100.64.0.0/16.
+The value must be in IPv4 CIDR notation (e.g., 192.168.0.0/16), consisting of
+four decimal octets (0-255) separated by dots, followed by a slash and a prefix
+length. The prefix length must be between 0 and 30 inclusive, and the first
+octet must not be 0.
+The value must be between 9 and 18 characters in length.
+This field is immutable once set.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>v6InternalSubnet</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>v6InternalSubnet configures the IPv6 subnet used by OVN-Kubernetes for gateway
+router logical router port (LRP) addresses and masquerade/SNAT traffic within
+the OVN logical topology. It must not overlap with any other subnet being used
+by OpenShift or by the node network. The size of the subnet must be larger than
+the number of nodes.
+This field is distinct from ipv6.internalJoinSubnet, which configures the subnet
+for the join switch that interconnects per-node gateway routers with the cluster
+router. Both default to fd98::/64 but control different OVN-Kubernetes internal
+networks and can be configured independently to avoid overlaps with existing
+network infrastructure.
+Once set, the value is immutable and cannot be modified in subsequent updates.
+The default is fd98::/64.
+The value must be in IPv6 CIDR notation (e.g., fd98::/64), consisting of an
+IPv6 address followed by a slash and a prefix length. The prefix length must
+be between 0 and 125 inclusive.
+The value must be between 4 and 48 characters in length.
+This field is immutable once set.</p>
+</td>
+</tr>
 </tbody>
 </table>
 ###ObjectEncodingFormat { #hypershift.openshift.io/v1beta1.ObjectEncodingFormat }
@@ -11778,6 +15425,105 @@ SecretProviderClass custom resource related to the managed identity.</p>
 <p>The default value is utf-8.</p>
 <p>See this for more info - <a href="https://github.com/Azure/secrets-store-csi-driver-provider-azure/blob/master/website/content/en/getting-started/usage/_index.md">https://github.com/Azure/secrets-store-csi-driver-provider-azure/blob/master/website/content/en/getting-started/usage/_index.md</a></p>
 </p>
+###OpenShiftAPIServerOperatorSpec { #hypershift.openshift.io/v1beta1.OpenShiftAPIServerOperatorSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.OperatorConfiguration">OperatorConfiguration</a>)
+</p>
+<p>
+<p>OpenShiftAPIServerOperatorSpec specifies the configuration for the OpenShift API Server.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>ComponentLogLevelSpec</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.ComponentLogLevelSpec">
+ComponentLogLevelSpec
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ComponentLogLevelSpec</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+</tbody>
+</table>
+###OpenShiftControllerManagerOperatorSpec { #hypershift.openshift.io/v1beta1.OpenShiftControllerManagerOperatorSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.OperatorConfiguration">OperatorConfiguration</a>)
+</p>
+<p>
+<p>OpenShiftControllerManagerOperatorSpec specifies the configuration for the OpenShift Controller Manager.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>ComponentLogLevelSpec</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.ComponentLogLevelSpec">
+ComponentLogLevelSpec
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ComponentLogLevelSpec</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+</tbody>
+</table>
+###OpenShiftOAuthAPIServerOperatorSpec { #hypershift.openshift.io/v1beta1.OpenShiftOAuthAPIServerOperatorSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.OperatorConfiguration">OperatorConfiguration</a>)
+</p>
+<p>
+<p>OpenShiftOAuthAPIServerOperatorSpec specifies the configuration for the OpenShift OAuth API Server.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>ComponentLogLevelSpec</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.ComponentLogLevelSpec">
+ComponentLogLevelSpec
+</a>
+</em>
+</td>
+<td>
+<p>
+(Members of <code>ComponentLogLevelSpec</code> are embedded into this type.)
+</p>
+</td>
+</tr>
+</tbody>
+</table>
 ###OpenStackIdentityReference { #hypershift.openshift.io/v1beta1.OpenStackIdentityReference }
 <p>
 (<em>Appears on:</em>
@@ -12127,6 +15873,152 @@ IngressOperatorSpec
 <em>(Optional)</em>
 <p>ingressOperator specifies the configuration for the Ingress Operator in the hosted cluster.
 This allows configuring how the default ingress controller endpoints are published.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>kubeAPIServer,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.KubeAPIServerOperatorSpec">
+KubeAPIServerOperatorSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>kubeAPIServer configures the kube-apiserver component.
+Setting the logLevel field triggers a rolling restart of the component.
+When omitted, this means the user has no opinion and the platform
+chooses a reasonable default, which is subject to change over time.
+The current default log level is Normal.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>etcd,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.EtcdOperatorSpec">
+EtcdOperatorSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>etcd configures the etcd component.
+Setting the logLevel field triggers a rolling restart of the component.
+Note: etcd supports fewer log levels than klog-based components,
+etcd supports only Normal and Debug log levels.
+When omitted, this means the user has no opinion and the platform
+chooses a reasonable default, which is subject to change over time.
+The current default log level is Normal.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>kubeControllerManager,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.KubeControllerManagerOperatorSpec">
+KubeControllerManagerOperatorSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>kubeControllerManager configures the kube-controller-manager component.
+Setting the logLevel field triggers a rolling restart of the component.
+When omitted, this means the user has no opinion and the platform
+chooses a reasonable default, which is subject to change over time.
+The current default log level is Normal.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>kubeScheduler,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.KubeSchedulerOperatorSpec">
+KubeSchedulerOperatorSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>kubeScheduler configures the kube-scheduler component.
+Setting the logLevel field triggers a rolling restart of the component.
+When omitted, this means the user has no opinion and the platform
+chooses a reasonable default, which is subject to change over time.
+The current default log level is Normal.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>openShiftControllerManager,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.OpenShiftControllerManagerOperatorSpec">
+OpenShiftControllerManagerOperatorSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>openShiftControllerManager configures the openshift-controller-manager component.
+Setting the logLevel field triggers a rolling restart of the component.
+When omitted, this means the user has no opinion and the platform
+chooses a reasonable default, which is subject to change over time.
+The current default log level is Normal.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>openShiftAPIServer,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.OpenShiftAPIServerOperatorSpec">
+OpenShiftAPIServerOperatorSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>openShiftAPIServer configures the openshift-apiserver component.
+Setting the logLevel field triggers a rolling restart of the component.
+When omitted, this means the user has no opinion and the platform
+chooses a reasonable default, which is subject to change over time.
+The current default log level is Normal.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>openShiftOAuthAPIServer,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.OpenShiftOAuthAPIServerOperatorSpec">
+OpenShiftOAuthAPIServerOperatorSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>openShiftOAuthAPIServer configures the openshift-oauth-apiserver component.
+Setting the logLevel field triggers a rolling restart of the component.
+When omitted, this means the user has no opinion and the platform
+chooses a reasonable default, which is subject to change over time.
+The current default log level is Normal.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>oauthServer,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.OAuthServerOperatorSpec">
+OAuthServerOperatorSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>oauthServer configures the oauth-server component.
+Setting the logLevel field triggers a rolling restart of the component.
+When omitted, this means the user has no opinion and the platform
+chooses a reasonable default, which is subject to change over time.
+The current default log level is Normal.</p>
 </td>
 </tr>
 </tbody>
@@ -13331,7 +17223,7 @@ Provisioner
 </tr>
 <tr>
 <td>
-<code>karpenter</code></br>
+<code>karpenter,omitzero</code></br>
 <em>
 <a href="#hypershift.openshift.io/v1beta1.KarpenterConfig">
 KarpenterConfig
@@ -13807,6 +17699,120 @@ When omitted, the autoscaler defaults to 50%.</p>
 </td>
 </tr></tbody>
 </table>
+###SecretEncryptionKeyStatus { #hypershift.openshift.io/v1beta1.SecretEncryptionKeyStatus }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.SecretEncryptionStatus">SecretEncryptionStatus</a>)
+</p>
+<p>
+<p>SecretEncryptionKeyStatus records the active key identity using the same types as the spec.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>provider</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.SecretEncryptionProvider">
+SecretEncryptionProvider
+</a>
+</em>
+</td>
+<td>
+<p>provider identifies the encryption provider.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>azure,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzureKMSKey">
+AzureKMSKey
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>azure holds the Azure KMS key identity fields.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>aws,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AWSKMSKeyEntry">
+AWSKMSKeyEntry
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>aws holds the AWS KMS key identity fields.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>ibmCloud,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.IBMCloudKMSKeyEntry">
+IBMCloudKMSKeyEntry
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>ibmCloud holds the IBM Cloud KMS key identity fields.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>aescbc,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AESCBCKeyStatus">
+AESCBCKeyStatus
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>aescbc holds a reference to the AESCBC key secret.</p>
+</td>
+</tr>
+</tbody>
+</table>
+###SecretEncryptionProvider { #hypershift.openshift.io/v1beta1.SecretEncryptionProvider }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.EncryptionKeyReference">EncryptionKeyReference</a>, 
+<a href="#hypershift.openshift.io/v1beta1.SecretEncryptionKeyStatus">SecretEncryptionKeyStatus</a>)
+</p>
+<p>
+<p>SecretEncryptionProvider identifies the encryption provider recorded in status.
+This is a separate type from KMSProvider because the KMSProvider enum does not include AESCBC.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr><td><p>&#34;AESCBC&#34;</p></td>
+<td></td>
+</tr><tr><td><p>&#34;AWS&#34;</p></td>
+<td></td>
+</tr><tr><td><p>&#34;Azure&#34;</p></td>
+<td></td>
+</tr><tr><td><p>&#34;IBMCloud&#34;</p></td>
+<td></td>
+</tr></tbody>
+</table>
 ###SecretEncryptionSpec { #hypershift.openshift.io/v1beta1.SecretEncryptionSpec }
 <p>
 (<em>Appears on:</em>
@@ -13868,6 +17874,74 @@ AESCBCSpec
 </tr>
 </tbody>
 </table>
+###SecretEncryptionStatus { #hypershift.openshift.io/v1beta1.SecretEncryptionStatus }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.HostedClusterStatus">HostedClusterStatus</a>, 
+<a href="#hypershift.openshift.io/v1beta1.HostedControlPlaneStatus">HostedControlPlaneStatus</a>)
+</p>
+<p>
+<p>SecretEncryptionStatus tracks the state of secret encryption key rotation and re-encryption.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>activeKey,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.SecretEncryptionKeyStatus">
+SecretEncryptionKeyStatus
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>activeKey is the encryption key specification that all etcd data is confirmed encrypted with.
+Updated after successful re-encryption.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>targetKey,omitzero</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.SecretEncryptionKeyStatus">
+SecretEncryptionKeyStatus
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>targetKey is the key being rolled out during an active rotation. Snapshot from
+spec.secretEncryption&rsquo;s active key when the rotation starts. The CPO uses this
+(not the current spec) during the rotation, so mid-rotation spec changes are
+safely queued until the current rotation completes. Cleared when rotation completes.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>history</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.EncryptionMigrationHistory">
+[]EncryptionMigrationHistory
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>history contains a list of key rotations applied to this cluster. The newest
+entry is first in the list. Entries have state Completed when re-encryption
+has finished. The current rotation phase is always history[0].state when
+history[0] is not Completed or Interrupted.</p>
+</td>
+</tr>
+</tbody>
+</table>
 ###SecretEncryptionType { #hypershift.openshift.io/v1beta1.SecretEncryptionType }
 <p>
 (<em>Appears on:</em>
@@ -13890,6 +17964,40 @@ AESCBCSpec
 <td><p>KMS integrates with a cloud provider&rsquo;s key management service to do secret encryption</p>
 </td>
 </tr></tbody>
+</table>
+###SecretReference { #hypershift.openshift.io/v1beta1.SecretReference }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AESCBCKeyStatus">AESCBCKeyStatus</a>, 
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupAzureBlob">HCPEtcdBackupAzureBlob</a>, 
+<a href="#hypershift.openshift.io/v1beta1.HCPEtcdBackupS3">HCPEtcdBackupS3</a>)
+</p>
+<p>
+<p>SecretReference contains a reference to a Secret by name.
+The Secret must exist in the same namespace as the referencing resource.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>name</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>name is the name of the Secret. It must be a valid DNS-1123 subdomain: at most
+253 characters, consisting of lowercase alphanumeric characters, hyphens, and periods.
+Each period-separated segment must start and end with an alphanumeric character.</p>
+</td>
+</tr>
+</tbody>
 </table>
 ###ServiceNetworkEntry { #hypershift.openshift.io/v1beta1.ServiceNetworkEntry }
 <p>
@@ -14373,6 +18481,73 @@ Valid effects are NoSchedule, PreferNoSchedule and NoExecute.</p>
 </tr>
 </tbody>
 </table>
+###UnmanagedEtcdShardSpec { #hypershift.openshift.io/v1beta1.UnmanagedEtcdShardSpec }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.UnmanagedEtcdSpec">UnmanagedEtcdSpec</a>)
+</p>
+<p>
+<p>UnmanagedEtcdShardSpec defines the configuration for a single etcd shard
+within an unmanaged (externally operated) etcd deployment.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>name</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>name is a unique identifier for this shard.
+Must be a valid DNS1123 label (lowercase alphanumeric with hyphens,
+starting and ending with an alphanumeric character), max 48 characters.
+Immutable once set.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>resources</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.EtcdShardResource">
+[]EtcdShardResource
+</a>
+</em>
+</td>
+<td>
+<p>resources is the list of Kubernetes resource types routed to this
+shard. Uses the same format as ManagedEtcdShardSpec.Resources.
+Only resource types built into the kube-apiserver are routed; entries
+for CRD-backed or aggregated API resources have no effect (see
+EtcdShardResource).
+Minimum 1, maximum 20 entries. Immutable once set.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>endpoint</code></br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>endpoint is the full etcd client endpoint URL for this shard.
+Must be a valid HTTPS URL, max 267 characters. Immutable once set.
+All shards must share the same CA and client certificate as the
+top-level UnmanagedEtcdSpec.TLS, because kube-apiserver uses a
+single &ndash;etcd-cafile/&ndash;etcd-certfile/&ndash;etcd-keyfile for all etcd
+connections; &ndash;etcd-servers-overrides only overrides server URLs.</p>
+</td>
+</tr>
+</tbody>
+</table>
 ###UnmanagedEtcdSpec { #hypershift.openshift.io/v1beta1.UnmanagedEtcdSpec }
 <p>
 (<em>Appears on:</em>
@@ -14415,6 +18590,27 @@ EtcdTLSConfig
 </td>
 <td>
 <p>tls specifies TLS configuration for HTTPS etcd client endpoints.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>shards</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.UnmanagedEtcdShardSpec">
+[]UnmanagedEtcdShardSpec
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>shards defines additional etcd shards for resource-level routing.
+The top-level endpoint and tls fields define the default shard
+(the catch-all for all resources not explicitly routed). Entries
+in this list define non-default shards, each with its own endpoint
+and TLS configuration.
+Minimum 1, maximum 10 entries. Resources must not overlap across
+shards. Immutable after creation: shards cannot be added, removed,
+or reordered.</p>
 </td>
 </tr>
 </tbody>
@@ -14467,6 +18663,41 @@ additional node capacity requirements.</p>
 capacity.</p>
 </td>
 </tr></tbody>
+</table>
+###UserAssignedManagedIdentity { #hypershift.openshift.io/v1beta1.UserAssignedManagedIdentity }
+<p>
+(<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AzureContainerRegistryCredentialConfig">AzureContainerRegistryCredentialConfig</a>)
+</p>
+<p>
+<p>UserAssignedManagedIdentity identifies a user-assigned managed identity by its ARM resource ID.</p>
+</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>resourceID</code></br>
+<em>
+<a href="#hypershift.openshift.io/v1beta1.AzureManagedIdentityResourceID">
+AzureManagedIdentityResourceID
+</a>
+</em>
+</td>
+<td>
+<p>resourceID is the ARM resource ID of the user-assigned managed identity
+in the format /subscriptions/{subscriptionID}/resourceGroups/{resourceGroupName}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/{identityName}.
+The identity must have the AcrPull role on the target Azure Container Registry.
+It does not need to be in the same subscription or resource group as the HostedCluster,
+but it must be in the same Azure AD tenant.</p>
+</td>
+</tr>
+</tbody>
 </table>
 ###UserManagedDiagnostics { #hypershift.openshift.io/v1beta1.UserManagedDiagnostics }
 <p>
@@ -14583,6 +18814,7 @@ string
 ###WorkloadIdentity { #hypershift.openshift.io/v1beta1.WorkloadIdentity }
 <p>
 (<em>Appears on:</em>
+<a href="#hypershift.openshift.io/v1beta1.AzureKMSSpec">AzureKMSSpec</a>, 
 <a href="#hypershift.openshift.io/v1beta1.AzureWorkloadIdentities">AzureWorkloadIdentities</a>)
 </p>
 <p>

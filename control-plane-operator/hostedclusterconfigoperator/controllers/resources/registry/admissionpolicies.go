@@ -38,11 +38,8 @@ var (
 )
 
 func ReconcileRegistryConfigValidatingAdmissionPolicies(ctx context.Context, hcp *hyperv1.HostedControlPlane, client client.Client, createOrUpdate upsert.CreateOrUpdateFN) error {
-	log := ctrl.LoggerFrom(ctx)
-	log.Info("reconciling image registry config validating admission policies")
-
 	if err := reconcileRegistryConfigManagementStateValidatingAdmissionPolicy(ctx, hcp, client, createOrUpdate); err != nil {
-		return fmt.Errorf("failed to reconcile ManagementState Validating Admission Policy: %v", err)
+		return fmt.Errorf("failed to reconcile ManagementState Validating Admission Policy: %w", err)
 	}
 
 	return nil
@@ -52,7 +49,7 @@ func ReconcileRegistryConfigValidatingAdmissionPolicies(ctx context.Context, hcp
 // that controls access to the Image Registry config managementState field.
 //
 // During normal operation, it prevents users from setting managementState to 'Removed' except for the HCCO user.
-func reconcileRegistryConfigManagementStateValidatingAdmissionPolicy(ctx context.Context, hcp *hyperv1.HostedControlPlane, client client.Client, createOrUpdate upsert.CreateOrUpdateFN) error {
+func reconcileRegistryConfigManagementStateValidatingAdmissionPolicy(ctx context.Context, _ *hyperv1.HostedControlPlane, client client.Client, createOrUpdate upsert.CreateOrUpdateFN) error {
 	log := ctrl.LoggerFrom(ctx)
 	registryConfigManagementStateAdmissionPolicy := AdmissionPolicy{Name: AdmissionPolicyNameManagementState}
 	registryConfigManagementStateAPIVersion := []string{imageregistryv1.GroupVersion.Version}
@@ -69,7 +66,7 @@ func reconcileRegistryConfigManagementStateValidatingAdmissionPolicy(ctx context
 	registryConfigManagementStateAdmissionPolicy.Validations = []k8sadmissionv1.Validation{denyRemovedManagementStateValidation}
 	registryConfigManagementStateAdmissionPolicy.MatchConstraints = constructPolicyMatchConstraints(registryConfigManagementStateResources, registryConfigManagementStateAPIVersion, registryConfigManagementStateAPIGroup, []k8sadmissionv1.OperationType{"CREATE", "UPDATE"})
 	if err := registryConfigManagementStateAdmissionPolicy.reconcileAdmissionPolicy(ctx, client, createOrUpdate); err != nil {
-		return fmt.Errorf("error reconciling management State Validating Admission Policy: %v", err)
+		return fmt.Errorf("error reconciling management State Validating Admission Policy: %w", err)
 	}
 
 	return nil
@@ -88,7 +85,7 @@ func (ap *AdmissionPolicy) reconcileAdmissionPolicy(ctx context.Context, client 
 
 		return nil
 	}); err != nil {
-		return fmt.Errorf("failed to create/update Validating Admission Policy with name %s: %v", ap.Name, err)
+		return fmt.Errorf("failed to create/update Validating Admission Policy with name %s: %w", ap.Name, err)
 	}
 
 	policyBinding := manifests.ValidatingAdmissionPolicyBinding(fmt.Sprintf("%s-binding", ap.Name))
@@ -97,7 +94,7 @@ func (ap *AdmissionPolicy) reconcileAdmissionPolicy(ctx context.Context, client 
 		policyBinding.Spec.ValidationActions = []k8sadmissionv1.ValidationAction{k8sadmissionv1.Deny}
 		return nil
 	}); err != nil {
-		return fmt.Errorf("failed to create/update Validating Admission Policy Binding with name %s: %v", ap.Name, err)
+		return fmt.Errorf("failed to create/update Validating Admission Policy Binding with name %s: %w", ap.Name, err)
 	}
 
 	return nil

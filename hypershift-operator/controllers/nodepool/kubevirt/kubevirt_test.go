@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/coreos/stream-metadata-go/stream"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
 	"github.com/google/go-cmp/cmp"
@@ -48,7 +49,7 @@ func TestKubevirtMachineTemplate(t *testing.T) {
 		expectedValidationError string
 	}{
 		{
-			name: "happy flow",
+			name: "When basic valid nodepool is configured, it should create the expected template",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      poolName,
@@ -96,7 +97,7 @@ func TestKubevirtMachineTemplate(t *testing.T) {
 			},
 		},
 		{
-			name: "happy flow - QoS CLass Guaranteed",
+			name: "When QoS class is set to Guaranteed, it should create template with guaranteed resources",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      poolName,
@@ -144,7 +145,7 @@ func TestKubevirtMachineTemplate(t *testing.T) {
 			},
 		},
 		{
-			name: "NetworkInterfaceMultiQueue is Disable",
+			name: "When NetworkInterfaceMultiQueue is Disabled, it should not set multiqueue",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      poolName,
@@ -193,7 +194,7 @@ func TestKubevirtMachineTemplate(t *testing.T) {
 			},
 		},
 		{
-			name: "NetworkInterfaceMultiQueue is Enabled",
+			name: "When NetworkInterfaceMultiQueue is Enabled, it should set multiqueue on the template",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      poolName,
@@ -243,7 +244,7 @@ func TestKubevirtMachineTemplate(t *testing.T) {
 			},
 		},
 		{
-			name: "Additional networks are configured",
+			name: "When additional networks are configured, it should include them in the template",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      poolName,
@@ -343,7 +344,7 @@ func TestKubevirtMachineTemplate(t *testing.T) {
 			},
 		},
 		{
-			name: "Additional networks are configured excluding default one",
+			name: "When additional networks are configured excluding default, it should exclude default network",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      poolName,
@@ -436,7 +437,7 @@ func TestKubevirtMachineTemplate(t *testing.T) {
 			},
 		},
 		{
-			name: "Excluding default network with additional ones should fail validation",
+			name: "When default network is excluded without additional networks, it should fail validation",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      poolName,
@@ -473,7 +474,7 @@ func TestKubevirtMachineTemplate(t *testing.T) {
 			expectedValidationError: "default network cannot be disabled when no additional networks are configured",
 		},
 		{
-			name: "Host Devices are configured properly",
+			name: "When host devices are configured, it should include them in the template",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      poolName,
@@ -537,7 +538,7 @@ func TestKubevirtMachineTemplate(t *testing.T) {
 			},
 		},
 		{
-			name: "Host Devices count has an invalid value",
+			name: "When host device count has invalid value, it should fail validation",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      poolName,
@@ -600,7 +601,7 @@ func TestKubevirtMachineTemplate(t *testing.T) {
 			}
 
 			bootImage := newCachedBootImage(bootImageName, imageHash, hostedClusterNamespace, false, np)
-			result, err := MachineTemplateSpec(tc.nodePool, tc.hcluster, &releaseinfo.ReleaseImage{}, bootImage)
+			result, err := MachineTemplateSpec(tc.nodePool, tc.hcluster, &releaseinfo.ReleaseImage{}, bootImage, "")
 			g.Expect(err).ToNot(HaveOccurred())
 			g.Expect(result).To(Equal(tc.expected), "Comparison failed\n%v", cmp.Diff(tc.expected, result))
 		})
@@ -641,14 +642,14 @@ func TestCacheImage(t *testing.T) {
 		dvNamePrefix      string
 	}{
 		{
-			name:         "happy flow - no existing PVC",
+			name:         "When no existing PVC exists, it should create a new DataVolume",
 			nodePool:     nodePool,
 			errExpected:  false,
 			dvNamePrefix: bootImageNamePrefix,
 			asserFunc:    assertDV,
 		},
 		{
-			name:        "happy flow - PVC already exists",
+			name:        "When PVC already exists with matching hash, it should reuse it",
 			nodePool:    nodePool,
 			errExpected: false,
 			existingResources: []client.Object{
@@ -671,7 +672,7 @@ func TestCacheImage(t *testing.T) {
 			asserFunc:    assertDV,
 		},
 		{
-			name:        "cleanup - different hash",
+			name:        "When existing DataVolume has different hash, it should clean up and create new one",
 			nodePool:    nodePool,
 			errExpected: false,
 			existingResources: []client.Object{
@@ -695,7 +696,7 @@ func TestCacheImage(t *testing.T) {
 			asserFunc:    assertDV,
 		},
 		{
-			name:        "cleanup - different cluster - should not clean",
+			name:        "When existing DataVolume belongs to different cluster, it should not clean it",
 			nodePool:    nodePool,
 			errExpected: false,
 			existingResources: []client.Object{
@@ -762,7 +763,7 @@ func TestJsonPatch(t *testing.T) {
 		expected *capikubevirt.KubevirtMachineTemplateSpec
 	}{
 		{
-			name: "single json patch in the nodepool",
+			name: "When a single json patch is set in the nodepool, it should apply it",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      poolName,
@@ -814,7 +815,7 @@ func TestJsonPatch(t *testing.T) {
 			},
 		},
 		{
-			name: "several json patches in the nodepool",
+			name: "When several json patches are set in the nodepool, it should apply all of them",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      poolName,
@@ -877,7 +878,7 @@ func TestJsonPatch(t *testing.T) {
 			},
 		},
 		{
-			name: "single json patch in the hosted cluster",
+			name: "When a single json patch is set in the hosted cluster, it should apply it",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      poolName,
@@ -929,7 +930,7 @@ func TestJsonPatch(t *testing.T) {
 			},
 		},
 		{
-			name: "several json patches in the hosted cluster",
+			name: "When several json patches are set in the hosted cluster, it should apply all of them",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      poolName,
@@ -992,7 +993,7 @@ func TestJsonPatch(t *testing.T) {
 			},
 		},
 		{
-			name: "json patches both in the hosted cluster and the nodepool",
+			name: "When json patches are set in both the hosted cluster and the nodepool, it should apply all of them",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      poolName,
@@ -1059,7 +1060,7 @@ func TestJsonPatch(t *testing.T) {
 			},
 		},
 		{
-			name: "json patches in the hosted cluster, overrode by the one in the nodepool",
+			name: "When json patches conflict between hosted cluster and nodepool, it should use nodepool patch",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      poolName,
@@ -1125,7 +1126,7 @@ func TestJsonPatch(t *testing.T) {
 			},
 		},
 		{
-			name: "remove annotation in the nodepool",
+			name: "When a remove annotation json patch is set in the nodepool, it should remove the annotation",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      poolName,
@@ -1188,7 +1189,7 @@ func TestJsonPatch(t *testing.T) {
 
 			bootImage := newCachedBootImage(bootImageName, imageHash, hostedClusterNamespace, false, nil)
 			bootImage.dvName = bootImageNamePrefix + "12345"
-			result, err := MachineTemplateSpec(tc.nodePool, tc.hcluster, &releaseinfo.ReleaseImage{}, bootImage)
+			result, err := MachineTemplateSpec(tc.nodePool, tc.hcluster, &releaseinfo.ReleaseImage{}, bootImage, "")
 			g.Expect(err).ToNot(HaveOccurred())
 			g.Expect(result).To(Equal(tc.expected), "Comparison failed\n%v", cmp.Diff(tc.expected, result))
 		})
@@ -1511,18 +1512,18 @@ func generateNodeTemplate(options ...nodeTemplateOption) *capikubevirt.VirtualMa
 func TestDefaultImage(t *testing.T) {
 	// Create a mock ReleaseImage with architecture-specific Kubevirt images
 	ri := &releaseinfo.ReleaseImage{
-		StreamMetadata: &releaseinfo.CoreOSStreamMetadata{
-			Architectures: map[string]releaseinfo.CoreOSArchitecture{
+		StreamMetadata: &stream.Stream{
+			Architectures: map[string]stream.Arch{
 				hyperv1.ArchitectureS390X: {
-					Images: releaseinfo.CoreOSImages{
-						Kubevirt: releaseinfo.CoreOSKubevirtImages{
+					Images: stream.Images{
+						KubeVirt: &stream.ContainerImage{
 							DigestRef: "quay.io/openshift/release@sha256:s390x1234",
 						},
 					},
 				},
 				hyperv1.ArchAliases[hyperv1.ArchitectureAMD64]: {
-					Images: releaseinfo.CoreOSImages{
-						Kubevirt: releaseinfo.CoreOSKubevirtImages{
+					Images: stream.Images{
+						KubeVirt: &stream.ContainerImage{
 							DigestRef: "quay.io/openshift/release@sha256:x86_641234",
 						},
 					},
@@ -1534,32 +1535,81 @@ func TestDefaultImage(t *testing.T) {
 	tests := []struct {
 		name           string
 		arch           string
+		streamName     string
+		releaseImage   *releaseinfo.ReleaseImage
 		expectedImage  string
 		expectedDigest string
+		expectedError  bool
 	}{
 		{
-			name:           "s390x architecture",
+			name: "When KubeVirt image metadata is nil, it should return error",
+			arch: hyperv1.ArchitectureAMD64,
+			releaseImage: &releaseinfo.ReleaseImage{
+				StreamMetadata: &stream.Stream{
+					Architectures: map[string]stream.Arch{
+						hyperv1.ArchAliases[hyperv1.ArchitectureAMD64]: {
+							Images: stream.Images{},
+						},
+					},
+				},
+			},
+			expectedError: true,
+		},
+		{
+			name:           "When s390x architecture is used, it should return the s390x image",
 			arch:           hyperv1.ArchitectureS390X,
 			expectedImage:  "quay.io/openshift/release@sha256:s390x1234",
 			expectedDigest: "sha256:s390x1234",
 		},
 		{
-			name:           "x86_64 architecture",
+			name:           "When x86_64 architecture is used, it should return the x86_64 image",
 			arch:           hyperv1.ArchitectureAMD64,
 			expectedImage:  "quay.io/openshift/release@sha256:x86_641234",
 			expectedDigest: "sha256:x86_641234",
 		},
 		{
-			name:           "unknown architecture falls back to x86_64",
+			name:           "When unknown architecture is used, it should fall back to x86_64 image",
 			arch:           "",
 			expectedImage:  "quay.io/openshift/release@sha256:x86_641234",
 			expectedDigest: "sha256:x86_641234",
+		},
+		{
+			name:       "When named stream is used with multi-stream ReleaseImage it should resolve from the named stream",
+			arch:       hyperv1.ArchitectureAMD64,
+			streamName: "rhel-9",
+			releaseImage: &releaseinfo.ReleaseImage{
+				OSStreams: map[string]*stream.Stream{
+					"rhel-9": {
+						Architectures: map[string]stream.Arch{
+							hyperv1.ArchAliases[hyperv1.ArchitectureAMD64]: {
+								Images: stream.Images{
+									KubeVirt: &stream.ContainerImage{
+										DigestRef: "quay.io/openshift/release@sha256:rhel9kubevirt",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedImage:  "quay.io/openshift/release@sha256:rhel9kubevirt",
+			expectedDigest: "sha256:rhel9kubevirt",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			img, digest, err := defaultImage(tt.arch, ri)
+			testRI := tt.releaseImage
+			if testRI == nil {
+				testRI = ri
+			}
+			img, digest, err := defaultImage(tt.arch, testRI, tt.streamName)
+			if tt.expectedError {
+				if err == nil {
+					t.Fatalf("expected error but got nil")
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("unexpected error for %s: %v", tt.arch, err)
 			}

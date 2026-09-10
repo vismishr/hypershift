@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/kas"
+	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/kas"
 	"github.com/openshift/hypershift/support/supportedversion"
 
 	configv1 "github.com/openshift/api/config/v1"
@@ -43,7 +43,7 @@ func ValidateAuthenticationSpecForTypeOIDC(ctx context.Context, client crclient.
 		return nil
 	}
 
-	authConfig, err := kas.GenerateAuthConfig(authn, ctx, client, namespace)
+	authConfig, err := kas.GenerateAuthConfig(ctx, authn, client, namespace)
 	if err != nil {
 		return fmt.Errorf("generating structured authentication configuration: %w", err)
 	}
@@ -64,11 +64,11 @@ func ValidateAuthenticationSpecForTypeOIDC(ctx context.Context, client crclient.
 	if err != nil {
 		return fmt.Errorf("parsing kubernetes version %q", kubeVersion.String())
 	}
-	celCompiler := cel.NewCompiler(environment.MustBaseEnvSet(envVersion, true))
+	celCompiler := cel.NewCompiler(environment.MustBaseEnvSet(envVersion))
 
 	apiServerAuthConfig, err := kas.HCPAuthConfigToAPIServerAuthConfig(authConfig)
 	if err != nil {
-		return fmt.Errorf("converting from HCP auth config type to apiserver auth config type: %v", err)
+		return fmt.Errorf("converting from HCP auth config type to apiserver auth config type: %w", err)
 	}
 
 	fieldErrors := validation.ValidateAuthenticationConfiguration(celCompiler, apiServerAuthConfig, disallowIssuers)

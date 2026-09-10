@@ -1,6 +1,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    hypershift.openshift.io/desired-state-hash: 7727151f0ab1d8030888ff0527d54f84283655f8ef189d1cf2b6023ec8061a7d
   labels:
     hypershift.openshift.io/managed-by: control-plane-operator
   name: ingress-operator
@@ -68,6 +70,12 @@ spec:
         - openshift-ingress-operator
         - --image
         - $(IMAGE)
+        - --haproxy-image
+        - 2.8=$(HAPROXY_28_IMAGE)
+        - --haproxy-image
+        - 3.2=$(HAPROXY_32_IMAGE)
+        - --default-haproxy-version
+        - $(DEFAULT_HAPROXY_VERSION)
         - --canary-image
         - $(CANARY_IMAGE)
         - --release-version
@@ -79,6 +87,12 @@ spec:
           value: 4.18.0
         - name: IMAGE
           value: haproxy-router
+        - name: HAPROXY_28_IMAGE
+          value: haproxy-router-haproxy28
+        - name: HAPROXY_32_IMAGE
+          value: haproxy-router-haproxy32
+        - name: DEFAULT_HAPROXY_VERSION
+          value: "3.2"
         - name: CANARY_IMAGE
           value: cluster-ingress-operator
         - name: KUBECONFIG

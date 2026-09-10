@@ -4,7 +4,11 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,23 +20,30 @@ import (
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/common"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/infra"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
+	endpointresolverv2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/endpoint_resolver"
 	etcdv2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/etcd"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/fg"
 	ignitionserverv2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/ignitionserver"
 	ignitionproxyv2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/ignitionserver_proxy"
 	kasv2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/kas"
+	metricsproxyv2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/metrics_proxy"
 	oapiv2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/oapi"
+	routerv2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/router"
 	"github.com/openshift/hypershift/support/api"
 	"github.com/openshift/hypershift/support/awsapi"
 	"github.com/openshift/hypershift/support/azureutil"
+	"github.com/openshift/hypershift/support/capabilities"
 	fakecapabilities "github.com/openshift/hypershift/support/capabilities/fake"
 	"github.com/openshift/hypershift/support/certs"
 	controlplanecomponent "github.com/openshift/hypershift/support/controlplane-component"
+	"github.com/openshift/hypershift/support/k8sutil"
+	"github.com/openshift/hypershift/support/netutil"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	fakereleaseprovider "github.com/openshift/hypershift/support/releaseinfo/fake"
 	"github.com/openshift/hypershift/support/releaseinfo/testutils"
 	"github.com/openshift/hypershift/support/testutil"
 	"github.com/openshift/hypershift/support/thirdparty/library-go/pkg/image/dockerv1client"
+	"github.com/openshift/hypershift/support/thirdparty/library-go/pkg/image/reference"
 	"github.com/openshift/hypershift/support/upsert"
 	"github.com/openshift/hypershift/support/util"
 	"github.com/openshift/hypershift/support/util/fakeimagemetadataprovider"
@@ -41,7 +52,10 @@ import (
 	"github.com/openshift/api/image/docker10"
 	routev1 "github.com/openshift/api/route/v1"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/smithy-go"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -50,6 +64,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/utils/clock"
+	testingclock "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -63,12 +79,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/yaml"
 
+	"github.com/docker/distribution"
 	"github.com/go-logr/zapr"
+	"github.com/opencontainers/go-digest"
 	"go.uber.org/mock/gomock"
 	"go.uber.org/zap/zaptest"
 )
 
 func TestReconcileKubeadminPassword(t *testing.T) {
+	t.Parallel()
 	targetNamespace := "test"
 
 	testsCases := []struct {
@@ -77,7 +96,7 @@ func TestReconcileKubeadminPassword(t *testing.T) {
 		expectedOutputSecret *corev1.Secret
 	}{
 		{
-			name: "When OAuth config specified results in no kubeadmin secret",
+			name: "When OAuth config is specified it should not create kubeadmin secret",
 			hcp: &hyperv1.HostedControlPlane{
 				TypeMeta: metav1.TypeMeta{},
 				ObjectMeta: metav1.ObjectMeta{
@@ -115,7 +134,7 @@ func TestReconcileKubeadminPassword(t *testing.T) {
 			expectedOutputSecret: nil,
 		},
 		{
-			name: "When Oauth config not specified results in default kubeadmin secret",
+			name: "When OAuth config is not specified it should create default kubeadmin secret",
 			hcp: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: targetNamespace,
@@ -229,13 +248,13 @@ func TestReconcileIgnitionServer(t *testing.T) {
 		servingCert *corev1.Secret
 	}{
 		{
-			name:        "No certs, no extra annotations",
+			name:        "When no certs or extra annotations exist it should reconcile successfully",
 			annotations: map[string]string{},
 			caCert:      nil,
 			servingCert: nil,
 		},
 		{
-			name: "Premade certs, DisablePKIReconciliation annotation present",
+			name: "When premade certs exist with DisablePKIReconciliation annotation it should preserve them",
 			annotations: map[string]string{
 				hyperv1.DisablePKIReconciliationAnnotation: "true",
 			},
@@ -261,7 +280,7 @@ func TestReconcileIgnitionServer(t *testing.T) {
 			},
 		},
 		{
-			name: "No certs, DisablePKIReconciliation annotation present",
+			name: "When no certs exist with DisablePKIReconciliation annotation it should skip cert creation",
 			annotations: map[string]string{
 				hyperv1.DisablePKIReconciliationAnnotation: "true",
 			},
@@ -350,6 +369,7 @@ func TestReconcileIgnitionServer(t *testing.T) {
 }
 
 func TestEtcdRestoredCondition(t *testing.T) {
+	t.Parallel()
 	testsCases := []struct {
 		name              string
 		sts               *appsv1.StatefulSet
@@ -357,7 +377,7 @@ func TestEtcdRestoredCondition(t *testing.T) {
 		expectedCondition metav1.Condition
 	}{
 		{
-			name: "single replica, pod ready - condition true",
+			name: "When single replica pod is ready it should return condition true",
 			sts: &appsv1.StatefulSet{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "etcd",
@@ -397,7 +417,7 @@ func TestEtcdRestoredCondition(t *testing.T) {
 			},
 		},
 		{
-			name: "Pod not ready - condition false",
+			name: "When pod is not ready it should return condition false",
 			sts: &appsv1.StatefulSet{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "etcd",
@@ -443,7 +463,7 @@ func TestEtcdRestoredCondition(t *testing.T) {
 			},
 		},
 		{
-			name: "multiple replica, pods ready - condition true",
+			name: "When multiple replica pods are ready it should return condition true",
 			sts: &appsv1.StatefulSet{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "etcd",
@@ -649,9 +669,7 @@ spec:
   - service: Ignition
     servicePublishingStrategy:
       type: Route
-  - service: OVNSbDb
-    servicePublishingStrategy:
-      type: Route`
+`
 	hcp := &hyperv1.HostedControlPlane{}
 	if err := yaml.Unmarshal([]byte(rawHCP), hcp); err != nil {
 		t.Fatal(err)
@@ -714,6 +732,8 @@ func TestEventHandling(t *testing.T) {
 	mockedProviderWithOpenshiftImageRegistryOverrides.EXPECT().
 		Lookup(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(testutils.InitReleaseImageOrDie("4.15.0"), nil).AnyTimes()
+	mockedProviderWithOpenshiftImageRegistryOverrides.EXPECT().
+		GetRegistryOverrides().Return(map[string]string{"registry": "override"}).AnyTimes()
 	mockEC2 := awsapi.NewMockEC2API(mockCtrl)
 	mockEC2.EXPECT().DescribeVpcEndpoints(gomock.Any(), gomock.Any()).Return(&ec2.DescribeVpcEndpointsOutput{}, fmt.Errorf("not ready")).AnyTimes()
 
@@ -722,6 +742,7 @@ func TestEventHandling(t *testing.T) {
 		ManagementClusterCapabilities: &fakecapabilities.FakeSupportAllCapabilities{},
 		ReleaseProvider:               mockedProviderWithOpenshiftImageRegistryOverrides,
 		UserReleaseProvider:           &fakereleaseprovider.FakeReleaseProvider{},
+		ImageMetadataProvider:         &fakeimagemetadataprovider.FakeRegistryClientImageMetadataProviderHCCO{},
 		reconcileInfrastructureStatus: func(context.Context, *hyperv1.HostedControlPlane) (infra.InfrastructureStatus, error) {
 			return readyInfraStatus, nil
 		},
@@ -790,11 +811,14 @@ func (c *createTrackingWorkqueue) Add(item reconcile.Request) {
 }
 
 func TestNonReadyInfraTriggersRequeueAfter(t *testing.T) {
+	t.Parallel()
 	mockCtrl := gomock.NewController(t)
 	mockedProviderWithOpenshiftImageRegistryOverrides := releaseinfo.NewMockProviderWithOpenShiftImageRegistryOverrides(mockCtrl)
 	mockedProviderWithOpenshiftImageRegistryOverrides.EXPECT().
 		Lookup(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(testutils.InitReleaseImageOrDie("4.15.0"), nil).AnyTimes()
+	mockedProviderWithOpenshiftImageRegistryOverrides.EXPECT().
+		GetRegistryOverrides().Return(map[string]string{"registry": "override"}).AnyTimes()
 	mockEC2 := awsapi.NewMockEC2API(mockCtrl)
 	mockEC2.EXPECT().DescribeVpcEndpoints(gomock.Any(), gomock.Any()).Return(&ec2.DescribeVpcEndpointsOutput{}, fmt.Errorf("not ready")).AnyTimes()
 	hcp := sampleHCP(t)
@@ -805,6 +829,7 @@ func TestNonReadyInfraTriggersRequeueAfter(t *testing.T) {
 		ManagementClusterCapabilities: &fakecapabilities.FakeSupportAllCapabilities{},
 		ReleaseProvider:               mockedProviderWithOpenshiftImageRegistryOverrides,
 		UserReleaseProvider:           &fakereleaseprovider.FakeReleaseProvider{},
+		ImageMetadataProvider:         &fakeimagemetadataprovider.FakeRegistryClientImageMetadataProviderHCCO{},
 		reconcileInfrastructureStatus: func(context.Context, *hyperv1.HostedControlPlane) (infra.InfrastructureStatus, error) {
 			return infra.InfrastructureStatus{}, nil
 		},
@@ -875,7 +900,7 @@ func TestSetKASCustomKubeconfigStatus(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(api.Scheme).WithObjects(objs...).WithStatusSubresource(&hyperv1.HostedControlPlane{}).Build()
 
 			err := setKASCustomKubeconfigStatus(ctx, hcp, c)
-			g.Expect(err).To(BeNil(), fmt.Errorf("error setting custom kubeconfig status failed: %v", err))
+			g.Expect(err).To(BeNil(), fmt.Errorf("error setting custom kubeconfig status failed: %w", err))
 			g.Expect(hcp.Status.CustomKubeconfig).To(Equal(tc.expectedStatus))
 		})
 	}
@@ -902,12 +927,12 @@ func TestIncludeServingCertificates(t *testing.T) {
 		expectError    bool
 	}{
 		{
-			name:         "APIServer servingCerts is nil",
+			name:         "When APIServer servingCerts is empty it should return only root CA cert",
 			servingCerts: &configv1.APIServerServingCerts{},
 			expectedCert: "root-ca-cert",
 		},
 		{
-			name: "APIServer servingCerts configuration with one named certificates",
+			name: "When APIServer has one named certificate it should append it to root CA",
 			servingCerts: &configv1.APIServerServingCerts{
 				NamedCertificates: []configv1.APIServerNamedServingCert{
 					{
@@ -931,7 +956,7 @@ func TestIncludeServingCertificates(t *testing.T) {
 			expectedCert: "root-ca-cert\ncert-1",
 		},
 		{
-			name: "APIServer servingCerts configuration with multiple named certificates",
+			name: "When APIServer has multiple named certificates it should append all to root CA",
 			servingCerts: &configv1.APIServerServingCerts{
 				NamedCertificates: []configv1.APIServerNamedServingCert{
 					{
@@ -969,7 +994,7 @@ func TestIncludeServingCertificates(t *testing.T) {
 			expectedCert: "root-ca-cert\ncert-1\ncert-2",
 		},
 		{
-			name: "APIServer servingCerts configuration with missing named certificate",
+			name: "When APIServer has missing named certificate, it should return error",
 			servingCerts: &configv1.APIServerServingCerts{
 				NamedCertificates: []configv1.APIServerNamedServingCert{
 					{
@@ -1032,33 +1057,41 @@ func TestControlPlaneComponents(t *testing.T) {
 		subDirSuffix   string
 	}{
 		{
-			name:         "Default feature set, default platform type",
+			name:         "When using default feature set and platform type it should reconcile components",
 			featureSet:   configv1.Default,
 			platformType: nil,
 		},
 		{
-			name:         "TechPreviewNoUpgrade feature set, default platform type",
+			name:         "When using TechPreviewNoUpgrade feature set it should reconcile components",
 			featureSet:   configv1.TechPreviewNoUpgrade,
 			platformType: nil,
 		},
 		{
-			name:         "Default feature set, IBM Cloud platform type",
+			name:         "When using IBM Cloud platform type it should reconcile components",
 			featureSet:   configv1.Default,
 			platformType: ptr.To(hyperv1.IBMCloudPlatform),
 		},
 		{
-			name:         "TechPreviewNoUpgrade feature set, GCP platform type",
+			name:         "When using TechPreviewNoUpgrade with GCP platform it should reconcile components",
 			featureSet:   configv1.TechPreviewNoUpgrade,
 			platformType: ptr.To(hyperv1.GCPPlatform),
 		},
 		{
-			name:         "Default feature set, Azure platform with ARO Swift",
+			name:         "When using Azure platform with ARO Swift, it should reconcile components",
 			featureSet:   configv1.Default,
 			platformType: ptr.To(hyperv1.AzurePlatform),
 			hcpAnnotations: map[string]string{
 				hyperv1.SwiftPodNetworkInstanceAnnotation: "swift-network-instance",
 			},
 			mutateHCP: func(hcp *hyperv1.HostedControlPlane) {
+				// Configure Swift API fields for ARO-HCP
+				hcp.Spec.Platform.Azure.Private = hyperv1.AzurePrivateSpec{
+					Type: hyperv1.AzurePrivateTypeSwift,
+					Swift: hyperv1.AzureSwiftSpec{
+						PodNetworkInstance: "swift-network-instance",
+					},
+				}
+				hcp.Spec.Platform.Azure.Topology = hyperv1.AzureTopologyPublicAndPrivate
 				// Configure Azure KMS for ARO-HCP
 				hcp.Spec.Platform.Azure.Cloud = "AzurePublicCloud"
 				hcp.Spec.SecretEncryption = &hyperv1.SecretEncryptionSpec{
@@ -1070,6 +1103,9 @@ func TestControlPlaneComponents(t *testing.T) {
 								KeyVaultName: "test-kms-keyvault",
 								KeyName:      "test-key",
 								KeyVersion:   "1",
+							},
+							KMS: hyperv1.ManagedIdentity{
+								CredentialsSecretName: "test-kms-creds",
 							},
 							KeyVaultAccess: hyperv1.AzureKeyVaultPrivate,
 						},
@@ -1103,6 +1139,19 @@ func TestControlPlaneComponents(t *testing.T) {
 			},
 			setup:        azureutil.SetAsAroHCPTest,
 			subDirSuffix: "AROSwift",
+		},
+		{
+			name:         "When using Modern TLS profile it should reconcile components",
+			featureSet:   configv1.Default,
+			platformType: nil,
+			mutateHCP: func(hcp *hyperv1.HostedControlPlane) {
+				hcp.Spec.Configuration.APIServer = &configv1.APIServerSpec{
+					TLSSecurityProfile: &configv1.TLSSecurityProfile{
+						Type: configv1.TLSProfileModernType,
+					},
+				}
+			},
+			subDirSuffix: "ModernTLS",
 		},
 	}
 
@@ -1227,9 +1276,10 @@ func TestControlPlaneComponents(t *testing.T) {
 				},
 				Manifest: fakeimagemetadataprovider.FakeManifest{},
 			},
-			HCP:                    hcp,
-			SkipPredicate:          true,
-			SkipCertificateSigning: true,
+			HCP:                            hcp,
+			SkipPredicate:                  true,
+			SkipCertificateSigning:         true,
+			NativeSidecarContainersEnabled: true,
 		}
 
 		cpContext.HCP.Spec.Configuration.FeatureGate.FeatureGateSelection.FeatureSet = tt.featureSet
@@ -1276,7 +1326,7 @@ func TestControlPlaneComponents(t *testing.T) {
 					}
 				}
 
-				yaml, err := util.SerializeResource(obj, api.Scheme)
+				yaml, err := k8sutil.SerializeResource(obj, api.Scheme)
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
 				}
@@ -1309,19 +1359,20 @@ func TestControlPlaneComponents(t *testing.T) {
 }
 
 func TestAWSSecurityGroupTags(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		hcp          *hyperv1.HostedControlPlane
 		expectedTags map[string]string
 	}{
 		{
-			name: "No additional tags, no AutoNode",
+			name: "When no additional tags or AutoNode exist it should return default tags",
 			hcp: &hyperv1.HostedControlPlane{
 				Spec: hyperv1.HostedControlPlaneSpec{
 					InfraID: "test-infra",
 					Platform: hyperv1.PlatformSpec{
 						AWS: &hyperv1.AWSPlatformSpec{
-							ResourceTags: []hyperv1.AWSResourceTag{},
+							ResourceTags: []hyperv1.AWSClusterResourceTag{},
 						},
 					},
 				},
@@ -1332,13 +1383,13 @@ func TestAWSSecurityGroupTags(t *testing.T) {
 			},
 		},
 		{
-			name: "Additional tags override Name and cluster key",
+			name: "When additional tags override defaults it should use custom values",
 			hcp: &hyperv1.HostedControlPlane{
 				Spec: hyperv1.HostedControlPlaneSpec{
 					InfraID: "myinfra",
 					Platform: hyperv1.PlatformSpec{
 						AWS: &hyperv1.AWSPlatformSpec{
-							ResourceTags: []hyperv1.AWSResourceTag{
+							ResourceTags: []hyperv1.AWSClusterResourceTag{
 								{Key: "Name", Value: "custom-name"},
 								{Key: "kubernetes.io/cluster/myinfra", Value: "shared"},
 								{Key: "foo", Value: "bar"},
@@ -1354,17 +1405,17 @@ func TestAWSSecurityGroupTags(t *testing.T) {
 			},
 		},
 		{
-			name: "AutoNode with Karpenter AWS adds karpenter.sh/discovery",
+			name: "When AutoNode uses Karpenter AWS it should add discovery tag",
 			hcp: &hyperv1.HostedControlPlane{
 				Spec: hyperv1.HostedControlPlaneSpec{
 					InfraID: "karpenter-infra",
 					Platform: hyperv1.PlatformSpec{
 						AWS: &hyperv1.AWSPlatformSpec{},
 					},
-					AutoNode: &hyperv1.AutoNode{
+					AutoNode: hyperv1.AutoNode{
 						Provisioner: hyperv1.ProvisionerConfig{
 							Name: hyperv1.ProvisionerKarpenter,
-							Karpenter: &hyperv1.KarpenterConfig{
+							Karpenter: hyperv1.KarpenterConfig{
 								Platform: hyperv1.AWSPlatform,
 							},
 						},
@@ -1425,6 +1476,11 @@ func componentsFakeObjects(namespace string, featureSet configv1.FeatureSet) ([]
 		corev1.TLSCertKey:       []byte("fake"),
 		corev1.TLSPrivateKeyKey: []byte("fake"),
 	}
+	kasBootstrapContainerCertSecret := manifests.KASBootstrapContainerClientCertSecret(namespace)
+	kasBootstrapContainerCertSecret.Data = map[string][]byte{
+		corev1.TLSCertKey:       []byte("fake"),
+		corev1.TLSPrivateKeyKey: []byte("fake"),
+	}
 
 	azureCredentialsSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1458,7 +1514,7 @@ func componentsFakeObjects(namespace string, featureSet configv1.FeatureSet) ([]
 	privateRouterSvc.Spec.ClusterIP = "172.30.0.100"
 
 	return []client.Object{
-		rootCA, authenticatorCertSecret, bootsrapCertSecret, adminCertSecert, hccoCertSecert,
+		rootCA, authenticatorCertSecret, bootsrapCertSecret, adminCertSecert, hccoCertSecert, kasBootstrapContainerCertSecret,
 		manifests.KubeControllerManagerClientCertSecret(namespace),
 		manifests.KubeSchedulerClientCertSecret(namespace),
 		azureCredentialsSecret,
@@ -1513,6 +1569,11 @@ func componentsFakeDependencies(componentName string, namespace string) []client
 		fakeComponents = append(fakeComponents, fakeComponentTemplate.DeepCopy())
 	}
 
+	if componentName == metricsproxyv2.ComponentName {
+		fakeComponentTemplate.Name = endpointresolverv2.ComponentName
+		fakeComponents = append(fakeComponents, fakeComponentTemplate.DeepCopy())
+	}
+
 	pullSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "pull-secret", Namespace: "hcp-namespace"},
 		Data: map[string][]byte{
@@ -1526,6 +1587,7 @@ func componentsFakeDependencies(componentName string, namespace string) []client
 }
 
 func TestControlPlaneComponentsAvailable(t *testing.T) {
+	t.Parallel()
 	testNamespace := "test-namespace"
 
 	testCases := []struct {
@@ -1760,18 +1822,56 @@ func TestControlPlaneComponentsAvailable(t *testing.T) {
 }
 
 func TestRemoveHCPIngressFromRoutes(t *testing.T) {
+	t.Parallel()
 	const namespace = "test-ns"
 
 	tests := []struct {
 		name           string
 		hcp            *hyperv1.HostedControlPlane
+		capabilities   capabilities.CapabiltyChecker
 		existingRoutes []*routev1.Route
 		expectedRoutes []routev1.Route
 		expectError    bool
 		errorContains  string
 	}{
 		{
-			name: "Route with HCPRouteLabel is skipped",
+			name: "When CapabilityRoute is absent, it should skip route processing",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "hcp",
+					Namespace: namespace,
+				},
+			},
+			capabilities: fakecapabilities.NewSupportAllExcept(capabilities.CapabilityRoute),
+			existingRoutes: []*routev1.Route{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "regular-route",
+						Namespace: namespace,
+					},
+					Status: routev1.RouteStatus{
+						Ingress: []routev1.RouteIngress{
+							{RouterName: "router", Host: "example.com"},
+						},
+					},
+				},
+			},
+			expectedRoutes: []routev1.Route{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "regular-route",
+						Namespace: namespace,
+					},
+					Status: routev1.RouteStatus{
+						Ingress: []routev1.RouteIngress{
+							{RouterName: "router", Host: "example.com"},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "When route has HCPRouteLabel it should skip processing",
 			hcp: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "hcp",
@@ -1784,7 +1884,7 @@ func TestRemoveHCPIngressFromRoutes(t *testing.T) {
 						Name:      "hcp-managed-route",
 						Namespace: namespace,
 						Labels: map[string]string{
-							util.HCPRouteLabel: namespace,
+							netutil.HCPRouteLabel: namespace,
 						},
 					},
 					Status: routev1.RouteStatus{
@@ -1801,7 +1901,7 @@ func TestRemoveHCPIngressFromRoutes(t *testing.T) {
 						Name:      "hcp-managed-route",
 						Namespace: namespace,
 						Labels: map[string]string{
-							util.HCPRouteLabel: namespace,
+							netutil.HCPRouteLabel: namespace,
 						},
 					},
 					Status: routev1.RouteStatus{
@@ -1814,7 +1914,7 @@ func TestRemoveHCPIngressFromRoutes(t *testing.T) {
 			},
 		},
 		{
-			name: "Route without HCPRouteLabel has router ingress removed",
+			name: "When route has no HCPRouteLabel it should remove router ingress",
 			hcp: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "hcp",
@@ -1850,7 +1950,7 @@ func TestRemoveHCPIngressFromRoutes(t *testing.T) {
 			},
 		},
 		{
-			name: "Route without router ingress is unchanged",
+			name: "When route has no router ingress it should remain unchanged",
 			hcp: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "hcp",
@@ -1887,7 +1987,7 @@ func TestRemoveHCPIngressFromRoutes(t *testing.T) {
 			},
 		},
 		{
-			name: "Route with only router ingress has all ingress removed",
+			name: "When route has only router ingress it should remove all ingress",
 			hcp: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "hcp",
@@ -1920,7 +2020,7 @@ func TestRemoveHCPIngressFromRoutes(t *testing.T) {
 			},
 		},
 		{
-			name: "Multiple routes handled correctly",
+			name: "When multiple routes exist it should handle each correctly",
 			hcp: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "hcp",
@@ -1933,7 +2033,7 @@ func TestRemoveHCPIngressFromRoutes(t *testing.T) {
 						Name:      "hcp-managed",
 						Namespace: namespace,
 						Labels: map[string]string{
-							util.HCPRouteLabel: namespace,
+							netutil.HCPRouteLabel: namespace,
 						},
 					},
 					Status: routev1.RouteStatus{
@@ -1972,7 +2072,7 @@ func TestRemoveHCPIngressFromRoutes(t *testing.T) {
 						Name:      "hcp-managed",
 						Namespace: namespace,
 						Labels: map[string]string{
-							util.HCPRouteLabel: namespace,
+							netutil.HCPRouteLabel: namespace,
 						},
 					},
 					Status: routev1.RouteStatus{
@@ -2006,7 +2106,7 @@ func TestRemoveHCPIngressFromRoutes(t *testing.T) {
 			},
 		},
 		{
-			name: "Route with empty ingress list is unchanged",
+			name: "When route has empty ingress list it should remain unchanged",
 			hcp: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "hcp",
@@ -2037,7 +2137,7 @@ func TestRemoveHCPIngressFromRoutes(t *testing.T) {
 			},
 		},
 		{
-			name: "Route with multiple router ingress entries removes all",
+			name: "When route has multiple router ingress entries it should remove all",
 			hcp: &hyperv1.HostedControlPlane{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "hcp",
@@ -2095,9 +2195,15 @@ func TestRemoveHCPIngressFromRoutes(t *testing.T) {
 				WithStatusSubresource(&routev1.Route{}).
 				Build()
 
+			caps := tc.capabilities
+			if caps == nil {
+				caps = &fakecapabilities.FakeSupportAllCapabilities{}
+			}
+
 			r := &HostedControlPlaneReconciler{
-				Client: fakeClient,
-				Log:    ctrl.LoggerFrom(ctx),
+				Client:                        fakeClient,
+				Log:                           ctrl.LoggerFrom(ctx),
+				ManagementClusterCapabilities: caps,
 			}
 
 			err := r.removeHCPIngressFromRoutes(ctx, tc.hcp)
@@ -2145,6 +2251,7 @@ func TestRemoveHCPIngressFromRoutes(t *testing.T) {
 }
 
 func TestReconcileAvailabilityStatus(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name                      string
 		conditions                []metav1.Condition
@@ -2290,6 +2397,59 @@ func TestReconcileAvailabilityStatus(t *testing.T) {
 			expectedMessage:     "connection refused",
 		},
 		{
+			name: "When health check fails and components are not available, it should include both in message",
+			conditions: []metav1.Condition{
+				{
+					Type:   string(hyperv1.InfrastructureReady),
+					Status: metav1.ConditionTrue,
+					Reason: hyperv1.AsExpectedReason,
+				},
+				{
+					Type:   string(hyperv1.EtcdAvailable),
+					Status: metav1.ConditionTrue,
+					Reason: hyperv1.EtcdQuorumAvailableReason,
+				},
+				{
+					Type:   string(hyperv1.KubeAPIServerAvailable),
+					Status: metav1.ConditionTrue,
+					Reason: hyperv1.AsExpectedReason,
+				},
+			},
+			kubeConfigAvailable:       true,
+			healthCheckErr:            fmt.Errorf("APIServer external route not admitted"),
+			componentsNotAvailableMsg: "Waiting for components to be available: router, ingress-operator",
+			expectedReady:             false,
+			expectedReason:            hyperv1.KASLoadBalancerNotReachableReason,
+			expectedMessage:           "APIServer external route not admitted; Waiting for components to be available: router, ingress-operator",
+		},
+		{
+			name: "When health check fails with components error and unavailable message, health check error takes precedence",
+			conditions: []metav1.Condition{
+				{
+					Type:   string(hyperv1.InfrastructureReady),
+					Status: metav1.ConditionTrue,
+					Reason: hyperv1.AsExpectedReason,
+				},
+				{
+					Type:   string(hyperv1.EtcdAvailable),
+					Status: metav1.ConditionTrue,
+					Reason: hyperv1.EtcdQuorumAvailableReason,
+				},
+				{
+					Type:   string(hyperv1.KubeAPIServerAvailable),
+					Status: metav1.ConditionTrue,
+					Reason: hyperv1.AsExpectedReason,
+				},
+			},
+			kubeConfigAvailable:       true,
+			healthCheckErr:            fmt.Errorf("connection timeout"),
+			componentsErr:             fmt.Errorf("failed to list components"),
+			componentsNotAvailableMsg: "Waiting for components to be available: router",
+			expectedReady:             false,
+			expectedReason:            hyperv1.KASLoadBalancerNotReachableReason,
+			expectedMessage:           "connection timeout; Waiting for components to be available: router",
+		},
+		{
 			name: "When components check returns error, it should report components not available with error",
 			conditions: []metav1.Condition{
 				{
@@ -2415,6 +2575,7 @@ func TestReconcileAvailabilityStatus(t *testing.T) {
 }
 
 func TestEtcdStatefulSetCondition(t *testing.T) {
+	t.Parallel()
 	testNamespace := "test-namespace"
 
 	testCases := []struct {
@@ -2572,3 +2733,2512 @@ func TestEtcdStatefulSetCondition(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoveCloudResources(t *testing.T) {
+	t.Parallel()
+	testNamespace := "test-namespace"
+
+	testCases := []struct {
+		name                      string
+		hcp                       *hyperv1.HostedControlPlane
+		cvoDeployment             *appsv1.Deployment
+		expectedDone              bool
+		expectedError             bool
+		expectedCondition         *metav1.Condition
+		simulateConcurrentDestroy bool
+	}{
+		{
+			name: "When CloudResourcesDestroyed is True, it should return done",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: testNamespace,
+				},
+				Status: hyperv1.HostedControlPlaneStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(hyperv1.CloudResourcesDestroyed),
+							Status: metav1.ConditionTrue,
+							Reason: hyperv1.AsExpectedReason,
+						},
+					},
+				},
+			},
+			expectedDone: true,
+		},
+		{
+			name: "When CloudResourcesDestroyed reason is CloudResourcesCleanupSkipped, it should return done",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: testNamespace,
+				},
+				Status: hyperv1.HostedControlPlaneStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:    string(hyperv1.CloudResourcesDestroyed),
+							Status:  metav1.ConditionFalse,
+							Reason:  string(hyperv1.CloudResourcesCleanupSkippedReason),
+							Message: "Cleanup was skipped by annotation",
+						},
+					},
+				},
+			},
+			expectedDone: true,
+		},
+		{
+			name: "When CloudResourcesDestroyed reason is CloudResourcesDeletionTimedOut, it should return done",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: testNamespace,
+				},
+				Status: hyperv1.HostedControlPlaneStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:    string(hyperv1.CloudResourcesDestroyed),
+							Status:  metav1.ConditionFalse,
+							Reason:  string(hyperv1.CloudResourcesDeletionTimedOutReason),
+							Message: "Giving up on cloud resource deletion after 10m",
+						},
+					},
+				},
+			},
+			expectedDone: true,
+		},
+		{
+			name: "When CVO is scaled down and deletion has timed out, it should set CloudResourcesDeletionTimedOut condition",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: testNamespace,
+				},
+				Status: hyperv1.HostedControlPlaneStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               string(hyperv1.CVOScaledDown),
+							Status:             metav1.ConditionTrue,
+							Reason:             "CVOScaledDown",
+							LastTransitionTime: metav1.NewTime(time.Now().Add(-15 * time.Minute)),
+						},
+					},
+				},
+			},
+			expectedDone: true,
+			expectedCondition: &metav1.Condition{
+				Type:   string(hyperv1.CloudResourcesDestroyed),
+				Status: metav1.ConditionFalse,
+				Reason: string(hyperv1.CloudResourcesDeletionTimedOutReason),
+			},
+		},
+		{
+			name: "When CVO is scaled down and deletion has timed out with existing condition, it should include last status in message",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: testNamespace,
+				},
+				Status: hyperv1.HostedControlPlaneStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               string(hyperv1.CVOScaledDown),
+							Status:             metav1.ConditionTrue,
+							Reason:             "CVOScaledDown",
+							LastTransitionTime: metav1.NewTime(time.Now().Add(-15 * time.Minute)),
+						},
+						{
+							Type:               string(hyperv1.CloudResourcesDestroyed),
+							Status:             metav1.ConditionFalse,
+							Reason:             "InProgress",
+							Message:            "Deleting load balancers",
+							LastTransitionTime: metav1.NewTime(time.Now().Add(-15 * time.Minute)),
+						},
+					},
+				},
+			},
+			expectedDone: true,
+			expectedCondition: &metav1.Condition{
+				Type:   string(hyperv1.CloudResourcesDestroyed),
+				Status: metav1.ConditionFalse,
+				Reason: string(hyperv1.CloudResourcesDeletionTimedOutReason),
+			},
+		},
+		{
+			name: "When deletion has timed out but CloudResourcesDestroyed concurrently becomes True, it should not overwrite it",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: testNamespace,
+				},
+				Status: hyperv1.HostedControlPlaneStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               string(hyperv1.CVOScaledDown),
+							Status:             metav1.ConditionTrue,
+							Reason:             "CVOScaledDown",
+							LastTransitionTime: metav1.NewTime(time.Now().Add(-15 * time.Minute)),
+						},
+					},
+				},
+			},
+			simulateConcurrentDestroy: true,
+			expectedDone:              true,
+			expectedCondition: &metav1.Condition{
+				Type:   string(hyperv1.CloudResourcesDestroyed),
+				Status: metav1.ConditionTrue,
+				Reason: hyperv1.AsExpectedReason,
+			},
+		},
+		{
+			name: "When CVO is scaled down and deletion has not timed out, it should return not done",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: testNamespace,
+				},
+				Status: hyperv1.HostedControlPlaneStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               string(hyperv1.CVOScaledDown),
+							Status:             metav1.ConditionTrue,
+							Reason:             "CVOScaledDown",
+							LastTransitionTime: metav1.NewTime(time.Now().Add(-5 * time.Minute)),
+						},
+					},
+				},
+			},
+			expectedDone: false,
+		},
+		{
+			name: "When CVO deployment exists with replicas, it should scale it down",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: testNamespace,
+				},
+			},
+			cvoDeployment: &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "cluster-version-operator",
+					Namespace: testNamespace,
+				},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: ptr.To[int32](1),
+				},
+				Status: appsv1.DeploymentStatus{
+					Replicas: 1,
+				},
+			},
+			expectedDone: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := NewWithT(t)
+
+			objs := []client.Object{tc.hcp}
+			if tc.cvoDeployment != nil {
+				objs = append(objs, tc.cvoDeployment)
+			}
+
+			clientBuilder := fake.NewClientBuilder().
+				WithScheme(api.Scheme).
+				WithObjects(objs...).
+				WithStatusSubresource(&hyperv1.HostedControlPlane{})
+
+			if tc.simulateConcurrentDestroy {
+				// Simulate HCCO concurrently setting CloudResourcesDestroyed=True between
+				// our initial read and PatchStatus's internal re-fetch. Only the first Get
+				// (PatchStatus's own fetch) injects and persists the concurrent write; later
+				// Gets — including this test's own verification read — must see real stored
+				// state, not a value re-injected on every call, or the assertion below would
+				// pass regardless of whether the production code actually overwrote it.
+				var injected bool
+				clientBuilder = clientBuilder.WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if err := c.Get(ctx, key, obj, opts...); err != nil {
+							return err
+						}
+						if injected {
+							return nil
+						}
+						hcpObj, ok := obj.(*hyperv1.HostedControlPlane)
+						if !ok {
+							return nil
+						}
+						meta.SetStatusCondition(&hcpObj.Status.Conditions, metav1.Condition{
+							Type:   string(hyperv1.CloudResourcesDestroyed),
+							Status: metav1.ConditionTrue,
+							Reason: hyperv1.AsExpectedReason,
+						})
+						if err := c.Status().Update(ctx, hcpObj); err != nil {
+							return err
+						}
+						injected = true
+						return nil
+					},
+				})
+			}
+
+			c := clientBuilder.Build()
+
+			r := &HostedControlPlaneReconciler{
+				Client: c,
+			}
+
+			var originalCloudResourcesCond *metav1.Condition
+			if cond := meta.FindStatusCondition(tc.hcp.Status.Conditions, string(hyperv1.CloudResourcesDestroyed)); cond != nil {
+				copied := *cond
+				originalCloudResourcesCond = &copied
+			}
+
+			ctx := ctrl.LoggerInto(t.Context(), zapr.NewLogger(zaptest.NewLogger(t)))
+			done, err := r.removeCloudResources(ctx, tc.hcp)
+
+			if tc.expectedError {
+				g.Expect(err).To(HaveOccurred())
+			} else {
+				g.Expect(err).ToNot(HaveOccurred())
+			}
+			g.Expect(done).To(Equal(tc.expectedDone))
+
+			if tc.expectedCondition != nil {
+				updatedHCP := &hyperv1.HostedControlPlane{}
+				g.Expect(c.Get(ctx, client.ObjectKeyFromObject(tc.hcp), updatedHCP)).To(Succeed())
+				condition := meta.FindStatusCondition(updatedHCP.Status.Conditions, tc.expectedCondition.Type)
+				g.Expect(condition).ToNot(BeNil())
+				g.Expect(condition.Status).To(Equal(tc.expectedCondition.Status))
+				g.Expect(condition.Reason).To(Equal(tc.expectedCondition.Reason))
+				if tc.expectedCondition.Reason == string(hyperv1.CloudResourcesDeletionTimedOutReason) {
+					g.Expect(condition.Message).To(ContainSubstring("Giving up on cloud resource deletion"))
+				}
+
+				if originalCloudResourcesCond != nil &&
+					originalCloudResourcesCond.Message != "" &&
+					originalCloudResourcesCond.Reason != string(hyperv1.CloudResourcesDeletionTimedOutReason) {
+					g.Expect(condition.Message).To(ContainSubstring("last status:"))
+					g.Expect(condition.Message).To(ContainSubstring(originalCloudResourcesCond.Message))
+				}
+			}
+
+			if tc.cvoDeployment != nil {
+				updatedCVO := &appsv1.Deployment{}
+				g.Expect(c.Get(ctx, client.ObjectKeyFromObject(tc.cvoDeployment), updatedCVO)).To(Succeed())
+				g.Expect(updatedCVO.Spec.Replicas).ToNot(BeNil())
+				g.Expect(*updatedCVO.Spec.Replicas).To(Equal(int32(0)))
+			}
+		})
+	}
+}
+func TestReconcileEtcdStatus(t *testing.T) {
+	testNamespace := "test-namespace"
+
+	testCases := []struct {
+		name              string
+		hcp               *hyperv1.HostedControlPlane
+		existingObjects   []client.Object
+		expectedCondType  string
+		expectedCondition metav1.Condition
+		expectError       bool
+	}{
+		{
+			name: "When etcd management type is Unmanaged, it should set EtcdAvailable to True",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 3,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Etcd: hyperv1.EtcdSpec{
+						ManagementType: hyperv1.Unmanaged,
+					},
+				},
+			},
+			expectedCondition: metav1.Condition{
+				Type:               string(hyperv1.EtcdAvailable),
+				Status:             metav1.ConditionTrue,
+				Reason:             "EtcdRunning",
+				Message:            "Etcd cluster is assumed to be running in unmanaged state",
+				ObservedGeneration: 3,
+			},
+		},
+		{
+			name: "When etcd management type is Managed and StatefulSet is not found, it should set EtcdAvailable to False with NotFound reason",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 5,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Etcd: hyperv1.EtcdSpec{
+						ManagementType: hyperv1.Managed,
+					},
+				},
+			},
+			existingObjects: []client.Object{},
+			expectedCondition: metav1.Condition{
+				Type:               string(hyperv1.EtcdAvailable),
+				Status:             metav1.ConditionFalse,
+				Reason:             hyperv1.EtcdStatefulSetNotFoundReason,
+				ObservedGeneration: 5,
+			},
+		},
+		{
+			name: "When etcd management type is Managed and StatefulSet exists with quorum, it should set EtcdAvailable to True",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 2,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Etcd: hyperv1.EtcdSpec{
+						ManagementType: hyperv1.Managed,
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&appsv1.StatefulSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "etcd",
+						Namespace: testNamespace,
+					},
+					Spec: appsv1.StatefulSetSpec{
+						Replicas: ptr.To[int32](3),
+					},
+					Status: appsv1.StatefulSetStatus{
+						ReadyReplicas: 3,
+					},
+				},
+			},
+			expectedCondition: metav1.Condition{
+				Type:               string(hyperv1.EtcdAvailable),
+				Status:             metav1.ConditionTrue,
+				Reason:             hyperv1.EtcdQuorumAvailableReason,
+				ObservedGeneration: 2,
+			},
+		},
+		{
+			name: "When etcd management type is Managed and StatefulSet has no quorum, it should set EtcdAvailable to False",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 4,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Etcd: hyperv1.EtcdSpec{
+						ManagementType: hyperv1.Managed,
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&appsv1.StatefulSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "etcd",
+						Namespace: testNamespace,
+					},
+					Spec: appsv1.StatefulSetSpec{
+						Replicas: ptr.To[int32](3),
+					},
+					Status: appsv1.StatefulSetStatus{
+						ReadyReplicas: 0,
+					},
+				},
+			},
+			expectedCondition: metav1.Condition{
+				Type:               string(hyperv1.EtcdAvailable),
+				Status:             metav1.ConditionFalse,
+				Reason:             hyperv1.EtcdWaitingForQuorumReason,
+				ObservedGeneration: 4,
+			},
+		},
+		{
+			name: "When etcd management type is Managed and Get returns unexpected error, it should return error",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 1,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Etcd: hyperv1.EtcdSpec{
+						ManagementType: hyperv1.Managed,
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "When etcd management type is Managed with RestoreSnapshotURL and StatefulSet has ready pods, it should set EtcdSnapshotRestored condition",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 6,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Etcd: hyperv1.EtcdSpec{
+						ManagementType: hyperv1.Managed,
+						Managed: &hyperv1.ManagedEtcdSpec{
+							Storage: hyperv1.ManagedEtcdStorageSpec{
+								RestoreSnapshotURL: []string{"https://example.com/snapshot"},
+							},
+						},
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&appsv1.StatefulSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "etcd",
+						Namespace: testNamespace,
+					},
+					Spec: appsv1.StatefulSetSpec{
+						Replicas: ptr.To[int32](1),
+					},
+					Status: appsv1.StatefulSetStatus{
+						ReadyReplicas: 1,
+					},
+				},
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "etcd-0",
+						Namespace: testNamespace,
+						Labels: map[string]string{
+							"app": "etcd",
+						},
+					},
+					Status: corev1.PodStatus{
+						InitContainerStatuses: []corev1.ContainerStatus{
+							{
+								Name:  "etcd-init",
+								Ready: true,
+							},
+						},
+					},
+				},
+			},
+			expectedCondition: metav1.Condition{
+				Type:               string(hyperv1.EtcdAvailable),
+				Status:             metav1.ConditionTrue,
+				Reason:             hyperv1.EtcdQuorumAvailableReason,
+				ObservedGeneration: 6,
+			},
+		},
+		{
+			name: "When etcd management type is empty, it should set condition to Unknown",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 1,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Etcd: hyperv1.EtcdSpec{
+						ManagementType: "",
+					},
+				},
+			},
+			expectedCondition: metav1.Condition{
+				Type:               string(hyperv1.EtcdAvailable),
+				Status:             metav1.ConditionUnknown,
+				Reason:             hyperv1.StatusUnknownReason,
+				ObservedGeneration: 1,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			var c client.Client
+			if tc.expectError {
+				c = fake.NewClientBuilder().
+					WithScheme(api.Scheme).
+					WithInterceptorFuncs(interceptor.Funcs{
+						Get: func(ctx context.Context, client client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+							return fmt.Errorf("simulated get error")
+						},
+					}).
+					Build()
+			} else {
+				c = fake.NewClientBuilder().
+					WithScheme(api.Scheme).
+					WithObjects(tc.existingObjects...).
+					Build()
+			}
+
+			r := &HostedControlPlaneReconciler{
+				Client: c,
+				Log:    zapr.NewLogger(zaptest.NewLogger(t)),
+			}
+
+			err := r.reconcileEtcdStatus(t.Context(), tc.hcp)
+			if tc.expectError {
+				g.Expect(err).To(HaveOccurred())
+				return
+			}
+			g.Expect(err).ToNot(HaveOccurred())
+
+			cond := meta.FindStatusCondition(tc.hcp.Status.Conditions, string(hyperv1.EtcdAvailable))
+			g.Expect(cond).ToNot(BeNil())
+			g.Expect(cond.Type).To(Equal(tc.expectedCondition.Type))
+			g.Expect(cond.Status).To(Equal(tc.expectedCondition.Status))
+			g.Expect(cond.Reason).To(Equal(tc.expectedCondition.Reason))
+			g.Expect(cond.ObservedGeneration).To(Equal(tc.expectedCondition.ObservedGeneration))
+			if tc.expectedCondition.Message != "" {
+				g.Expect(cond.Message).To(Equal(tc.expectedCondition.Message))
+			}
+
+			// For the restore snapshot test case, also verify EtcdSnapshotRestored condition
+			if tc.name == "When etcd management type is Managed with RestoreSnapshotURL and StatefulSet has ready pods, it should set EtcdSnapshotRestored condition" {
+				restoreCond := meta.FindStatusCondition(tc.hcp.Status.Conditions, string(hyperv1.EtcdSnapshotRestored))
+				g.Expect(restoreCond).ToNot(BeNil())
+				g.Expect(restoreCond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(restoreCond.Reason).To(Equal(hyperv1.AsExpectedReason))
+			}
+		})
+	}
+}
+
+func TestReconcileKASStatus(t *testing.T) {
+	testNamespace := "test-namespace"
+
+	testCases := []struct {
+		name              string
+		hcp               *hyperv1.HostedControlPlane
+		existingObjects   []client.Object
+		expectedCondition metav1.Condition
+		expectError       bool
+	}{
+		{
+			name: "When KAS deployment is not found, it should set KubeAPIServerAvailable to False with NotFound reason",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 3,
+				},
+			},
+			existingObjects: []client.Object{},
+			expectedCondition: metav1.Condition{
+				Type:               string(hyperv1.KubeAPIServerAvailable),
+				Status:             metav1.ConditionFalse,
+				Reason:             hyperv1.NotFoundReason,
+				Message:            "Kube APIServer deployment not found",
+				ObservedGeneration: 3,
+			},
+		},
+		{
+			name: "When KAS deployment exists and is Available, it should set KubeAPIServerAvailable to True",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 5,
+				},
+			},
+			existingObjects: []client.Object{
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kube-apiserver",
+						Namespace: testNamespace,
+					},
+					Status: appsv1.DeploymentStatus{
+						Conditions: []appsv1.DeploymentCondition{
+							{
+								Type:   appsv1.DeploymentAvailable,
+								Status: corev1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			expectedCondition: metav1.Condition{
+				Type:               string(hyperv1.KubeAPIServerAvailable),
+				Status:             metav1.ConditionTrue,
+				Reason:             hyperv1.AsExpectedReason,
+				Message:            "Kube APIServer deployment is available",
+				ObservedGeneration: 5,
+			},
+		},
+		{
+			name: "When KAS deployment exists but Available condition is False, it should set KubeAPIServerAvailable to False with WaitingForAvailable reason",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 7,
+				},
+			},
+			existingObjects: []client.Object{
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kube-apiserver",
+						Namespace: testNamespace,
+					},
+					Status: appsv1.DeploymentStatus{
+						Conditions: []appsv1.DeploymentCondition{
+							{
+								Type:   appsv1.DeploymentAvailable,
+								Status: corev1.ConditionFalse,
+							},
+						},
+					},
+				},
+			},
+			expectedCondition: metav1.Condition{
+				Type:               string(hyperv1.KubeAPIServerAvailable),
+				Status:             metav1.ConditionFalse,
+				Reason:             hyperv1.WaitingForAvailableReason,
+				Message:            "Waiting for Kube APIServer deployment to become available",
+				ObservedGeneration: 7,
+			},
+		},
+		{
+			name: "When KAS deployment exists but has no Available condition, it should set KubeAPIServerAvailable to False with StatusUnknown reason",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 2,
+				},
+			},
+			existingObjects: []client.Object{
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kube-apiserver",
+						Namespace: testNamespace,
+					},
+					Status: appsv1.DeploymentStatus{
+						Conditions: []appsv1.DeploymentCondition{
+							{
+								Type:   appsv1.DeploymentProgressing,
+								Status: corev1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			expectedCondition: metav1.Condition{
+				Type:               string(hyperv1.KubeAPIServerAvailable),
+				Status:             metav1.ConditionFalse,
+				Reason:             hyperv1.StatusUnknownReason,
+				ObservedGeneration: 2,
+			},
+		},
+		{
+			name: "When KAS deployment exists with empty conditions, it should set KubeAPIServerAvailable to False with StatusUnknown reason",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 1,
+				},
+			},
+			existingObjects: []client.Object{
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kube-apiserver",
+						Namespace: testNamespace,
+					},
+					Status: appsv1.DeploymentStatus{},
+				},
+			},
+			expectedCondition: metav1.Condition{
+				Type:               string(hyperv1.KubeAPIServerAvailable),
+				Status:             metav1.ConditionFalse,
+				Reason:             hyperv1.StatusUnknownReason,
+				ObservedGeneration: 1,
+			},
+		},
+		{
+			name: "When Get returns unexpected error, it should return error",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 1,
+				},
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			var c client.Client
+			if tc.expectError {
+				c = fake.NewClientBuilder().
+					WithScheme(api.Scheme).
+					WithInterceptorFuncs(interceptor.Funcs{
+						Get: func(ctx context.Context, client client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+							return fmt.Errorf("simulated get error")
+						},
+					}).
+					Build()
+			} else {
+				c = fake.NewClientBuilder().
+					WithScheme(api.Scheme).
+					WithObjects(tc.existingObjects...).
+					Build()
+			}
+
+			r := &HostedControlPlaneReconciler{
+				Client: c,
+				Log:    zapr.NewLogger(zaptest.NewLogger(t)),
+			}
+
+			err := r.reconcileKASStatus(t.Context(), tc.hcp)
+			if tc.expectError {
+				g.Expect(err).To(HaveOccurred())
+				return
+			}
+			g.Expect(err).ToNot(HaveOccurred())
+
+			cond := meta.FindStatusCondition(tc.hcp.Status.Conditions, string(hyperv1.KubeAPIServerAvailable))
+			g.Expect(cond).ToNot(BeNil())
+			g.Expect(cond.Type).To(Equal(tc.expectedCondition.Type))
+			g.Expect(cond.Status).To(Equal(tc.expectedCondition.Status))
+			g.Expect(cond.Reason).To(Equal(tc.expectedCondition.Reason))
+			g.Expect(cond.ObservedGeneration).To(Equal(tc.expectedCondition.ObservedGeneration))
+			if tc.expectedCondition.Message != "" {
+				g.Expect(cond.Message).To(Equal(tc.expectedCondition.Message))
+			}
+		})
+	}
+}
+
+func TestReconcileDegradedStatus(t *testing.T) {
+	testNamespace := "test-namespace"
+
+	testCases := []struct {
+		name              string
+		hcp               *hyperv1.HostedControlPlane
+		existingObjects   []client.Object
+		expectedCondition metav1.Condition
+		expectError       bool
+	}{
+		{
+			name: "When no CPO-managed deployments exist, it should set Degraded to False",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 2,
+				},
+			},
+			existingObjects: []client.Object{},
+			expectedCondition: metav1.Condition{
+				Type:               string(hyperv1.HostedControlPlaneDegraded),
+				Status:             metav1.ConditionFalse,
+				Reason:             hyperv1.AsExpectedReason,
+				ObservedGeneration: 2,
+			},
+		},
+		{
+			name: "When all CPO-managed deployments are fully available, it should set Degraded to False",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 3,
+				},
+			},
+			existingObjects: []client.Object{
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kube-apiserver",
+						Namespace: testNamespace,
+						Labels: map[string]string{
+							controlplanecomponent.ManagedByLabel: "control-plane-operator",
+						},
+					},
+					Status: appsv1.DeploymentStatus{
+						UnavailableReplicas: 0,
+					},
+				},
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kube-controller-manager",
+						Namespace: testNamespace,
+						Labels: map[string]string{
+							controlplanecomponent.ManagedByLabel: "control-plane-operator",
+						},
+					},
+					Status: appsv1.DeploymentStatus{
+						UnavailableReplicas: 0,
+					},
+				},
+			},
+			expectedCondition: metav1.Condition{
+				Type:               string(hyperv1.HostedControlPlaneDegraded),
+				Status:             metav1.ConditionFalse,
+				Reason:             hyperv1.AsExpectedReason,
+				ObservedGeneration: 3,
+			},
+		},
+		{
+			name: "When a single CPO-managed deployment has unavailable replicas, it should set Degraded to True",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 4,
+				},
+			},
+			existingObjects: []client.Object{
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kube-apiserver",
+						Namespace: testNamespace,
+						Labels: map[string]string{
+							controlplanecomponent.ManagedByLabel: "control-plane-operator",
+						},
+					},
+					Status: appsv1.DeploymentStatus{
+						UnavailableReplicas: 2,
+					},
+				},
+			},
+			expectedCondition: metav1.Condition{
+				Type:               string(hyperv1.HostedControlPlaneDegraded),
+				Status:             metav1.ConditionTrue,
+				Reason:             "UnavailableReplicas",
+				Message:            "kube-apiserver deployment has 2 unavailable replicas",
+				ObservedGeneration: 4,
+			},
+		},
+		{
+			name: "When multiple CPO-managed deployments have unavailable replicas, it should aggregate all errors in message",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 5,
+				},
+			},
+			existingObjects: []client.Object{
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kube-apiserver",
+						Namespace: testNamespace,
+						Labels: map[string]string{
+							controlplanecomponent.ManagedByLabel: "control-plane-operator",
+						},
+					},
+					Status: appsv1.DeploymentStatus{
+						UnavailableReplicas: 1,
+					},
+				},
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kube-controller-manager",
+						Namespace: testNamespace,
+						Labels: map[string]string{
+							controlplanecomponent.ManagedByLabel: "control-plane-operator",
+						},
+					},
+					Status: appsv1.DeploymentStatus{
+						UnavailableReplicas: 3,
+					},
+				},
+			},
+			expectedCondition: metav1.Condition{
+				Type:               string(hyperv1.HostedControlPlaneDegraded),
+				Status:             metav1.ConditionTrue,
+				Reason:             "UnavailableReplicas",
+				ObservedGeneration: 5,
+			},
+		},
+		{
+			name: "When deployments exist without the CPO managed-by label, it should ignore them and set Degraded to False",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 6,
+				},
+			},
+			existingObjects: []client.Object{
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "unmanaged-deployment",
+						Namespace: testNamespace,
+						Labels: map[string]string{
+							"app": "something-else",
+						},
+					},
+					Status: appsv1.DeploymentStatus{
+						UnavailableReplicas: 5,
+					},
+				},
+			},
+			expectedCondition: metav1.Condition{
+				Type:               string(hyperv1.HostedControlPlaneDegraded),
+				Status:             metav1.ConditionFalse,
+				Reason:             hyperv1.AsExpectedReason,
+				ObservedGeneration: 6,
+			},
+		},
+		{
+			name: "When List returns unexpected error, it should return error",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 1,
+				},
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			var c client.Client
+			if tc.expectError {
+				c = fake.NewClientBuilder().
+					WithScheme(api.Scheme).
+					WithInterceptorFuncs(interceptor.Funcs{
+						List: func(ctx context.Context, client client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+							return fmt.Errorf("simulated list error")
+						},
+					}).
+					Build()
+			} else {
+				c = fake.NewClientBuilder().
+					WithScheme(api.Scheme).
+					WithObjects(tc.existingObjects...).
+					Build()
+			}
+
+			r := &HostedControlPlaneReconciler{
+				Client: c,
+				Log:    zapr.NewLogger(zaptest.NewLogger(t)),
+			}
+
+			err := r.reconcileDegradedStatus(t.Context(), tc.hcp)
+			if tc.expectError {
+				g.Expect(err).To(HaveOccurred())
+				return
+			}
+			g.Expect(err).ToNot(HaveOccurred())
+
+			cond := meta.FindStatusCondition(tc.hcp.Status.Conditions, string(hyperv1.HostedControlPlaneDegraded))
+			g.Expect(cond).ToNot(BeNil())
+			g.Expect(cond.Type).To(Equal(tc.expectedCondition.Type))
+			g.Expect(cond.Status).To(Equal(tc.expectedCondition.Status))
+			g.Expect(cond.Reason).To(Equal(tc.expectedCondition.Reason))
+			g.Expect(cond.ObservedGeneration).To(Equal(tc.expectedCondition.ObservedGeneration))
+			if tc.expectedCondition.Message != "" {
+				g.Expect(cond.Message).To(ContainSubstring(tc.expectedCondition.Message))
+			}
+
+			// For the multi-deployment case, verify that both deployment names appear in the message
+			if tc.name == "When multiple CPO-managed deployments have unavailable replicas, it should aggregate all errors in message" {
+				g.Expect(cond.Message).To(ContainSubstring("kube-apiserver"))
+				g.Expect(cond.Message).To(ContainSubstring("kube-controller-manager"))
+			}
+		})
+	}
+}
+
+func TestReconcileInfrastructureStatusCondition(t *testing.T) {
+	testNamespace := "test-namespace"
+
+	testCases := []struct {
+		name                string
+		hcp                 *hyperv1.HostedControlPlane
+		infraStatus         infra.InfrastructureStatus
+		infraErr            error
+		expectedCondStatus  metav1.ConditionStatus
+		expectedCondReason  string
+		expectedEndpoint    hyperv1.APIEndpoint
+		expectOAuthCallback bool
+	}{
+		{
+			name: "When infrastructure is ready, it should set InfrastructureReady to True and populate endpoint",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 3,
+				},
+			},
+			infraStatus: infra.InfrastructureStatus{
+				APIHost:          "api.example.com",
+				APIPort:          6443,
+				KonnectivityHost: "konnectivity.example.com",
+				KonnectivityPort: 8091,
+			},
+			expectedCondStatus: metav1.ConditionTrue,
+			expectedCondReason: hyperv1.AsExpectedReason,
+			expectedEndpoint: hyperv1.APIEndpoint{
+				Host: "api.example.com",
+				Port: 6443,
+			},
+		},
+		{
+			name: "When infrastructure is not ready, it should set InfrastructureReady to False",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 4,
+				},
+			},
+			infraStatus: infra.InfrastructureStatus{
+				APIHost: "",
+				APIPort: 0,
+				Message: "Load balancer pending",
+			},
+			expectedCondStatus: metav1.ConditionFalse,
+			expectedCondReason: hyperv1.WaitingOnInfrastructureReadyReason,
+		},
+		{
+			name: "When infrastructure status returns error, it should set InfrastructureReady to Unknown",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 5,
+				},
+			},
+			infraErr:           fmt.Errorf("failed to get infrastructure status"),
+			expectedCondStatus: metav1.ConditionUnknown,
+			expectedCondReason: hyperv1.InfraStatusFailureReason,
+		},
+		{
+			name: "When infrastructure is not ready with empty message, it should use default provisioning message",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 6,
+				},
+			},
+			infraStatus: infra.InfrastructureStatus{
+				APIHost: "",
+				APIPort: 0,
+			},
+			expectedCondStatus: metav1.ConditionFalse,
+			expectedCondReason: hyperv1.WaitingOnInfrastructureReadyReason,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			r := &HostedControlPlaneReconciler{
+				Client: fake.NewClientBuilder().WithScheme(api.Scheme).Build(),
+				Log:    zapr.NewLogger(zaptest.NewLogger(t)),
+				reconcileInfrastructureStatus: func(ctx context.Context, hcp *hyperv1.HostedControlPlane) (infra.InfrastructureStatus, error) {
+					return tc.infraStatus, tc.infraErr
+				},
+			}
+
+			r.reconcileInfrastructureStatusCondition(t.Context(), tc.hcp)
+
+			cond := meta.FindStatusCondition(tc.hcp.Status.Conditions, string(hyperv1.InfrastructureReady))
+			g.Expect(cond).ToNot(BeNil())
+			g.Expect(cond.Status).To(Equal(tc.expectedCondStatus))
+			g.Expect(cond.Reason).To(Equal(tc.expectedCondReason))
+			g.Expect(cond.ObservedGeneration).To(Equal(tc.hcp.Generation))
+
+			if tc.expectedCondStatus == metav1.ConditionTrue {
+				g.Expect(tc.hcp.Status.ControlPlaneEndpoint).To(Equal(tc.expectedEndpoint))
+			}
+
+			if tc.expectedCondStatus == metav1.ConditionFalse && tc.infraStatus.Message == "" {
+				g.Expect(cond.Message).To(Equal("Cluster infrastructure is still provisioning"))
+			}
+			if tc.expectedCondStatus == metav1.ConditionFalse && tc.infraStatus.Message != "" {
+				g.Expect(cond.Message).To(Equal(tc.infraStatus.Message))
+			}
+		})
+	}
+}
+
+func TestReconcileExternalDNSStatusCondition(t *testing.T) {
+	testNamespace := "test-namespace"
+
+	testCases := []struct {
+		name               string
+		hcp                *hyperv1.HostedControlPlane
+		expectedCondStatus metav1.ConditionStatus
+		expectedCondReason string
+		expectedMessage    string
+	}{
+		{
+			name: "When no external DNS hostname is configured, it should set ExternalDNSReachable to Unknown",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 1,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Networking: hyperv1.ClusterNetworking{
+						APIServer: &hyperv1.APIServerNetworking{
+							Port: ptr.To[int32](6443),
+						},
+					},
+				},
+			},
+			expectedCondStatus: metav1.ConditionUnknown,
+			expectedCondReason: hyperv1.StatusUnknownReason,
+			expectedMessage:    "External DNS is not configured",
+		},
+		{
+			name: "When HCP is private (no PublicZoneID), it should set ExternalDNSReachable to Unknown",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 2,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AWSPlatform,
+						AWS: &hyperv1.AWSPlatformSpec{
+							EndpointAccess: hyperv1.Private,
+						},
+					},
+					Services: []hyperv1.ServicePublishingStrategyMapping{
+						{
+							Service: hyperv1.APIServer,
+							ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{
+								Type: hyperv1.LoadBalancer,
+								LoadBalancer: &hyperv1.LoadBalancerPublishingStrategy{
+									Hostname: "api.example.com",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCondStatus: metav1.ConditionUnknown,
+			expectedCondReason: hyperv1.StatusUnknownReason,
+			expectedMessage:    "External DNS is not configured",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			r := &HostedControlPlaneReconciler{
+				Client: fake.NewClientBuilder().WithScheme(api.Scheme).Build(),
+				Log:    zapr.NewLogger(zaptest.NewLogger(t)),
+			}
+
+			r.reconcileExternalDNSStatusCondition(t.Context(), tc.hcp)
+
+			cond := meta.FindStatusCondition(tc.hcp.Status.Conditions, string(hyperv1.ExternalDNSReachable))
+			g.Expect(cond).ToNot(BeNil())
+			g.Expect(cond.Status).To(Equal(tc.expectedCondStatus))
+			g.Expect(cond.Reason).To(Equal(tc.expectedCondReason))
+			g.Expect(cond.ObservedGeneration).To(Equal(tc.hcp.Generation))
+			if tc.expectedMessage != "" {
+				g.Expect(cond.Message).To(Equal(tc.expectedMessage))
+			}
+		})
+	}
+}
+
+func TestReconcileAvailabilityAndReadyStatus(t *testing.T) {
+	testNamespace := "test-namespace"
+
+	testCases := []struct {
+		name                        string
+		hcp                         *hyperv1.HostedControlPlane
+		existingObjects             []client.Object
+		expectedReady               bool
+		expectedCondStatus          metav1.ConditionStatus
+		expectedCondReason          string
+		expectedCondMessageContains string
+	}{
+		{
+			name: "When no status conditions exist and no kubeconfig, it should set not ready with Unknown reason",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 1,
+				},
+			},
+			expectedReady:      false,
+			expectedCondStatus: metav1.ConditionFalse,
+			expectedCondReason: hyperv1.StatusUnknownReason,
+		},
+		{
+			name: "When infrastructure condition is False, it should propagate infrastructure failure",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 2,
+				},
+				Status: hyperv1.HostedControlPlaneStatus{
+					KubeConfig: &hyperv1.KubeconfigSecretRef{
+						Name: "admin-kubeconfig",
+						Key:  "kubeconfig",
+					},
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(hyperv1.InfrastructureReady),
+							Status: metav1.ConditionFalse,
+							Reason: hyperv1.WaitingOnInfrastructureReadyReason,
+						},
+						{
+							Type:   string(hyperv1.EtcdAvailable),
+							Status: metav1.ConditionTrue,
+							Reason: hyperv1.EtcdQuorumAvailableReason,
+						},
+						{
+							Type:   string(hyperv1.KubeAPIServerAvailable),
+							Status: metav1.ConditionTrue,
+							Reason: hyperv1.AsExpectedReason,
+						},
+					},
+				},
+			},
+			expectedReady:      false,
+			expectedCondStatus: metav1.ConditionFalse,
+			expectedCondReason: hyperv1.WaitingOnInfrastructureReadyReason,
+		},
+		{
+			name: "When health check fails but no conditions are set, it should report KAS LB not reachable",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 3,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					// No service strategy for APIServer - health check returns error
+					Services: []hyperv1.ServicePublishingStrategyMapping{},
+				},
+				Status: hyperv1.HostedControlPlaneStatus{
+					KubeConfig: &hyperv1.KubeconfigSecretRef{
+						Name: "admin-kubeconfig",
+						Key:  "kubeconfig",
+					},
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(hyperv1.InfrastructureReady),
+							Status: metav1.ConditionTrue,
+							Reason: hyperv1.AsExpectedReason,
+						},
+						{
+							Type:   string(hyperv1.EtcdAvailable),
+							Status: metav1.ConditionTrue,
+							Reason: hyperv1.EtcdQuorumAvailableReason,
+						},
+						{
+							Type:   string(hyperv1.KubeAPIServerAvailable),
+							Status: metav1.ConditionTrue,
+							Reason: hyperv1.AsExpectedReason,
+						},
+					},
+				},
+			},
+			expectedReady:      false,
+			expectedCondStatus: metav1.ConditionFalse,
+			expectedCondReason: hyperv1.KASLoadBalancerNotReachableReason,
+		},
+		{
+			name: "When previously available and health check fails with unavailable component, message should include component name",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 4,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Services: []hyperv1.ServicePublishingStrategyMapping{
+						{
+							Service: hyperv1.APIServer,
+							ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{
+								Type: hyperv1.Route,
+							},
+						},
+					},
+				},
+				Status: hyperv1.HostedControlPlaneStatus{
+					KubeConfig: &hyperv1.KubeconfigSecretRef{
+						Name: "admin-kubeconfig",
+						Key:  "kubeconfig",
+					},
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(hyperv1.HostedControlPlaneAvailable),
+							Status: metav1.ConditionTrue,
+							Reason: hyperv1.AsExpectedReason,
+						},
+						{
+							Type:   string(hyperv1.InfrastructureReady),
+							Status: metav1.ConditionTrue,
+							Reason: hyperv1.AsExpectedReason,
+						},
+						{
+							Type:   string(hyperv1.EtcdAvailable),
+							Status: metav1.ConditionTrue,
+							Reason: hyperv1.EtcdQuorumAvailableReason,
+						},
+						{
+							Type:   string(hyperv1.KubeAPIServerAvailable),
+							Status: metav1.ConditionTrue,
+							Reason: hyperv1.AsExpectedReason,
+						},
+					},
+				},
+			},
+			existingObjects: []client.Object{
+				&hyperv1.ControlPlaneComponent{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "router",
+						Namespace: testNamespace,
+					},
+					Status: hyperv1.ControlPlaneComponentStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(hyperv1.ControlPlaneComponentAvailable),
+								Status: metav1.ConditionFalse,
+								Reason: "NotReady",
+							},
+						},
+					},
+				},
+			},
+			expectedReady:               false,
+			expectedCondStatus:          metav1.ConditionFalse,
+			expectedCondReason:          hyperv1.KASLoadBalancerNotReachableReason,
+			expectedCondMessageContains: "router",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			objs := []client.Object{}
+			objs = append(objs, tc.existingObjects...)
+
+			c := fake.NewClientBuilder().
+				WithScheme(api.Scheme).
+				WithObjects(objs...).
+				Build()
+
+			r := &HostedControlPlaneReconciler{
+				Client: c,
+				Log:    zapr.NewLogger(zaptest.NewLogger(t)),
+			}
+
+			r.reconcileAvailabilityAndReadyStatus(t.Context(), tc.hcp)
+
+			g.Expect(tc.hcp.Status.Ready).To(Equal(tc.expectedReady))
+
+			cond := meta.FindStatusCondition(tc.hcp.Status.Conditions, string(hyperv1.HostedControlPlaneAvailable))
+			g.Expect(cond).ToNot(BeNil())
+			g.Expect(cond.Status).To(Equal(tc.expectedCondStatus))
+			g.Expect(cond.Reason).To(Equal(tc.expectedCondReason))
+			g.Expect(cond.ObservedGeneration).To(Equal(tc.hcp.Generation))
+			if tc.expectedCondMessageContains != "" {
+				g.Expect(cond.Message).To(ContainSubstring(tc.expectedCondMessageContains))
+			}
+		})
+	}
+}
+
+func TestReconcileKubeadminPasswordStatus(t *testing.T) {
+	testNamespace := "test-namespace"
+
+	testCases := []struct {
+		name                string
+		hcp                 *hyperv1.HostedControlPlane
+		existingObjects     []client.Object
+		expectedPasswordRef *corev1.LocalObjectReference
+		expectError         bool
+	}{
+		{
+			name: "When explicit OAuth config is specified, it should clear kubeadmin password status",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: testNamespace,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Configuration: &hyperv1.ClusterConfiguration{
+						OAuth: &configv1.OAuthSpec{
+							IdentityProviders: []configv1.IdentityProvider{
+								{
+									Name: "test-idp",
+									IdentityProviderConfig: configv1.IdentityProviderConfig{
+										Type: configv1.IdentityProviderTypeOpenID,
+									},
+								},
+							},
+						},
+					},
+				},
+				Status: hyperv1.HostedControlPlaneStatus{
+					KubeadminPassword: &corev1.LocalObjectReference{
+						Name: "old-kubeadmin-password",
+					},
+				},
+			},
+			expectedPasswordRef: nil,
+		},
+		{
+			name: "When no OAuth config and kubeadmin password secret exists, it should set password status",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: testNamespace,
+				},
+			},
+			existingObjects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kubeadmin-password",
+						Namespace: testNamespace,
+					},
+					Data: map[string][]byte{
+						"password": []byte("test-password"),
+					},
+				},
+			},
+			expectedPasswordRef: &corev1.LocalObjectReference{
+				Name: "kubeadmin-password",
+			},
+		},
+		{
+			name: "When no OAuth config and kubeadmin password secret does not exist, it should leave password status nil",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: testNamespace,
+				},
+			},
+			existingObjects:     []client.Object{},
+			expectedPasswordRef: nil,
+		},
+		{
+			name: "When no OAuth config and Get returns unexpected error, it should return error",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: testNamespace,
+				},
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			var c client.Client
+			if tc.expectError {
+				c = fake.NewClientBuilder().
+					WithScheme(api.Scheme).
+					WithInterceptorFuncs(interceptor.Funcs{
+						Get: func(ctx context.Context, client client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+							return fmt.Errorf("simulated get error")
+						},
+					}).
+					Build()
+			} else {
+				c = fake.NewClientBuilder().
+					WithScheme(api.Scheme).
+					WithObjects(tc.existingObjects...).
+					Build()
+			}
+
+			r := &HostedControlPlaneReconciler{
+				Client: c,
+				Log:    zapr.NewLogger(zaptest.NewLogger(t)),
+			}
+
+			err := r.reconcileKubeadminPasswordStatus(t.Context(), tc.hcp)
+			if tc.expectError {
+				g.Expect(err).To(HaveOccurred())
+				return
+			}
+			g.Expect(err).ToNot(HaveOccurred())
+
+			if tc.expectedPasswordRef == nil {
+				g.Expect(tc.hcp.Status.KubeadminPassword).To(BeNil())
+			} else {
+				g.Expect(tc.hcp.Status.KubeadminPassword).ToNot(BeNil())
+				g.Expect(tc.hcp.Status.KubeadminPassword.Name).To(Equal(tc.expectedPasswordRef.Name))
+			}
+		})
+	}
+}
+
+// fakeVersionImageMetadataProvider is a simple test double for ImageMetadataProvider
+// that returns deterministic results without contacting a registry.
+type fakeVersionImageMetadataProvider struct {
+	fakeDigest string
+	fakeRef    *reference.DockerImageReference
+	digestErr  error
+}
+
+func (f *fakeVersionImageMetadataProvider) ImageMetadata(_ context.Context, _ string, _ []byte) (*dockerv1client.DockerImageConfig, error) {
+	return &dockerv1client.DockerImageConfig{}, nil
+}
+
+func (f *fakeVersionImageMetadataProvider) GetManifest(_ context.Context, _ string, _ []byte) (distribution.Manifest, error) {
+	return nil, nil
+}
+
+func (f *fakeVersionImageMetadataProvider) GetDigest(_ context.Context, _ string, _ []byte) (digest.Digest, *reference.DockerImageReference, error) {
+	if f.digestErr != nil {
+		return "", nil, f.digestErr
+	}
+	return digest.Digest(f.fakeDigest), f.fakeRef, nil
+}
+
+func (f *fakeVersionImageMetadataProvider) GetMetadata(_ context.Context, _ string, _ []byte) (*dockerv1client.DockerImageConfig, []distribution.Descriptor, distribution.BlobStore, error) {
+	return &dockerv1client.DockerImageConfig{}, nil, nil, nil
+}
+
+func (f *fakeVersionImageMetadataProvider) GetOverride(_ context.Context, _ string, _ []byte) (*reference.DockerImageReference, error) {
+	return f.fakeRef, nil
+}
+
+func TestReconcileControlPlaneVersionStatus(t *testing.T) {
+	testNamespace := "test-namespace"
+	fakeClock := testingclock.NewFakeClock(time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC))
+
+	testCases := []struct {
+		name            string
+		hcp             *hyperv1.HostedControlPlane
+		existingObjects []client.Object
+		digestErr       error
+		expectError     bool
+		expectedDesired configv1.Release
+		expectedState   configv1.UpdateState
+	}{
+		{
+			name: "When pull secret exists and components are listed successfully with first population, it should create Partial history entry",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 1,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					ReleaseImage: "quay.io/openshift-release-dev/ocp-release:4.20.0",
+				},
+			},
+			existingObjects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "pull-secret",
+						Namespace: testNamespace,
+					},
+					Data: map[string][]byte{
+						corev1.DockerConfigJsonKey: []byte("{}"),
+					},
+				},
+			},
+			expectedDesired: configv1.Release{
+				Version: "4.20.0",
+				Image:   "quay.io/openshift-release-dev/ocp-release@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			},
+			expectedState: configv1.PartialUpdate,
+		},
+		{
+			name: "When pull secret is missing, it should return error",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 1,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					ReleaseImage: "quay.io/openshift-release-dev/ocp-release:4.20.0",
+				},
+			},
+			existingObjects: []client.Object{},
+			expectError:     true,
+		},
+		{
+			name: "When GetDigest fails, it should return error",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 1,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					ReleaseImage: "quay.io/openshift-release-dev/ocp-release:4.20.0",
+				},
+			},
+			existingObjects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "pull-secret",
+						Namespace: testNamespace,
+					},
+					Data: map[string][]byte{
+						corev1.DockerConfigJsonKey: []byte("{}"),
+					},
+				},
+			},
+			digestErr:   fmt.Errorf("failed to resolve digest"),
+			expectError: true,
+		},
+		{
+			name: "When component list fails, it should set partial version and return error",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-hcp",
+					Namespace:  testNamespace,
+					Generation: 2,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					ReleaseImage: "quay.io/openshift-release-dev/ocp-release:4.20.0",
+				},
+			},
+			existingObjects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "pull-secret",
+						Namespace: testNamespace,
+					},
+					Data: map[string][]byte{
+						corev1.DockerConfigJsonKey: []byte("{}"),
+					},
+				},
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			releaseImage := testutils.InitReleaseImageOrDie("4.20.0")
+
+			resolvedRef := &reference.DockerImageReference{
+				Registry:  "quay.io",
+				Namespace: "openshift-release-dev",
+				Name:      "ocp-release",
+				ID:        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			}
+
+			imgProvider := &fakeVersionImageMetadataProvider{
+				fakeDigest: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+				fakeRef:    resolvedRef,
+				digestErr:  tc.digestErr,
+			}
+
+			clientBuilder := fake.NewClientBuilder().
+				WithScheme(api.Scheme).
+				WithObjects(tc.existingObjects...)
+
+			// For the "component list fails" case, intercept the List call to fail
+			if tc.name == "When component list fails, it should set partial version and return error" {
+				clientBuilder = clientBuilder.WithInterceptorFuncs(interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if _, ok := list.(*hyperv1.ControlPlaneComponentList); ok {
+							return fmt.Errorf("simulated list error")
+						}
+						return c.List(ctx, list, opts...)
+					},
+				})
+				// Also need to add status subresource for patching
+				clientBuilder = clientBuilder.WithStatusSubresource(tc.hcp)
+			}
+
+			c := clientBuilder.Build()
+
+			// For the component list failure case, we need the HCP to exist in the fake client
+			if tc.name == "When component list fails, it should set partial version and return error" {
+				g.Expect(c.Create(t.Context(), tc.hcp)).To(Succeed())
+			}
+
+			r := &HostedControlPlaneReconciler{
+				Client:                c,
+				Log:                   zapr.NewLogger(zaptest.NewLogger(t)),
+				ImageMetadataProvider: imgProvider,
+				clock:                 fakeClock,
+			}
+
+			originalHCP := tc.hcp.DeepCopy()
+			err := r.reconcileControlPlaneVersionStatus(t.Context(), tc.hcp, originalHCP, releaseImage)
+			if tc.expectError {
+				g.Expect(err).To(HaveOccurred())
+
+				// For the component list failure case, verify partial status was still populated
+				if tc.name == "When component list fails, it should set partial version and return error" {
+					g.Expect(tc.hcp.Status.ControlPlaneVersion.Desired.Version).To(Equal("4.20.0"))
+					g.Expect(tc.hcp.Status.ControlPlaneVersion.Desired.Image).ToNot(BeEmpty())
+					g.Expect(tc.hcp.Status.ControlPlaneVersion.History).ToNot(BeEmpty())
+				}
+				return
+			}
+			g.Expect(err).ToNot(HaveOccurred())
+
+			g.Expect(tc.hcp.Status.ControlPlaneVersion.Desired.Version).To(Equal(tc.expectedDesired.Version))
+			g.Expect(tc.hcp.Status.ControlPlaneVersion.Desired.Image).To(Equal(tc.expectedDesired.Image))
+			g.Expect(tc.hcp.Status.ControlPlaneVersion.History).ToNot(BeEmpty())
+			g.Expect(tc.hcp.Status.ControlPlaneVersion.History[0].State).To(Equal(tc.expectedState))
+		})
+	}
+}
+
+func TestReconcileDeletion(t *testing.T) {
+	tests := []struct {
+		name           string
+		setupEC2Mock   func(*gomock.Controller) *awsapi.MockEC2API
+		wantErr        bool
+		wantCondStatus metav1.ConditionStatus
+	}{
+		{
+			name: "When destroyAWSDefaultSecurityGroup returns UnauthorizedOperation, it should skip gracefully and not return error",
+			setupEC2Mock: func(mockCtrl *gomock.Controller) *awsapi.MockEC2API {
+				m := awsapi.NewMockEC2API(mockCtrl)
+				m.EXPECT().DescribeSecurityGroups(gomock.Any(), gomock.Any()).Return(&ec2.DescribeSecurityGroupsOutput{
+					SecurityGroups: []ec2types.SecurityGroup{
+						{GroupId: aws.String("sg-123")},
+					},
+				}, nil)
+				m.EXPECT().DeleteSecurityGroup(gomock.Any(), gomock.Any()).Return(nil,
+					&smithy.GenericAPIError{Code: "UnauthorizedOperation", Message: "not authorized"})
+				return m
+			},
+			wantErr:        false,
+			wantCondStatus: metav1.ConditionFalse,
+		},
+		{
+			name: "When destroyAWSDefaultSecurityGroup returns DependencyViolation, it should skip gracefully and not return error",
+			setupEC2Mock: func(mockCtrl *gomock.Controller) *awsapi.MockEC2API {
+				m := awsapi.NewMockEC2API(mockCtrl)
+				m.EXPECT().DescribeSecurityGroups(gomock.Any(), gomock.Any()).Return(&ec2.DescribeSecurityGroupsOutput{
+					SecurityGroups: []ec2types.SecurityGroup{
+						{GroupId: aws.String("sg-123")},
+					},
+				}, nil)
+				m.EXPECT().DeleteSecurityGroup(gomock.Any(), gomock.Any()).Return(nil,
+					&smithy.GenericAPIError{Code: "DependencyViolation", Message: "resource has dependent object"})
+				return m
+			},
+			wantErr:        false,
+			wantCondStatus: metav1.ConditionFalse,
+		},
+		{
+			name: "When DescribeSecurityGroups returns InvalidIdentityToken, it should extract the error code and skip gracefully",
+			setupEC2Mock: func(mockCtrl *gomock.Controller) *awsapi.MockEC2API {
+				m := awsapi.NewMockEC2API(mockCtrl)
+				m.EXPECT().DescribeSecurityGroups(gomock.Any(), gomock.Any()).Return(nil,
+					&smithy.GenericAPIError{Code: "InvalidIdentityToken", Message: "No OpenIDConnect provider found in your account"})
+				return m
+			},
+			wantErr:        false,
+			wantCondStatus: metav1.ConditionFalse,
+		},
+		{
+			name: "When destroyAWSDefaultSecurityGroup returns unexpected error, it should propagate the error",
+			setupEC2Mock: func(mockCtrl *gomock.Controller) *awsapi.MockEC2API {
+				m := awsapi.NewMockEC2API(mockCtrl)
+				m.EXPECT().DescribeSecurityGroups(gomock.Any(), gomock.Any()).Return(&ec2.DescribeSecurityGroupsOutput{
+					SecurityGroups: []ec2types.SecurityGroup{
+						{GroupId: aws.String("sg-123")},
+					},
+				}, nil)
+				m.EXPECT().DeleteSecurityGroup(gomock.Any(), gomock.Any()).Return(nil,
+					&smithy.GenericAPIError{Code: "InternalError", Message: "something broke"})
+				return m
+			},
+			wantErr:        true,
+			wantCondStatus: metav1.ConditionFalse,
+		},
+		{
+			name: "When destroyAWSDefaultSecurityGroup succeeds, it should set condition to true",
+			setupEC2Mock: func(mockCtrl *gomock.Controller) *awsapi.MockEC2API {
+				m := awsapi.NewMockEC2API(mockCtrl)
+				// First call: find the SG
+				m.EXPECT().DescribeSecurityGroups(gomock.Any(), gomock.Any()).Return(&ec2.DescribeSecurityGroupsOutput{
+					SecurityGroups: []ec2types.SecurityGroup{
+						{GroupId: aws.String("sg-123")},
+					},
+				}, nil)
+				m.EXPECT().DeleteSecurityGroup(gomock.Any(), gomock.Any()).Return(&ec2.DeleteSecurityGroupOutput{}, nil)
+				// Second call: verify SG is gone
+				m.EXPECT().DescribeSecurityGroups(gomock.Any(), gomock.Any()).Return(&ec2.DescribeSecurityGroupsOutput{
+					SecurityGroups: []ec2types.SecurityGroup{},
+				}, nil)
+				return m
+			},
+			wantErr:        false,
+			wantCondStatus: metav1.ConditionTrue,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			mockCtrl := gomock.NewController(t)
+			mockEC2 := tt.setupEC2Mock(mockCtrl)
+
+			hcp := &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-ns",
+					Annotations: map[string]string{
+						hyperv1.CleanupCloudResourcesAnnotation: "true",
+					},
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					InfraID: "test-infra",
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AWSPlatform,
+						AWS:  &hyperv1.AWSPlatformSpec{},
+					},
+				},
+				Status: hyperv1.HostedControlPlaneStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(hyperv1.CloudResourcesDestroyed),
+							Status: metav1.ConditionTrue,
+							Reason: hyperv1.AsExpectedReason,
+						},
+					},
+				},
+			}
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(api.Scheme).
+				WithObjects(hcp).
+				WithStatusSubresource(&hyperv1.HostedControlPlane{}).
+				Build()
+
+			ctx := ctrl.LoggerInto(t.Context(), ctrl.Log.WithName("test"))
+
+			// Re-read from fake client so the object has a ResourceVersion for PatchStatusCondition
+			g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(hcp), hcp)).To(Succeed())
+
+			r := &HostedControlPlaneReconciler{
+				Client:    fakeClient,
+				Log:       ctrl.Log.WithName("test"),
+				ec2Client: mockEC2,
+			}
+
+			_, err := r.reconcileDeletion(ctx, hcp)
+			if tt.wantErr {
+				g.Expect(err).To(HaveOccurred())
+			} else {
+				g.Expect(err).ToNot(HaveOccurred())
+			}
+
+			// Re-read from server to verify persisted status.
+			updated := &hyperv1.HostedControlPlane{}
+			g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(hcp), updated)).To(Succeed())
+			cond := meta.FindStatusCondition(updated.Status.Conditions, string(hyperv1.AWSDefaultSecurityGroupDeleted))
+			g.Expect(cond).ToNot(BeNil())
+			g.Expect(cond.Status).To(Equal(tt.wantCondStatus))
+		})
+	}
+}
+
+func TestReconcileDefaultSecurityGroup(t *testing.T) {
+	tests := []struct {
+		name           string
+		setupEC2Mock   func(*gomock.Controller) *awsapi.MockEC2API
+		wantCondStatus metav1.ConditionStatus
+		wantCondReason string
+		wantPlatform   bool
+		wantErr        bool
+	}{
+		{
+			name: "When creation fails, it should set error condition via PatchStatus and not touch platform",
+			setupEC2Mock: func(mockCtrl *gomock.Controller) *awsapi.MockEC2API {
+				m := awsapi.NewMockEC2API(mockCtrl)
+				m.EXPECT().DescribeVpcs(gomock.Any(), gomock.Any()).Return(nil,
+					&smithy.GenericAPIError{Code: "VpcNotFound", Message: "vpc not found"})
+				return m
+			},
+			wantCondStatus: metav1.ConditionFalse,
+			wantCondReason: hyperv1.AWSErrorReason,
+			wantPlatform:   false,
+			wantErr:        true,
+		},
+		{
+			name: "When identity provider is not ready, it should skip without error",
+			setupEC2Mock: func(mockCtrl *gomock.Controller) *awsapi.MockEC2API {
+				return awsapi.NewMockEC2API(mockCtrl)
+			},
+			wantErr: false,
+		},
+		{
+			name: "When existing SG is found, it should set success condition and platform status",
+			setupEC2Mock: func(mockCtrl *gomock.Controller) *awsapi.MockEC2API {
+				m := awsapi.NewMockEC2API(mockCtrl)
+				m.EXPECT().DescribeVpcs(gomock.Any(), gomock.Any()).Return(&ec2.DescribeVpcsOutput{
+					Vpcs: []ec2types.Vpc{{VpcId: aws.String("vpc-123")}},
+				}, nil)
+				m.EXPECT().DescribeSecurityGroups(gomock.Any(), gomock.Any()).Return(&ec2.DescribeSecurityGroupsOutput{
+					SecurityGroups: []ec2types.SecurityGroup{{
+						GroupId: aws.String("sg-existing"),
+						OwnerId: aws.String("123456789012"),
+						Tags: []ec2types.Tag{
+							{Key: aws.String("Name"), Value: aws.String("test-infra-default-sg")},
+						},
+					}},
+				}, nil)
+				m.EXPECT().AuthorizeSecurityGroupIngress(gomock.Any(), gomock.Any()).Return(
+					&ec2.AuthorizeSecurityGroupIngressOutput{}, nil)
+				return m
+			},
+			wantCondStatus: metav1.ConditionTrue,
+			wantCondReason: hyperv1.AsExpectedReason,
+			wantPlatform:   true,
+			wantErr:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			mockCtrl := gomock.NewController(t)
+			mockEC2 := tt.setupEC2Mock(mockCtrl)
+
+			conditions := []metav1.Condition{}
+			if tt.wantCondStatus != "" {
+				// Only add ValidAWSIdentityProvider=True for tests that should reach creation.
+				conditions = append(conditions, metav1.Condition{
+					Type:   string(hyperv1.ValidAWSIdentityProvider),
+					Status: metav1.ConditionTrue,
+					Reason: hyperv1.AsExpectedReason,
+				})
+			}
+
+			hcp := &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-hcp",
+					Namespace: "test-ns",
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					InfraID: "test-infra",
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AWSPlatform,
+						AWS: &hyperv1.AWSPlatformSpec{
+							CloudProviderConfig: &hyperv1.AWSCloudProviderConfig{
+								VPC: "vpc-123",
+							},
+						},
+					},
+					Networking: hyperv1.ClusterNetworking{
+						MachineNetwork: []hyperv1.MachineNetworkEntry{
+							{CIDR: *ipnet.MustParseCIDR("10.0.0.0/16")},
+						},
+					},
+				},
+				Status: hyperv1.HostedControlPlaneStatus{
+					Conditions: conditions,
+				},
+			}
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(api.Scheme).
+				WithObjects(hcp).
+				WithStatusSubresource(&hyperv1.HostedControlPlane{}).
+				Build()
+
+			ctx := ctrl.LoggerInto(t.Context(), ctrl.Log.WithName("test"))
+			g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(hcp), hcp)).To(Succeed())
+
+			r := &HostedControlPlaneReconciler{
+				Client:    fakeClient,
+				Log:       ctrl.Log.WithName("test"),
+				ec2Client: mockEC2,
+			}
+
+			err := r.reconcileDefaultSecurityGroup(ctx, hcp)
+			if tt.wantErr {
+				g.Expect(err).To(HaveOccurred())
+			} else {
+				g.Expect(err).ToNot(HaveOccurred())
+			}
+
+			// Re-read from server to verify persisted status.
+			updated := &hyperv1.HostedControlPlane{}
+			g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(hcp), updated)).To(Succeed())
+
+			if tt.wantCondStatus == "" {
+				// Short-circuit paths (e.g. identity provider not ready) must not persist any status update.
+				cond := meta.FindStatusCondition(updated.Status.Conditions, string(hyperv1.AWSDefaultSecurityGroupCreated))
+				g.Expect(cond).To(BeNil(), "condition should not be set when reconcile short-circuits")
+				g.Expect(updated.Status.Platform).To(BeNil(), "platform status should remain nil when reconcile short-circuits")
+				return
+			}
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, string(hyperv1.AWSDefaultSecurityGroupCreated))
+			g.Expect(cond).ToNot(BeNil(), "condition should be set")
+			g.Expect(cond.Status).To(Equal(tt.wantCondStatus))
+			g.Expect(cond.Reason).To(Equal(tt.wantCondReason))
+
+			if tt.wantPlatform {
+				g.Expect(updated.Status.Platform).ToNot(BeNil())
+				g.Expect(updated.Status.Platform.AWS).ToNot(BeNil())
+				g.Expect(updated.Status.Platform.AWS.DefaultWorkerSecurityGroupID).ToNot(BeEmpty(),
+					"DefaultWorkerSecurityGroupID should be set on success")
+			} else {
+				g.Expect(updated.Status.Platform).To(BeNil(),
+					"platform status should remain nil when creation fails")
+			}
+		})
+	}
+}
+
+func TestReconcileValidIDPConfigurationCondition(t *testing.T) {
+	t.Parallel()
+	const testNamespace = "test-ns"
+
+	tests := []struct {
+		name             string
+		hcp              *hyperv1.HostedControlPlane
+		storedGeneration int64
+		wantCondStatus   metav1.ConditionStatus
+		wantCondReason   string
+		wantErr          bool
+	}{
+		{
+			name: "When IDP configuration is valid, it should set the condition to True",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-hcp", Namespace: testNamespace, Generation: 1},
+			},
+			wantCondStatus: metav1.ConditionTrue,
+			wantCondReason: "IDPConfigurationValid",
+		},
+		{
+			name: "When IDP configuration is invalid, it should set the condition to False",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-hcp", Namespace: testNamespace, Generation: 1},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Configuration: &hyperv1.ClusterConfiguration{
+						OAuth: &configv1.OAuthSpec{
+							IdentityProviders: []configv1.IdentityProvider{
+								{
+									IdentityProviderConfig: configv1.IdentityProviderConfig{
+										Type: configv1.IdentityProviderTypeHTPasswd,
+										// HTPasswd left nil to force a conversion error.
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantCondStatus: metav1.ConditionFalse,
+			wantCondReason: "IDPConfigurationError",
+		},
+		{
+			name: "When hcp generation changed since evaluation started, it should not patch and return an error",
+			hcp: &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-hcp", Namespace: testNamespace, Generation: 1},
+			},
+			// Simulates a spec update landing (e.g. from the HostedCluster controller)
+			// between when this hcp was read and when reconcileValidIDPConfigurationCondition runs.
+			storedGeneration: 2,
+			wantErr:          true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := NewWithT(t)
+
+			stored := tc.hcp.DeepCopy()
+			if tc.storedGeneration != 0 {
+				stored.Generation = tc.storedGeneration
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(api.Scheme).
+				WithObjects(stored).
+				WithStatusSubresource(&hyperv1.HostedControlPlane{}).
+				Build()
+
+			r := &HostedControlPlaneReconciler{
+				Client: fakeClient,
+			}
+
+			ctx := t.Context()
+			err := r.reconcileValidIDPConfigurationCondition(ctx, tc.hcp, testutil.FakeImageProvider(), "oauth.example.com", 443)
+
+			if tc.wantErr {
+				g.Expect(err).To(HaveOccurred())
+				updated := &hyperv1.HostedControlPlane{}
+				g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(tc.hcp), updated)).To(Succeed())
+				g.Expect(meta.FindStatusCondition(updated.Status.Conditions, string(hyperv1.ValidIDPConfiguration))).To(BeNil(),
+					"condition should not be patched when generation changed underneath us")
+				return
+			}
+			g.Expect(err).ToNot(HaveOccurred())
+
+			updated := &hyperv1.HostedControlPlane{}
+			g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(tc.hcp), updated)).To(Succeed())
+			cond := meta.FindStatusCondition(updated.Status.Conditions, string(hyperv1.ValidIDPConfiguration))
+			g.Expect(cond).ToNot(BeNil())
+			g.Expect(cond.Status).To(Equal(tc.wantCondStatus))
+			g.Expect(cond.Reason).To(Equal(tc.wantCondReason))
+		})
+	}
+}
+
+func TestReconcileDefaultSecurityGroup_GenerationConflict(t *testing.T) {
+	g := NewWithT(t)
+	mockCtrl := gomock.NewController(t)
+	mockEC2 := awsapi.NewMockEC2API(mockCtrl)
+	mockEC2.EXPECT().DescribeVpcs(gomock.Any(), gomock.Any()).Return(&ec2.DescribeVpcsOutput{
+		Vpcs: []ec2types.Vpc{{VpcId: aws.String("vpc-123")}},
+	}, nil)
+	mockEC2.EXPECT().DescribeSecurityGroups(gomock.Any(), gomock.Any()).Return(&ec2.DescribeSecurityGroupsOutput{
+		SecurityGroups: []ec2types.SecurityGroup{{
+			GroupId: aws.String("sg-existing"),
+			OwnerId: aws.String("123456789012"),
+			Tags: []ec2types.Tag{
+				{Key: aws.String("Name"), Value: aws.String("test-infra-default-sg")},
+			},
+		}},
+	}, nil)
+	mockEC2.EXPECT().AuthorizeSecurityGroupIngress(gomock.Any(), gomock.Any()).Return(
+		&ec2.AuthorizeSecurityGroupIngressOutput{}, nil)
+
+	hcp := &hyperv1.HostedControlPlane{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-hcp",
+			Namespace:  "test-ns",
+			Generation: 1,
+		},
+		Spec: hyperv1.HostedControlPlaneSpec{
+			InfraID: "test-infra",
+			Platform: hyperv1.PlatformSpec{
+				Type: hyperv1.AWSPlatform,
+				AWS: &hyperv1.AWSPlatformSpec{
+					CloudProviderConfig: &hyperv1.AWSCloudProviderConfig{
+						VPC: "vpc-123",
+					},
+				},
+			},
+			Networking: hyperv1.ClusterNetworking{
+				MachineNetwork: []hyperv1.MachineNetworkEntry{
+					{CIDR: *ipnet.MustParseCIDR("10.0.0.0/16")},
+				},
+			},
+		},
+		Status: hyperv1.HostedControlPlaneStatus{
+			Conditions: []metav1.Condition{
+				{Type: string(hyperv1.ValidAWSIdentityProvider), Status: metav1.ConditionTrue, Reason: hyperv1.AsExpectedReason},
+			},
+		},
+	}
+
+	// The object stored in the API server has already moved to a later generation
+	// (e.g. a spec update landed) than the in-memory hcp used to compute the AWS
+	// security-group result below.
+	stored := hcp.DeepCopy()
+	stored.Generation = 2
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(api.Scheme).
+		WithObjects(stored).
+		WithStatusSubresource(&hyperv1.HostedControlPlane{}).
+		Build()
+
+	ctx := ctrl.LoggerInto(t.Context(), ctrl.Log.WithName("test"))
+
+	r := &HostedControlPlaneReconciler{
+		Client:    fakeClient,
+		Log:       ctrl.Log.WithName("test"),
+		ec2Client: mockEC2,
+	}
+
+	err := r.reconcileDefaultSecurityGroup(ctx, hcp)
+	g.Expect(err).To(HaveOccurred(), "stale generation should be rejected rather than patched")
+
+	updated := &hyperv1.HostedControlPlane{}
+	g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(hcp), updated)).To(Succeed())
+	g.Expect(meta.FindStatusCondition(updated.Status.Conditions, string(hyperv1.AWSDefaultSecurityGroupCreated))).To(BeNil(),
+		"condition should not be patched when generation changed underneath us")
+	g.Expect(updated.Status.Platform).To(BeNil(),
+		"platform status should not be patched when generation changed underneath us")
+}
+
+func TestHealthCheckKASEndpoint(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		handler   http.HandlerFunc
+		cancelCtx bool
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name: "When endpoint returns 200 OK, it should succeed",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			},
+		},
+		{
+			name: "When endpoint returns 503, it should return an unhealthy error with status code",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			},
+			wantErr:   true,
+			errSubstr: "is not healthy (status 503)",
+		},
+		{
+			name: "When endpoint returns 503 with failing checks, it should include check names",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				fmt.Fprintln(w, "[+]ping ok")
+				fmt.Fprintln(w, "[-]etcd failed: reason withheld")
+				fmt.Fprintln(w, "[-]kms-provider-0 failed: reason withheld")
+				fmt.Fprintln(w, "healthz check failed")
+			},
+			wantErr:   true,
+			errSubstr: "failing health checks: etcd, kms-provider-0",
+		},
+		{
+			name: "When context is canceled, it should return an error",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			},
+			cancelCtx: true,
+			wantErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			server := httptest.NewTLSServer(tt.handler)
+			defer server.Close()
+
+			host, portStr, err := net.SplitHostPort(server.Listener.Addr().String())
+			g.Expect(err).ToNot(HaveOccurred())
+			port, err := strconv.Atoi(portStr)
+			g.Expect(err).ToNot(HaveOccurred())
+
+			ctx := t.Context()
+			if tt.cancelCtx {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+
+			err = healthCheckKASEndpoint(ctx, host, port)
+			if tt.wantErr {
+				g.Expect(err).To(HaveOccurred())
+				if tt.errSubstr != "" {
+					g.Expect(err.Error()).To(ContainSubstring(tt.errSubstr))
+				}
+			} else {
+				g.Expect(err).ToNot(HaveOccurred())
+			}
+		})
+	}
+
+	t.Run("When the ingress point contains invalid characters, it should return a request creation error", func(t *testing.T) {
+		g := NewWithT(t)
+		err := healthCheckKASEndpoint(t.Context(), "host\x7f", 443)
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err.Error()).To(ContainSubstring("invalid control character"))
+	})
+}
+
+// TestRouterComponentComesAfterRouteCreatingComponents verifies that the router
+// component is registered after all components that create Route objects.
+// The router's adaptConfig reads existing Routes to generate the HAProxy config;
+// if a route-creating component (e.g. ignition-server) is registered after the
+// router, the route won't exist during the first reconcile and the HAProxy config
+// will be missing that backend. See OCPBUGS-98213.
+func TestRouterComponentComesAfterRouteCreatingComponents(t *testing.T) {
+	t.Parallel()
+
+	mockCtrl := gomock.NewController(t)
+	mockedProvider := releaseinfo.NewMockProviderWithOpenShiftImageRegistryOverrides(mockCtrl)
+	mockedProvider.EXPECT().GetRegistryOverrides().Return(map[string]string{}).AnyTimes()
+	mockedProvider.EXPECT().GetOpenShiftImageRegistryOverrides().Return(map[string][]string{}).AnyTimes()
+
+	reconciler := &HostedControlPlaneReconciler{
+		ReleaseProvider:               mockedProvider,
+		ManagementClusterCapabilities: &fakecapabilities.FakeSupportAllCapabilities{},
+	}
+
+	hcp := &hyperv1.HostedControlPlane{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-hcp",
+			Namespace: "test-ns",
+		},
+		Spec: hyperv1.HostedControlPlaneSpec{
+			Platform: hyperv1.PlatformSpec{
+				Type: hyperv1.AWSPlatform,
+			},
+			Etcd: hyperv1.EtcdSpec{
+				ManagementType: hyperv1.Managed,
+			},
+			Services: []hyperv1.ServicePublishingStrategyMapping{
+				{
+					Service: hyperv1.Ignition,
+					ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{
+						Type: hyperv1.Route,
+					},
+				},
+			},
+		},
+	}
+
+	reconciler.registerComponents(hcp)
+
+	// Build a map of component name -> position in the list.
+	positions := make(map[string]int, len(reconciler.components))
+	for i, c := range reconciler.components {
+		positions[c.Name()] = i
+	}
+
+	routerPos, ok := positions[routerv2.ComponentName]
+	if !ok {
+		t.Fatal("router component not found in registered components")
+	}
+
+	// These components create Route objects via their manifest adapters.
+	// The router must come after all of them so its HAProxy config includes
+	// every route on the first reconcile pass.
+	routeCreatingComponents := []string{
+		ignitionserverv2.ComponentName,
+		metricsproxyv2.ComponentName,
+	}
+	for _, name := range routeCreatingComponents {
+		pos, ok := positions[name]
+		if !ok {
+			t.Fatalf("route-creating component %q not found in registered components", name)
+		}
+		if routerPos < pos {
+			t.Errorf("router component (position %d) must be registered after %s (position %d) "+
+				"so that the HAProxy config includes %s's route on the first reconcile pass",
+				routerPos, name, pos, name)
+		}
+	}
+}
+
+func TestValidateAzureKMSConfig(t *testing.T) {
+	tests := []struct {
+		name              string
+		keyVaultAccess    hyperv1.AzureKeyVaultAccessType
+		expectedStatus    metav1.ConditionStatus
+		expectedReason    string
+		expectMsgContains string
+		expectMsgExcludes string
+	}{
+		{
+			name:              "When KeyVaultAccess is Private, it should short-circuit to Unknown",
+			keyVaultAccess:    hyperv1.AzureKeyVaultPrivate,
+			expectedStatus:    metav1.ConditionUnknown,
+			expectedReason:    hyperv1.StatusUnknownReason,
+			expectMsgContains: "not reachable from the management cluster",
+		},
+		{
+			// Public falls through to credential validation, which fails because no client is configured.
+			name:              "When KeyVaultAccess is Public, it should proceed to credential validation",
+			keyVaultAccess:    hyperv1.AzureKeyVaultPublic,
+			expectedStatus:    metav1.ConditionFalse,
+			expectedReason:    hyperv1.InvalidAzureCredentialsReason,
+			expectMsgExcludes: "not reachable from the management cluster",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			azureutil.SetAsAroHCPTest(t)
+
+			hcp := &hyperv1.HostedControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "hcp",
+					Namespace:  "hcp-namespace",
+					Generation: 1,
+				},
+				Spec: hyperv1.HostedControlPlaneSpec{
+					Platform: hyperv1.PlatformSpec{
+						Type: hyperv1.AzurePlatform,
+						Azure: &hyperv1.AzurePlatformSpec{
+							Cloud: "AzurePublicCloud",
+							AzureAuthenticationConfig: hyperv1.AzureAuthenticationConfiguration{
+								AzureAuthenticationConfigType: hyperv1.AzureAuthenticationTypeManagedIdentities,
+								ManagedIdentities: &hyperv1.AzureResourceManagedIdentities{
+									ControlPlane: hyperv1.ControlPlaneManagedIdentities{
+										ManagedIdentitiesKeyVault: hyperv1.ManagedAzureKeyVault{
+											Name:     "test-keyvault",
+											TenantID: "00000000-0000-0000-0000-000000000000",
+										},
+									},
+								},
+							},
+						},
+					},
+					SecretEncryption: &hyperv1.SecretEncryptionSpec{
+						Type: hyperv1.KMS,
+						KMS: &hyperv1.KMSSpec{
+							Provider: hyperv1.AZURE,
+							Azure: &hyperv1.AzureKMSSpec{
+								ActiveKey: hyperv1.AzureKMSKey{
+									KeyVaultName: "test-kms-keyvault",
+									KeyName:      "test-key",
+									KeyVersion:   "1",
+								},
+								KMS: hyperv1.ManagedIdentity{
+									CredentialsSecretName: "test-kms-creds",
+								},
+								KeyVaultAccess: tc.keyVaultAccess,
+							},
+						},
+					},
+				},
+			}
+
+			r := &HostedControlPlaneReconciler{}
+			r.validateAzureKMSConfig(t.Context(), hcp)
+
+			g := NewWithT(t)
+			cond := meta.FindStatusCondition(hcp.Status.Conditions, string(hyperv1.ValidAzureKMSConfig))
+			g.Expect(cond).ToNot(BeNil(), "ValidAzureKMSConfig condition should be set")
+			g.Expect(cond.Status).To(Equal(tc.expectedStatus))
+			if tc.expectedReason != "" {
+				g.Expect(cond.Reason).To(Equal(tc.expectedReason))
+			}
+			if tc.expectMsgContains != "" {
+				g.Expect(cond.Message).To(ContainSubstring(tc.expectMsgContains))
+			}
+			if tc.expectMsgExcludes != "" {
+				g.Expect(cond.Message).ToNot(ContainSubstring(tc.expectMsgExcludes))
+			}
+		})
+	}
+}
+
+// Compile-time assertion that fakeVersionImageMetadataProvider satisfies the interface.
+var _ util.ImageMetadataProvider = &fakeVersionImageMetadataProvider{}
+
+// Compile-time assertion for clock interface used by tests.
+var _ clock.Clock = &testingclock.FakeClock{}

@@ -1,7 +1,7 @@
 package controlplanecomponent
 
 import (
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/podspec"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -53,6 +53,19 @@ func NewJobComponent(name string, opts ComponentOptions) *controlPlaneWorkloadBu
 	}
 }
 
+func (b *controlPlaneWorkloadBuilder[T]) WithAssetDir(dir string) *controlPlaneWorkloadBuilder[T] {
+	b.workload.assetDir = dir
+	return b
+}
+
+// WithTemplateData sets template data that will be used to render asset YAMLs as Go templates
+// before decoding. When set, all manifest loading (update, delete, status) will process YAMLs
+// through text/template with the provided data map. When nil, manifests are loaded as raw YAML.
+func (b *controlPlaneWorkloadBuilder[T]) WithTemplateData(data map[string]string) *controlPlaneWorkloadBuilder[T] {
+	b.workload.templateData = data
+	return b
+}
+
 func (b *controlPlaneWorkloadBuilder[T]) WithAdaptFunction(adapt func(cpContext WorkloadContext, obj T) error) *controlPlaneWorkloadBuilder[T] {
 	b.workload.adapt = adapt
 	return b
@@ -86,7 +99,7 @@ func (b *controlPlaneWorkloadBuilder[T]) InjectKonnectivityContainer(opts Konnec
 	return b
 }
 
-func (b *controlPlaneWorkloadBuilder[T]) InjectAvailabilityProberContainer(opts util.AvailabilityProberOpts) *controlPlaneWorkloadBuilder[T] {
+func (b *controlPlaneWorkloadBuilder[T]) InjectAvailabilityProberContainer(opts podspec.AvailabilityProberOpts) *controlPlaneWorkloadBuilder[T] {
 	b.workload.availabilityProberOpts = &opts
 	return b
 }

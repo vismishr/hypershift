@@ -71,6 +71,11 @@ func (in *DynamicResourcesArgs) DeepCopyInto(out *DynamicResourcesArgs) {
 		*out = new(metav1.Duration)
 		**out = **in
 	}
+	if in.BindingTimeout != nil {
+		in, out := &in.BindingTimeout, &out.BindingTimeout
+		*out = new(metav1.Duration)
+		**out = **in
+	}
 	return
 }
 
@@ -480,6 +485,8 @@ func (in *Plugins) DeepCopyInto(out *Plugins) {
 	in.Bind.DeepCopyInto(&out.Bind)
 	in.PostBind.DeepCopyInto(&out.PostBind)
 	in.MultiPoint.DeepCopyInto(&out.MultiPoint)
+	in.PlacementGenerate.DeepCopyInto(&out.PlacementGenerate)
+	in.PlacementScore.DeepCopyInto(&out.PlacementScore)
 	return
 }
 

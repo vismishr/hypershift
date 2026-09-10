@@ -11,32 +11,7 @@ This guide outlines the steps for performing disaster recovery on a Hosted Clust
 
 ## Pre-requisites
 
-Ensure the following prerequisites are met on the Management cluster (connected or disconnected):
-
-- A valid StorageClass.
-- Cluster-admin access.
-- Access to the openshift-adp version 1.5+ subscription via a CatalogSource.
-- Access to online storage compatible with OpenShift ADP cloud storage providers (e.g., S3, Azure, GCP, MinIO).
-- HostedControlPlane pods are accessible and functioning correctly.
-- The HostedCluster should be PublicAndPrivate or Private.
-- The Public only clusters should have at least a hostname.
-
-!!! warning "⚠️ HostedCluster Configuration"
-
-    The HostedCluster must be configured as `PublicAndPrivate`, `Private`, or `Public` with a fixed hostname for the kube-api-server. Public clusters without a hostname will cause restore failures. See [HostedCluster Configuration Requirements](#hostedcluster-configuration-requirements) for details.
-
-!!! Note "Note for Bare Metal Providers"
-
-    Since the InfraEnv has a different lifecycle than the HostedCluster, it should reside in a separate namespace from the HostedControlPlane and must not be deleted during backup or restore procedures.
-
-
-!!! important
-
-    Before proceeding further, two crucial points must be noted:
-
-    1. Restoration will occur in a green field environment, signifying that after the HostedCluster has been backed up, it must be destroyed to initiate the restoration process.
-
-    2. Node reprovisioning will take place, necessitating the backup of workloads in the Data Plane before deleting the HostedCluster..
+Please review the [Disaster Recovery Prerequisites](prerequisites.md) page before proceeding. It covers all general requirements, HostedCluster service publishing strategy configuration (critical for cross-management-cluster restore), and platform-specific considerations.
 
 ## Deploying OpenShift ADP
 
@@ -45,11 +20,13 @@ After installation, create a DataProtectionApplication (DPA) object, which defin
 This guide focuses on the following platforms:
 
 - [AWS](https://docs.openshift.com/container-platform/latest/backup_and_restore/application_backup_and_restore/installing/installing-oadp-aws.html)
+- [Azure](https://docs.openshift.com/container-platform/latest/backup_and_restore/application_backup_and_restore/installing/installing-oadp-azure.html)
 - [Baremetal](https://docs.openshift.com/container-platform/latest/backup_and_restore/application_backup_and_restore/installing/installing-oadp-mcg.html)
 - [Openstack](https://docs.redhat.com/en/documentation/openshift_container_platform/latest/html/installing/installing-on-openstack)
 - [KubeVirt](https://docs.openshift.com/container-platform/latest/backup_and_restore/application_backup_and_restore/installing/installing-oadp-mcg.html)
 
 ### Creating Cloud Provider Credentials
+
 Begin by creating credentials for your backup storage platform. Specific instructions are available in the official documentation. For AWS S3 and MinIO, the basic steps are:
 
 ```bash
@@ -66,6 +43,25 @@ oc create secret generic cloud-credentials -n openshift-adp --from-file cloud=cr
 
     If using AWS S3, additional AWS resources must be created to enable data backup and restoration. Follow [these instructions](https://docs.openshift.com/container-platform/latest/backup_and_restore/application_backup_and_restore/installing/installing-oadp-aws.html#migration-configuring-aws-s3_installing-oadp-aws) to set up the necessary configurations.
 
+For Azure Blob Storage, create the credentials in the following format:
+
+```bash
+cat << EOF > ./credentials-azure
+[default]
+AZURE_SUBSCRIPTION_ID=<subscription-id>
+AZURE_TENANT_ID=<tenant-id>
+AZURE_CLIENT_ID=<client-id>
+AZURE_CLIENT_SECRET=<client-secret>
+AZURE_RESOURCE_GROUP=<resource-group>
+AZURE_CLOUD_NAME=AzurePublicCloud
+EOF
+
+oc create secret generic cloud-credentials -n openshift-adp --from-file cloud=credentials-azure
+```
+
+!!! note
+
+    For Azure, additional resources (Storage Account, Blob Container) must be created. Follow the [Azure OADP installation guide](https://docs.openshift.com/container-platform/latest/backup_and_restore/application_backup_and_restore/installing/installing-oadp-azure.html) or the [Azure Platform Guide](platform-guides/azure.md) for details.
 
 ### Sample DPA Configurations
 
@@ -92,15 +88,6 @@ Below are some samples of DPA configurations for the mentioned platforms
             config:
               region: us-east-1
               profile: "backupStorage"
-            credential:
-              key: cloud
-              name: cloud-credentials
-      snapshotLocations:
-        - velero:
-            provider: aws
-            config:
-              region: us-east-1
-              profile: "volumeSnapshot"
             credential:
               key: cloud
               name: cloud-credentials
@@ -145,15 +132,6 @@ Below are some samples of DPA configurations for the mentioned platforms
               key: cloud
               name: cloud-credentials
               default: true
-      snapshotLocations:
-        - velero:
-            provider: aws
-            config:
-              region: minio
-              profile: "default"
-            credential:
-              key: cloud
-              name: cloud-credentials
       configuration:
         nodeAgent:
           enable: true
@@ -191,15 +169,6 @@ Below are some samples of DPA configurations for the mentioned platforms
             credential:
               key: cloud
               name: cloud-credentials
-      snapshotLocations:
-        - velero:
-            provider: aws
-            config:
-              region: minio
-              profile: "default"
-            credential:
-              key: cloud
-              name: cloud-credentials
       configuration:
         nodeAgent:
           enable: true
@@ -213,6 +182,42 @@ Below are some samples of DPA configurations for the mentioned platforms
           resourceTimeout: 2h
     ```
 
+=== "**Azure**"
+
+    ```yaml
+    ---
+    apiVersion: oadp.openshift.io/v1alpha1
+    kind: DataProtectionApplication
+    metadata:
+      name: dpa-instance
+      namespace: openshift-adp
+    spec:
+      backupLocations:
+        - name: default
+          velero:
+            provider: azure
+            default: true
+            objectStorage:
+              bucket: <blob_container_name>
+              prefix: hcp
+            config:
+              resourceGroup: <resource_group>
+              storageAccount: <storage_account_name>
+            credential:
+              key: cloud
+              name: cloud-credentials
+      configuration:
+        nodeAgent:
+          enable: true
+          uploaderType: kopia
+        velero:
+          defaultPlugins:
+            - openshift
+            - azure
+            - csi
+            - hypershift
+          resourceTimeout: 2h
+    ```
 
 Once you create any of these DPA objects, several pods will be instantiated in the `openshift-adp` namespace. This includes one `node-agent` per node in the Management Cluster and the `velero` deployment.
 
@@ -220,8 +225,8 @@ Once you create any of these DPA objects, several pods will be instantiated in t
 
     To follow backup and restore procedures, you can monitor the logs in the velero pod.
 
-
 ## Backup and Upload
+
 === "**AWS**"
     ### Data Plane workloads backup
 
@@ -723,6 +728,114 @@ Once you create any of these DPA objects, several pods will be instantiated in t
 
     The backup process is considered complete when the `status.phase` is `Completed`.
 
+=== "**Azure**"
+
+    ### Data Plane workloads backup
+
+    !!! Note
+
+        If the workloads in the Data Plane are not crucial for you, it's safe to skip this step.
+
+    If you need to backup the applications running under the HostedCluster, it's advisable to follow [the official documentation for backup and restore of OpenShift applications](https://docs.openshift.com/container-platform/latest/backup_and_restore/application_backup_and_restore/backing_up_and_restoring/backing-up-applications.html)
+
+    The steps are the following:
+
+    - Deploy the OADP operator from OLM.
+      - Create the DPA (Data Protection Application), with a manifest similar to the one provided earlier. It might be beneficial to adjust the `Prefix` or/and `Bucket` fields to keep the ControlPlane and DataPlane backups separated.
+      - Create the backup manifest. This step varies depending on the complexity of the workloads in the Data Plane. It's essential to thoroughly examine how to back up the PersistentVolumes, the backend used, and ensure compatibility with our storage provisioner.
+
+      We recommend checking if your workloads contain Persistent Volumes and if our StorageClass is compatible with CSI Volume Snapshots, which is one of the simplest ways to handle this aspect.
+
+    As a standard approach to maintain consistency in the backup layer for the Hosted Control Plane, we will utilize [`Kopia`](https://docs.openshift.com/container-platform/latest/backup_and_restore/application_backup_and_restore/backing_up_and_restoring/oadp-about-kopia.html) as the backend tool for data snapshots, along with [`File System Backup`](https://docs.openshift.com/container-platform/latest/backup_and_restore/application_backup_and_restore/backing_up_and_restoring/oadp-backing-up-applications-restic-doc.html). However, it's possible that your workloads may benefit from a different approach that better aligns with your specific use case.
+
+    !!! Important
+
+        The backup of the workloads residing in the Data Plane falls outside the scope of this documentation. Please refer to the official Openshift-ADP backup documentation for further details. Additional links and information can be found in the [References](#References) section.
+
+    Once we have completed the backup of the Data Plane layer, we can proceed with the backup of the Hosted Control Plane (HCP).
+
+
+    ### Control Plane backup
+
+    Now, we will apply the backup manifest. Here is how it looks like:
+
+    ```yaml
+    ---
+    apiVersion: velero.io/v1
+    kind: Backup
+    metadata:
+      name: hc-clusters-hosted-backup
+      namespace: openshift-adp
+      labels:
+        velero.io/storage-location: default
+        spec:
+      hooks: {}
+      includedNamespaces:
+      - clusters
+      - clusters-hosted
+      includedResources:
+      - sa
+      - role
+      - rolebinding
+      - pod
+      - pvc
+      - pv
+      - configmap
+      - priorityclasses
+      - pdb
+      - hostedcluster
+      - nodepool
+      - secrets
+      - services
+      - deployments
+      - statefulsets
+      - hostedcontrolplane
+      - cluster
+      - azureclusters
+      - azuremachinetemplates
+      - azuremachines
+      - machinedeployment
+      - machineset
+      - machine
+      - route
+      - clusterdeployment
+      excludedResources: []
+      storageLocation: default
+      ttl: 2h30m0s
+      snapshotMoveData: true
+      datamover: "velero"
+      defaultVolumesToFsBackup: false
+      snapshotVolumes: true
+    ```
+
+    We will emphasize the most important fields:
+
+    - These two fields enable the CSI VolumeSnapshots to be automatically uploaded to the remote cloud storage.
+
+    ```yaml
+    snapshotMoveData: true
+    datamover: "velero"
+    ```
+
+    - This field selects the namespaces from which objects will be backed up. They should include namespaces from both the HostedCluster (in the example `clusters`) and the HostedControlPlane (in the example `clusters-hosted`).
+
+    ```yaml
+    includedNamespaces:
+    - clusters
+    - clusters-hosted
+    ```
+
+    - The Azure-specific CAPI resources that must be included:
+
+    ```yaml
+    - azureclusters
+    - azuremachinetemplates
+    - azuremachines
+    ```
+
+    Once you apply the manifest, you can monitor the backup process in two places: the backup object status and the Velero logs. Please refer to the [Watching](#watching) section for more information.
+
+    The backup process is considered complete when the `status.phase` is `Completed`.
 
 ## Restore
 
@@ -780,7 +893,6 @@ The restoration process is considered complete once the `status.phase` is `Compl
 
     The restore may only be done on the same management cluster where the backup was created. Depending on the HostedCluster provider you are using, there are important topics to have in mind before the restoration.
 
-
 === "**AWS**"
 
     - Node readoption is not supported in this provider yet, so the worker nodes will be reprovisioned at restoration time
@@ -807,12 +919,17 @@ The restoration process is considered complete once the `status.phase` is `Compl
     - Restoration in a separated Management cluster is not supported by this provider
     - Node readoption is not supported in this provider yet, so the worker nodes will be reprovisioned at restoration time
 
+=== "**Azure**"
+
+    - Restoration on the same management cluster only (cross-cluster restore is not currently supported due to the lack of end-to-end testing coverage for that scenario)
+    - Node readoption is not supported in this provider yet, so the worker nodes will be reprovisioned at restoration time
+    - For etcd snapshot backup and restore details specific to self-managed Azure, see [Azure Platform Guide](platform-guides/azure.md)
 
 ## Schedule
 
 OADP provides the ability to schedule backups using the Schedule CR. This is fully compatible with the Hosted Control Planes backup procedure; just make sure you are following the official Red Hat documentation.
 
-- https://docs.redhat.com/en/documentation/openshift_container_platform/latest/html/backup_and_restore/oadp-application-backup-and-restore#oadp-scheduling-backups-doc
+- <https://docs.redhat.com/en/documentation/openshift_container_platform/latest/html/backup_and_restore/oadp-application-backup-and-restore#oadp-scheduling-backups-doc>
 
 ## Watching and Troubleshooting
 
@@ -894,66 +1011,6 @@ velero delete backup hc-clusters-hosted-backup
 
     If you modify the folder structure of the remote storage where your backups are hosted, you may encounter issues with `backuprepositories.velero.io`. In such cases, you will need to recreate all the associated objects, including DPAs, backups, restores, etc.
 
-
 ## HostedCluster Configuration Requirements
 
-The HostedCluster must be configured as `PublicAndPrivate`, `Private`, or `Public` with a fixed hostname for backup/restore operations to work correctly. If the HostedCluster is configured as `Public` without a hostname in the ServicePublishingStrategy for the kube-api-server, the restore operation will fail with the following consequences:
-
-- **Nodes remain in NotReady state**
-- **NodePool scaling fails to generate new nodes**
-
-### Root Cause
-
-The issue occurs because:
-
-- Nodes store the ELB (Elastic Load Balancer) address in their kubelet configuration, which is ephemeral and changes when the cluster is deleted and restored
-- The SAN (Subject Alternative Name) in the certificate fails because the certificate name no longer matches the new ELB
-- Original nodes cannot connect to the ControlPlane because they point to the old ELB, and even if they pointed to the new one, the certificate would be incorrect
-
-### Solution
-
-Ensure your HostedCluster is configured with either:
-
-- `PublicAndPrivate` service publishing strategy, OR
-- `Private` service publishing strategy, OR
-- `Public` service publishing strategy with a **hostname** specified for the kube-api-server
-
-### AWS Self-Managed Platform Requirements
-
-!!! important "AWS Self-Managed Platforms"
-
-    When using AWS platform with self-managed infrastructure, the `Public` endpoint access option with a **Route** service publishing strategy and a **fixed hostname** is required. This is a specific case of the `Public` with hostname option described above.
-
-    This ensures that:
-    - Node workloads can be properly migrated to new nodes in the restored NodePools
-    - Service continuity is maintained during the disaster recovery process
-    - DNS resolution remains consistent for applications
-
-### Example Configuration
-
-**Public endpoint access with Route hostname (required for AWS self-managed platforms)**
-```yaml
-spec:
-  platform:
-    aws:
-      endpointAccess: Public
-  services:
-  - service: APIServer
-    servicePublishingStrategy:
-      type: Route
-      route:
-        hostname: api.example.com
-```
-
-### Fixing OIDC After Restore
-
-After completing the OADP restore, if the control-plane-operator reports `WebIdentityErr` errors or NodePool nodes remain not-ready due to a missing default security group, run the OIDC disaster recovery command:
-
-```bash
-hypershift fix dr-oidc-iam \
-  --hc-name <cluster-name> \
-  --hc-namespace <namespace> \
-  --aws-creds ~/.aws/credentials
-```
-
-This re-uploads the OIDC discovery documents using the existing cluster signing key and recreates the IAM OIDC provider if needed. See the [AWS Disaster Recovery](../aws/disaster-recovery.md#fixing-oidc-identity-provider-after-oadp-restore) documentation for full details.
+For detailed information about HostedCluster service publishing strategy requirements, including example configurations and platform-specific considerations, see the [Disaster Recovery Prerequisites](prerequisites.md#hostedcluster-service-publishing-strategy-requirements) page.

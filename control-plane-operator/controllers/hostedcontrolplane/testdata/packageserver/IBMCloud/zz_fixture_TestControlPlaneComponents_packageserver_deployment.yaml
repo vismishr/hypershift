@@ -1,6 +1,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    hypershift.openshift.io/desired-state-hash: 8d9ffe3e76cd82a8b930e37d7b4d7d605a6e62209dae115ebc1bafc2a59c6d7d
   labels:
     hypershift.openshift.io/managed-by: control-plane-operator
   name: packageserver
@@ -88,6 +90,8 @@ spec:
         - /etc/openshift/kubeconfig/kubeconfig
         - --authorization-kubeconfig
         - /etc/openshift/kubeconfig/kubeconfig
+        - --tls-min-version=VersionTLS12
+        - --tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
         command:
         - /bin/package-server
         env:
@@ -221,6 +225,14 @@ spec:
         key: hypershift.openshift.io/cluster
         operator: Equal
         value: hcp-namespace
+      - effect: NoExecute
+        key: node.kubernetes.io/not-ready
+        operator: Exists
+        tolerationSeconds: 10
+      - effect: NoExecute
+        key: node.kubernetes.io/unreachable
+        operator: Exists
+        tolerationSeconds: 10
       volumes:
       - emptyDir: {}
         name: tmpfs

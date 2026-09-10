@@ -30,9 +30,25 @@ const PerformanceProfilePauseAnnotation = "performance.openshift.io/pause-reconc
 // network devices by including physical interfaces from netdev-rps rule.
 const PerformanceProfileEnablePhysicalRpsAnnotation = "performance.openshift.io/enable-physical-dev-rps"
 
-// PerformanceProfileEnableRpsAnnotation is an emergancy annotation
-// that ignores the removal of all RPS settings when realtime workload hint is explicitly set to false.
+// PerformanceProfileEnableRpsAnnotation enables RPS settings which are now disabled by default.
+// Valid values: "true", "enable" (to enable), "false", "disable" (to disable).
 const PerformanceProfileEnableRpsAnnotation = "performance.openshift.io/enable-rps"
+
+const (
+	// PerformanceProfileExecCPUAffinityAnnotation manages the exec-cpu-affinity setting for the node.
+	// Performance profile sets this flag's value to "first" by default in the runtime handler configuration.
+	// Valid values:
+	// "disable": will disable performance profile's default setting of this feature in CRI-O's configuration file.
+	//  Other values are ignored and treated as to keep the default value set by performance-profile.
+	// remove in 4.23
+	PerformanceProfileExecCPUAffinityAnnotation = "performance.openshift.io/exec-cpu-affinity"
+	PerformanceProfileExecCPUAffinityDisable    = "disable"
+)
+
+// PerformanceProfileDRAResourceManagementAnnotation signal the operator to disable KubeletConfig
+// topology managers (CPU Manager, Memory Manager) configurations
+// that conflict with the DRA feature, and enforce the disablement as long as the annotation is present.
+const PerformanceProfileDRAResourceManagementAnnotation = "performance.openshift.io/dra-resource-management"
 
 // PerformanceProfileSpec defines the desired state of PerformanceProfile.
 type PerformanceProfileSpec struct {

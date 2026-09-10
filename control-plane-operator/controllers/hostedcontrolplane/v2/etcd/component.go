@@ -32,6 +32,7 @@ func (e *etcd) NeedsManagementKASAccess() bool {
 
 func NewComponent() component.ControlPlaneComponent {
 	return component.NewStatefulSetComponent(ComponentName, &etcd{}).
+		WithTemplateData(etcdTemplateData(ComponentName)).
 		WithAdaptFunction(adaptStatefulSet).
 		WithPredicate(isManagedETCD).
 		WithManifestAdapter(
@@ -52,6 +53,19 @@ func NewComponent() component.ControlPlaneComponent {
 		).
 		WithManifestAdapter(
 			"defrag-serviceaccount.yaml",
+			component.WithPredicate(defragControllerPredicate),
+		).
+		WithManifestAdapter(
+			"etcd-serviceaccount.yaml",
+		).
+		WithManifestAdapter(
+			"etcd-self-register-role.yaml",
+		).
+		WithManifestAdapter(
+			"etcd-self-register-rolebinding.yaml",
+		).
+		WithManifestAdapter(
+			"etcd-self-register-rolebinding-defrag.yaml",
 			component.WithPredicate(defragControllerPredicate),
 		).
 		Build()

@@ -30,7 +30,7 @@ var (
 
 type fakeIgnitionProvider struct{}
 
-func (p *fakeIgnitionProvider) GetPayload(ctx context.Context, releaseImage, config, pullSecretHash, additionalTrustBundleHash, hcConfigurationHash string) (payload []byte, err error) {
+func (p *fakeIgnitionProvider) GetPayload(ctx context.Context, releaseImage, config, pullSecretHash, additionalTrustBundleHash, hcConfigurationHash, osStream, cloudConfigHash string) (payload []byte, err error) {
 	return []byte(fakePayload), nil
 }
 
@@ -266,7 +266,7 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "When the nodepool upgrade strategy is replace, the token secret should not contain the machine payload",
+			name: "When the nodepool upgrade strategy is replace, it should not contain the machine payload in the token secret",
 			secret: &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test",
@@ -327,13 +327,13 @@ func TestGetTokenIDTimeLived(t *testing.T) {
 		expectedError    bool
 	}{
 		{
-			name:             "when there's no annotation it should return nil",
+			name:             "When there is no annotation it should return nil",
 			annotations:      map[string]string{},
 			expectedDuration: nil,
 			expectedError:    false,
 		},
 		{
-			name: "when the annotation has empty value it should error",
+			name: "When the annotation has empty value it should error",
 			annotations: map[string]string{
 				TokenSecretTokenGenerationTime: "",
 			},
@@ -341,7 +341,7 @@ func TestGetTokenIDTimeLived(t *testing.T) {
 			expectedError:    true,
 		},
 		{
-			name: "when the annotation has no wrong format it should error",
+			name: "When the annotation has wrong format it should error",
 			annotations: map[string]string{
 				TokenSecretTokenGenerationTime: "wrong format",
 			},
@@ -349,7 +349,7 @@ func TestGetTokenIDTimeLived(t *testing.T) {
 			expectedError:    true,
 		},
 		{
-			name: "when the annotation has a valid format it should return a duration",
+			name: "When the annotation has a valid format it should return a duration",
 			annotations: map[string]string{
 				TokenSecretTokenGenerationTime: lastUpdated,
 			},
@@ -382,17 +382,17 @@ func TestTokenIDNeedRotation(t *testing.T) {
 		needRotation bool
 	}{
 		{
-			name:         "when the time lived is >= ttl it should return true",
+			name:         "When the time lived is >= ttl it should return true",
 			timeLived:    &timeLivedHalfTTL,
 			needRotation: true,
 		},
 		{
-			name:         "when the time lived is nil it should return true",
+			name:         "When the time lived is nil it should return true",
 			timeLived:    nil,
 			needRotation: true,
 		},
 		{
-			name:         "when the time lived is < ttl it should return true",
+			name:         "When the time lived is less than ttl it should return false",
 			timeLived:    &timeLivedLessThanTTL,
 			needRotation: false,
 		},
@@ -460,26 +460,26 @@ func TestIsTokenExpired(t *testing.T) {
 		expectedIsExpired bool
 	}{
 		{
-			name:              "when there's no token expiration timestamp annotation it should return that it is not expired (false)",
+			name:              "When there is no token expiration timestamp annotation it should return that it is not expired",
 			annotations:       map[string]string{},
 			expectedIsExpired: false,
 		},
 		{
-			name: "when the token expiration timestamp is in the past it should return that it is expired (true)",
+			name: "When the token expiration timestamp is in the past it should return that it is expired",
 			annotations: map[string]string{
 				hyperv1.IgnitionServerTokenExpirationTimestampAnnotation: time.Now().Add(-4 * time.Hour).Format(time.RFC3339),
 			},
 			expectedIsExpired: true,
 		},
 		{
-			name: "when the token expiration timestamp is in the future it should return that it is not expired (false)",
+			name: "When the token expiration timestamp is in the future it should return that it is not expired",
 			annotations: map[string]string{
 				hyperv1.IgnitionServerTokenExpirationTimestampAnnotation: time.Now().Add(4 * time.Hour).Format(time.RFC3339),
 			},
 			expectedIsExpired: false,
 		},
 		{
-			name: "when the token expiration timestamp has an invalid value it should return that it is expired (true)",
+			name: "When the token expiration timestamp has an invalid value it should return that it is expired",
 			annotations: map[string]string{
 				hyperv1.IgnitionServerTokenExpirationTimestampAnnotation: "badvalue",
 			},
@@ -511,7 +511,7 @@ func TestProcessedExpiredToken(t *testing.T) {
 		expectedEntriesToBeRemoved map[string][]byte
 	}{
 		{
-			name: "when a token secret exists and the cache is populated then the secret is deleted and the token entries removed from cache",
+			name: "When a token secret exists and the cache is populated it should delete the secret and remove the token entries from cache",
 			inputEntries: map[string][]byte{
 				fakeCurrentTokenVal: fakeTokenContent,
 				fakeOldTokenVal:     fakeTokenContent,
@@ -533,7 +533,7 @@ func TestProcessedExpiredToken(t *testing.T) {
 			},
 		},
 		{
-			name: "when a token secret exists with only one token and the cache is populated then the secret is deleted and the token entries removed from cache",
+			name: "When a token secret exists with only one token and the cache is populated it should delete the secret and remove the token entries from cache",
 			inputEntries: map[string][]byte{
 				fakeCurrentTokenVal: fakeTokenContent,
 			},
@@ -552,7 +552,7 @@ func TestProcessedExpiredToken(t *testing.T) {
 			},
 		},
 		{
-			name: "when a token secret exists and an independent secrets entry is also in the cache then only the processed tokens are removed",
+			name: "When a token secret exists and an independent secrets entry is also in the cache it should only remove the processed tokens",
 			inputEntries: map[string][]byte{
 				fakeCurrentTokenVal:     fakeTokenContent,
 				fakeIndependentTokenVal: fakeTokenContent,
@@ -619,7 +619,7 @@ func TestHasSameReasonAndMessage(t *testing.T) {
 		expected bool
 	}{
 		{
-			name: "Reason and message match",
+			name: "When reason and message match, it should return true",
 			secret: &corev1.Secret{
 				Data: map[string][]byte{
 					TokenSecretReasonKey:  []byte("reason1"),
@@ -631,7 +631,7 @@ func TestHasSameReasonAndMessage(t *testing.T) {
 			expected: true,
 		},
 		{
-			name: "Reason does not match",
+			name: "When reason does not match, it should return false",
 			secret: &corev1.Secret{
 				Data: map[string][]byte{
 					TokenSecretReasonKey:  []byte("reason1"),
@@ -643,7 +643,7 @@ func TestHasSameReasonAndMessage(t *testing.T) {
 			expected: false,
 		},
 		{
-			name: "Message does not match",
+			name: "When message does not match, it should return false",
 			secret: &corev1.Secret{
 				Data: map[string][]byte{
 					TokenSecretReasonKey:  []byte("reason1"),
@@ -655,7 +655,7 @@ func TestHasSameReasonAndMessage(t *testing.T) {
 			expected: false,
 		},
 		{
-			name: "Both reason and message do not match",
+			name: "When both reason and message do not match, it should return false",
 			secret: &corev1.Secret{
 				Data: map[string][]byte{
 					TokenSecretReasonKey:  []byte("reason1"),
@@ -667,7 +667,7 @@ func TestHasSameReasonAndMessage(t *testing.T) {
 			expected: false,
 		},
 		{
-			name: "Reason and message are empty",
+			name: "When reason and message are empty, it should return true",
 			secret: &corev1.Secret{
 				Data: map[string][]byte{
 					TokenSecretReasonKey:  []byte(""),
@@ -687,4 +687,299 @@ func TestHasSameReasonAndMessage(t *testing.T) {
 			g.Expect(result).To(Equal(tc.expected))
 		})
 	}
+}
+
+// osStreamCapturingProvider captures the osStream parameter passed to GetPayload.
+type osStreamCapturingProvider struct {
+	capturedOSStream string
+}
+
+func (p *osStreamCapturingProvider) GetPayload(_ context.Context, _, _, _, _, _, osStream, _ string) ([]byte, error) {
+	p.capturedOSStream = osStream
+	return []byte(fakePayload), nil
+}
+
+func TestReconcileOSStreamPropagation(t *testing.T) {
+	t.Parallel()
+	compressedConfig, err := util.CompressAndEncode([]byte("compressedConfig"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testCases := []struct {
+		name               string
+		osStream           string
+		includeOSStreamKey bool
+		expectedOSStream   string
+	}{
+		{
+			name:               "When os-stream is set to rhel-10 it should pass rhel-10 to GetPayload",
+			osStream:           "rhel-10",
+			includeOSStreamKey: true,
+			expectedOSStream:   "rhel-10",
+		},
+		{
+			name:               "When os-stream is set to rhel-9 it should pass rhel-9 to GetPayload",
+			osStream:           "rhel-9",
+			includeOSStreamKey: true,
+			expectedOSStream:   "rhel-9",
+		},
+		{
+			name:               "When os-stream is empty it should pass empty string to GetPayload",
+			osStream:           "",
+			includeOSStreamKey: true,
+			expectedOSStream:   "",
+		},
+		{
+			name:               "When os-stream key is absent it should pass empty string to GetPayload",
+			includeOSStreamKey: false,
+			expectedOSStream:   "",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := NewWithT(t)
+			provider := &osStreamCapturingProvider{}
+			data := map[string][]byte{
+				TokenSecretTokenKey:                     []byte(uuid.New().String()),
+				TokenSecretReleaseKey:                   []byte("release"),
+				TokenSecretConfigKey:                    compressedConfig.Bytes(),
+				TokenSecretPullSecretHashKey:            []byte("pull-hash"),
+				TokenSecretHCConfigurationHashKey:       []byte("hc-hash"),
+				TokenSecretAdditionalTrustBundleHashKey: []byte("bundle-hash"),
+			}
+			if tc.includeOSStreamKey {
+				data[TokenSecretOSStreamKey] = []byte(tc.osStream)
+			}
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "test",
+					Annotations: map[string]string{
+						TokenSecretAnnotation: "true",
+					},
+					CreationTimestamp: metav1.Now(),
+				},
+				Data: data,
+			}
+			r := TokenSecretReconciler{
+				Client:           fake.NewClientBuilder().WithObjects(secret).Build(),
+				IgnitionProvider: provider,
+				PayloadStore:     NewPayloadStore(),
+			}
+			_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(secret)})
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(provider.capturedOSStream).To(Equal(tc.expectedOSStream))
+		})
+	}
+}
+
+func TestCacheInvalidationOnCloudConfigHashChange(t *testing.T) {
+	compressedConfig, err := util.CompressAndEncode([]byte("compressedConfig"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compressedConfigBytes := compressedConfig.Bytes()
+
+	tokenID := uuid.New().String()
+	secretName := "test"
+
+	tests := []struct {
+		name               string
+		cachedHash         string
+		secretHash         string
+		expectRegeneration bool
+	}{
+		{
+			name:               "When cloud config hash matches cached value, it should return cached payload",
+			cachedHash:         "abc123",
+			secretHash:         "abc123",
+			expectRegeneration: false,
+		},
+		{
+			name:               "When cloud config hash differs from cached value, it should regenerate payload",
+			cachedHash:         "old-hash",
+			secretHash:         "new-hash",
+			expectRegeneration: true,
+		},
+		{
+			name:               "When cloud config hash changes from non-empty to empty, it should regenerate payload",
+			cachedHash:         "some-hash",
+			secretHash:         "",
+			expectRegeneration: true,
+		},
+		{
+			name:               "When cloud config hash changes from empty to non-empty, it should regenerate payload",
+			cachedHash:         "",
+			secretHash:         "new-hash",
+			expectRegeneration: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      secretName,
+					Namespace: "test",
+					Annotations: map[string]string{
+						TokenSecretAnnotation:          "true",
+						TokenSecretTokenGenerationTime: time.Now().Format(time.RFC3339Nano),
+					},
+					CreationTimestamp: metav1.Now(),
+				},
+				Data: map[string][]byte{
+					TokenSecretTokenKey:           []byte(tokenID),
+					TokenSecretReleaseKey:         []byte("release"),
+					TokenSecretConfigKey:          compressedConfigBytes,
+					TokenSecretCloudConfigHashKey: []byte(tt.secretHash),
+				},
+			}
+
+			callCount := 0
+			provider := &countingIgnitionProvider{count: &callCount}
+
+			r := TokenSecretReconciler{
+				Client:           fake.NewClientBuilder().WithObjects(secret).Build(),
+				IgnitionProvider: provider,
+				PayloadStore:     NewPayloadStore(),
+			}
+
+			r.PayloadStore.Set(tokenID, CacheValue{
+				Payload:         []byte("old-payload"),
+				SecretName:      secretName,
+				CloudConfigHash: tt.cachedHash,
+			})
+
+			_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(secret)})
+			g.Expect(err).ToNot(HaveOccurred())
+
+			if tt.expectRegeneration {
+				g.Expect(callCount).To(Equal(1), "expected GetPayload to be called for regeneration")
+				value, found := r.PayloadStore.Get(tokenID)
+				g.Expect(found).To(BeTrue())
+				g.Expect(value.CloudConfigHash).To(Equal(tt.secretHash))
+			} else {
+				g.Expect(callCount).To(Equal(0), "expected cached payload to be returned without calling GetPayload")
+			}
+		})
+	}
+}
+
+func TestOldTokenFallbackWithCloudConfigHashMismatch(t *testing.T) {
+	g := NewWithT(t)
+
+	compressedConfig, err := util.CompressAndEncode([]byte("config"))
+	g.Expect(err).ToNot(HaveOccurred())
+	compressedConfigBytes := compressedConfig.Bytes()
+
+	currentToken := "current-token"
+	oldToken := "old-token"
+	secretName := "test"
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: "test",
+			Annotations: map[string]string{
+				TokenSecretAnnotation:          "true",
+				TokenSecretTokenGenerationTime: time.Now().Format(time.RFC3339Nano),
+			},
+			CreationTimestamp: metav1.Now(),
+		},
+		Data: map[string][]byte{
+			TokenSecretTokenKey:           []byte(currentToken),
+			TokenSecretOldTokenKey:        []byte(oldToken),
+			TokenSecretReleaseKey:         []byte("release"),
+			TokenSecretConfigKey:          compressedConfigBytes,
+			TokenSecretCloudConfigHashKey: []byte("new-hash"),
+		},
+	}
+
+	callCount := 0
+	provider := &countingIgnitionProvider{count: &callCount}
+
+	r := TokenSecretReconciler{
+		Client:           fake.NewClientBuilder().WithObjects(secret).Build(),
+		IgnitionProvider: provider,
+		PayloadStore:     NewPayloadStore(),
+	}
+
+	r.PayloadStore.Set(oldToken, CacheValue{
+		Payload:         []byte("old-payload"),
+		SecretName:      secretName,
+		CloudConfigHash: "old-hash",
+	})
+
+	_, err = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(secret)})
+	g.Expect(err).ToNot(HaveOccurred())
+
+	g.Expect(callCount).To(Equal(1), "expected GetPayload to be called when old token hash mismatches")
+
+	value, found := r.PayloadStore.Get(currentToken)
+	g.Expect(found).To(BeTrue())
+	g.Expect(value.CloudConfigHash).To(Equal("new-hash"))
+
+	oldValue, found := r.PayloadStore.Get(oldToken)
+	g.Expect(found).To(BeTrue(), "old token should be re-cached with new payload after regeneration")
+	g.Expect(oldValue.CloudConfigHash).To(Equal("new-hash"), "old token cache should have updated hash")
+}
+
+type countingIgnitionProvider struct {
+	count *int
+}
+
+func (p *countingIgnitionProvider) GetPayload(_ context.Context, _, _, _, _, _, _, _ string) ([]byte, error) {
+	*p.count++
+	return []byte("regenerated-payload"), nil
+}
+
+type errorIgnitionProvider struct {
+	err error
+}
+
+func (p *errorIgnitionProvider) GetPayload(_ context.Context, _, _, _, _, _, _, _ string) ([]byte, error) {
+	return nil, p.err
+}
+
+func TestCloudConfigPendingReasonOnHashMismatch(t *testing.T) {
+	g := NewWithT(t)
+
+	compressedConfig, err := util.CompressAndEncode([]byte("config"))
+	g.Expect(err).ToNot(HaveOccurred())
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test",
+			Namespace: "test",
+			Annotations: map[string]string{
+				TokenSecretAnnotation:          "true",
+				TokenSecretTokenGenerationTime: time.Now().Format(time.RFC3339Nano),
+			},
+			CreationTimestamp: metav1.Now(),
+		},
+		Data: map[string][]byte{
+			TokenSecretTokenKey:           []byte("token"),
+			TokenSecretReleaseKey:         []byte("release"),
+			TokenSecretConfigKey:          compressedConfig.Bytes(),
+			TokenSecretCloudConfigHashKey: []byte("expected-hash"),
+		},
+	}
+
+	r := TokenSecretReconciler{
+		Client:           fake.NewClientBuilder().WithObjects(secret).Build(),
+		IgnitionProvider: &errorIgnitionProvider{err: fmt.Errorf("cloud config ns/name hash mismatch (expected a, got b), waiting for update")},
+		PayloadStore:     NewPayloadStore(),
+	}
+
+	_, err = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(secret)})
+	g.Expect(err).To(HaveOccurred())
+
+	updated := &corev1.Secret{}
+	g.Expect(r.Client.Get(t.Context(), client.ObjectKeyFromObject(secret), updated)).To(Succeed())
+	g.Expect(string(updated.Data[TokenSecretReasonKey])).To(Equal(CloudConfigPendingReason))
 }

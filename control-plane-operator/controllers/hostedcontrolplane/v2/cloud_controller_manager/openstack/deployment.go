@@ -2,8 +2,9 @@ package openstack
 
 import (
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
+	"github.com/openshift/hypershift/support/config"
 	component "github.com/openshift/hypershift/support/controlplane-component"
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/podspec"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -20,6 +21,7 @@ const (
 )
 
 func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Deployment) error {
+	hcp := cpContext.HCP
 	credentialsSecret, err := getCredentialsSecret(cpContext)
 	if err != nil {
 		return err
@@ -30,11 +32,19 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 		deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, buildTrustedCAVolume())
 	}
 
-	util.UpdateContainer(containerName, deployment.Spec.Template.Spec.Containers, func(c *corev1.Container) {
+	tlsArgs, err := config.TLSArgs(hcp.Spec.Configuration.GetTLSSecurityProfile())
+	if err != nil {
+		return err
+	}
+
+	podspec.UpdateContainer(containerName, deployment.Spec.Template.Spec.Containers, func(c *corev1.Container) {
 		c.Env = append(c.Env, corev1.EnvVar{
 			Name:  "OCP_INFRASTRUCTURE_NAME",
 			Value: cpContext.HCP.Spec.InfraID,
 		})
+		if len(tlsArgs) > 0 {
+			c.Args = append(c.Args, tlsArgs...)
+		}
 
 		if hasCACert {
 			c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
@@ -45,7 +55,7 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 		}
 	})
 
-	util.UpdateVolume(secretOCCMVolumeName, deployment.Spec.Template.Spec.Volumes, func(v *corev1.Volume) {
+	podspec.UpdateVolume(secretOCCMVolumeName, deployment.Spec.Template.Spec.Volumes, func(v *corev1.Volume) {
 		v.Secret.SecretName = credentialsSecret.Name
 	})
 	return nil

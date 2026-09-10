@@ -4,12 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
+	coreerrors "errors"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	cpomanifests "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
 	"github.com/openshift/hypershift/support/api"
 	"github.com/openshift/hypershift/support/backwardcompat"
 	"github.com/openshift/hypershift/support/capabilities"
@@ -23,6 +26,7 @@ import (
 	"github.com/openshift/api/operator/v1alpha1"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	serializer "k8s.io/apimachinery/pkg/runtime/serializer/json"
@@ -30,6 +34,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/yaml"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/blang/semver"
 )
 
 // ConfigGenerator knows how to:
@@ -41,6 +47,11 @@ type ConfigGenerator struct {
 	hostedCluster         *hyperv1.HostedCluster
 	nodePool              *hyperv1.NodePool
 	controlplaneNamespace string
+	// resolvedRHELStreamForBootImage is the RHEL stream name used for boot
+	// image resolution via StreamForName.
+	// This field is intentionally outside rolloutConfig because it does not
+	// participate in the config hash that drives rollouts.
+	resolvedRHELStreamForBootImage string
 	*rolloutConfig
 }
 
@@ -59,10 +70,20 @@ type rolloutConfig struct {
 	// TODO(alberto): consider let haproxyRawConfig be an implementation detail of ConfigGenerator.
 	// For now, it's a required input to keep the haproxy business logic and files outside the scope of this initial refactor.
 	haproxyRawConfig string
+	// rhelStream is the OS image stream name used for hash computation.
+	// It is set from spec.osImageStream.Name but normalized: if the explicit
+	// value matches the version-derived default it is kept empty so that
+	// setting the default stream does not change the hash.
+	// Only a non-default stream (e.g. "rhel-9" on a ≥5.0 release) produces
+	// a non-empty value here and triggers a rollout.
+	//
+	// See also ConfigGenerator.resolvedRHELStreamForBootImage, which controls
+	// boot image resolution and is intentionally separate from the hash.
+	rhelStream string
 }
 
 // NewConfigGenerator is the contract to create a new ConfigGenerator.
-func NewConfigGenerator(ctx context.Context, client client.Client, hostedCluster *hyperv1.HostedCluster, nodePool *hyperv1.NodePool, releaseImage *releaseinfo.ReleaseImage, haproxyRawConfig string, controlPlaneNamespace string) (*ConfigGenerator, error) {
+func NewConfigGenerator(ctx context.Context, client client.Client, hostedCluster *hyperv1.HostedCluster, nodePool *hyperv1.NodePool, releaseImage *releaseinfo.ReleaseImage, haproxyRawConfig string, controlPlaneNamespace string, resolvedRHELStream string) (*ConfigGenerator, error) {
 	if client == nil {
 		return nil, fmt.Errorf("client can't be nil")
 	}
@@ -71,21 +92,46 @@ func NewConfigGenerator(ctx context.Context, client client.Client, hostedCluster
 		return nil, fmt.Errorf("release image can't be nil")
 	}
 
-	globalConfig, err := globalConfigString(hostedCluster)
+	globalConfig, err := globalConfigString(hostedCluster, releaseImage)
 	if err != nil {
 		return nil, err
 	}
 
+	// Normalize rhelStream for the config hash: when the resolved stream
+	// matches the version-derived default, keep it empty so that setting the
+	// default explicitly does not change the hash and trigger a spurious rollout.
+	rhelStream := nodePool.Spec.OSImageStream.Name
+	if rhelStream != "" {
+		var version semver.Version
+		version, err = semver.Parse(releaseImage.Version())
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse release image version %q: %w", releaseImage.Version(), err)
+		}
+		usesRunc, err := usesRuncRuntime(ctx, client, nodePool)
+		if err != nil {
+			return nil, fmt.Errorf("failed to detect container runtime: %w", err)
+		}
+		defaultStream, err := GetRHELStream("", version, usesRunc)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve default RHEL stream: %w", err)
+		}
+		if rhelStream == defaultStream {
+			rhelStream = ""
+		}
+	}
+
 	cg := &ConfigGenerator{
-		Client:                client,
-		hostedCluster:         hostedCluster,
-		nodePool:              nodePool,
-		controlplaneNamespace: controlPlaneNamespace,
+		Client:                         client,
+		hostedCluster:                  hostedCluster,
+		nodePool:                       nodePool,
+		controlplaneNamespace:          controlPlaneNamespace,
+		resolvedRHELStreamForBootImage: resolvedRHELStream,
 		rolloutConfig: &rolloutConfig{
 			releaseImage:     releaseImage,
 			pullSecretName:   hostedCluster.Spec.PullSecret.Name,
 			globalConfig:     globalConfig,
 			haproxyRawConfig: haproxyRawConfig,
+			rhelStream:       rhelStream,
 		},
 	}
 
@@ -117,7 +163,7 @@ func (cg *ConfigGenerator) CompressedAndEncoded() (*bytes.Buffer, error) {
 // TODO(alberto): hash the struct directly instead of the string representation field by field.
 // This is kept like this for now to contain the scope of the refactor and avoid backward compatibility issues.
 func (cg *ConfigGenerator) Hash() string {
-	return supportutil.HashSimple(cg.mcoRawConfig + cg.releaseImage.Version() + cg.pullSecretName + cg.additionalTrustBundleName + cg.globalConfig)
+	return supportutil.HashSimple(cg.mcoRawConfig + cg.releaseImage.Version() + cg.pullSecretName + cg.additionalTrustBundleName + cg.globalConfig + cg.rhelStream)
 }
 
 // HashWithOutVersion is like Hash but doesn't compute the release version.
@@ -125,7 +171,7 @@ func (cg *ConfigGenerator) Hash() string {
 // TODO(alberto): This was left inconsistent in https://github.com/openshift/hypershift/pull/3795/files. It should also contain cg.globalConfig.
 // This is kept like this for now to contain the scope of the refactor and avoid backward compatibility issues.
 func (cg *ConfigGenerator) HashWithoutVersion() string {
-	return supportutil.HashSimple(cg.mcoRawConfig + cg.pullSecretName + cg.additionalTrustBundleName)
+	return supportutil.HashSimple(cg.mcoRawConfig + cg.pullSecretName + cg.additionalTrustBundleName + cg.rhelStream)
 }
 
 func (cg *ConfigGenerator) Version() string {
@@ -238,7 +284,7 @@ func (cg *ConfigGenerator) parse(configs []corev1.ConfigMap) (string, error) {
 		yamlReader := yaml.NewYAMLReader(bufio.NewReader(strings.NewReader(cmPayload)))
 		for {
 			manifestRaw, err := yamlReader.Read()
-			if err != nil && err != io.EOF {
+			if err != nil && !coreerrors.Is(err, io.EOF) {
 				errors = append(errors, fmt.Errorf("configmap %q contains invalid yaml: %w", config.Name, err))
 				continue
 			}
@@ -250,7 +296,7 @@ func (cg *ConfigGenerator) parse(configs []corev1.ConfigMap) (string, error) {
 				}
 				allConfigPlainText = append(allConfigPlainText, string(manifest))
 			}
-			if err == io.EOF {
+			if coreerrors.Is(err, io.EOF) {
 				break
 			}
 		}
@@ -270,6 +316,8 @@ func (cg *ConfigGenerator) defaultAndValidateConfigManifest(manifest []byte) ([]
 	_ = v1alpha1.Install(scheme)
 	_ = configv1.Install(scheme)
 	_ = configv1alpha1.Install(scheme)
+
+	manifest = backwardcompat.NormalizeV1Alpha1ClusterImagePolicy(manifest)
 
 	yamlSerializer := serializer.NewSerializerWithOptions(
 		serializer.DefaultMetaFactory, scheme, scheme,
@@ -293,7 +341,7 @@ func (cg *ConfigGenerator) defaultAndValidateConfigManifest(manifest []byte) ([]
 		}
 	case *v1alpha1.ImageContentSourcePolicy:
 	case *configv1.ImageDigestMirrorSet:
-	case *configv1alpha1.ClusterImagePolicy:
+	case *configv1.ClusterImagePolicy:
 	case *mcfgv1.KubeletConfig:
 		obj.Spec.MachineConfigPoolSelector = &metav1.LabelSelector{
 			MatchLabels: map[string]string{
@@ -320,7 +368,7 @@ func (cg *ConfigGenerator) defaultAndValidateConfigManifest(manifest []byte) ([]
 	return manifest, err
 }
 
-func globalConfigString(hcluster *hyperv1.HostedCluster) (string, error) {
+func globalConfigString(hcluster *hyperv1.HostedCluster, releaseImage *releaseinfo.ReleaseImage) (string, error) {
 	// 1. - Reconcile conditions according to current state of the world.
 	proxy := globalconfig.ProxyConfig()
 	globalconfig.ReconcileProxyConfigWithStatusFromHostedCluster(proxy, hcluster)
@@ -346,8 +394,70 @@ func globalConfigString(hcluster *hyperv1.HostedCluster) (string, error) {
 	}
 	globalConfigBytes.Write(imageBytes)
 
+	if err := conditionallyAddToGlobalConfigString(globalConfigBytes, hcluster, releaseImage); err != nil {
+		return "", fmt.Errorf("failed to encode apiserver global config: %w", err)
+	}
+
 	rawConfig := globalConfigBytes.String()
 
 	// Some fields in the ClusterConfiguration have changes that are not backwards compatible with older versions of the CPO.
 	return backwardcompat.GetBackwardCompatibleConfigString(rawConfig), nil
+}
+
+// conditionallyAddToGlobalConfigString exists so we can add things to the
+// global config string based on the release image version. Every time this
+// global config changes the node pool controller trigger a node pool
+// rollout, this allows us a more fine grained control over the process.
+func conditionallyAddToGlobalConfigString(
+	globalConfigBytes *bytes.Buffer,
+	hcluster *hyperv1.HostedCluster,
+	releaseImage *releaseinfo.ReleaseImage,
+) error {
+	version, err := semver.Parse(releaseImage.Version())
+	if err != nil {
+		return fmt.Errorf("failed to parse release image version: %w", err)
+	}
+	version.Pre = nil
+
+	// Starting on v4.23.0 we support TLS Profile configuration.
+	// Only TLSSecurityProfile affects worker node configuration; other
+	// APIServer fields are control-plane-only and must not be included
+	// in the hash to avoid unnecessary NodePool rollouts.
+	if version.GTE(semver.MustParse("4.23.0")) {
+		var tlsProfile *configv1.TLSSecurityProfile
+		if hcluster.Spec.Configuration != nil && hcluster.Spec.Configuration.APIServer != nil {
+			tlsProfile = hcluster.Spec.Configuration.APIServer.TLSSecurityProfile
+		}
+		tlsBytes, err := json.Marshal(tlsProfile)
+		if err != nil {
+			return fmt.Errorf("failed to encode TLS security profile: %w", err)
+		}
+		globalConfigBytes.Write(tlsBytes)
+		globalConfigBytes.WriteByte('\n')
+	}
+
+	return nil
+}
+
+// GetCloudConfigHash returns a hash of the platform-specific cloud config ConfigMap content.
+// For platforms without a cloud config ConfigMap (e.g. AWS), it returns an empty string.
+func (cg *ConfigGenerator) GetCloudConfigHash(ctx context.Context) (string, error) {
+	var cm *corev1.ConfigMap
+	switch cg.hostedCluster.Spec.Platform.Type {
+	case hyperv1.AzurePlatform:
+		cm = cpomanifests.AzureProviderConfig(cg.controlplaneNamespace)
+	case hyperv1.OpenStackPlatform:
+		cm = cpomanifests.OpenStackProviderConfig(cg.controlplaneNamespace)
+	default:
+		return "", nil
+	}
+
+	if err := cg.Get(ctx, client.ObjectKeyFromObject(cm), cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to get cloud config ConfigMap %s/%s: %w", cm.Namespace, cm.Name, err)
+	}
+
+	return supportutil.HashConfigMapData(cm.Data), nil
 }

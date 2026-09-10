@@ -2,16 +2,22 @@ package globalconfig
 
 import (
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/cloud/openstack"
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/netutil"
 
 	configv1 "github.com/openshift/api/config/v1"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+func httpsURL(host string, port int32) string {
+	return fmt.Sprintf("https://%s", net.JoinHostPort(host, strconv.Itoa(int(port))))
+}
 
 func InfrastructureConfig() *configv1.Infrastructure {
 	infra := &configv1.Infrastructure{
@@ -30,14 +36,14 @@ func ReconcileInfrastructure(infra *configv1.Infrastructure, hcp *hyperv1.Hosted
 	apiServerPort := hcp.Status.ControlPlaneEndpoint.Port
 
 	infra.Spec.PlatformSpec.Type = configv1.PlatformType(platformType)
-	infra.Status.APIServerInternalURL = fmt.Sprintf("https://%s:%d", apiServerAddress, apiServerPort)
-	if util.IsPrivateHCP(hcp) {
-		infra.Status.APIServerInternalURL = fmt.Sprintf("https://api.%s.hypershift.local:%d", hcp.Name, apiServerPort)
+	infra.Status.APIServerInternalURL = httpsURL(apiServerAddress, apiServerPort)
+	if netutil.IsPrivateHCP(hcp) {
+		infra.Status.APIServerInternalURL = httpsURL(fmt.Sprintf("api.%s.hypershift.local", hcp.Name), apiServerPort)
 	}
 
-	infra.Status.APIServerURL = fmt.Sprintf("https://%s:%d", apiServerAddress, apiServerPort)
+	infra.Status.APIServerURL = httpsURL(apiServerAddress, apiServerPort)
 	if len(hcp.Spec.KubeAPIServerDNSName) > 0 {
-		infra.Status.APIServerURL = fmt.Sprintf("https://%s:%d", hcp.Spec.KubeAPIServerDNSName, apiServerPort)
+		infra.Status.APIServerURL = httpsURL(hcp.Spec.KubeAPIServerDNSName, apiServerPort)
 	}
 	infra.Status.EtcdDiscoveryDomain = BaseDomain(hcp)
 	infra.Status.InfrastructureName = hcp.Spec.InfraID

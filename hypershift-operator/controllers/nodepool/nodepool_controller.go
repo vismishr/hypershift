@@ -2,6 +2,7 @@ package nodepool
 
 import (
 	"context"
+	coreerrors "errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -13,12 +14,15 @@ import (
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests"
 	haproxy "github.com/openshift/hypershift/hypershift-operator/controllers/nodepool/apiserver-haproxy"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/nodepool/instancetype"
+	azureinstancetype "github.com/openshift/hypershift/hypershift-operator/controllers/nodepool/instancetype/azure"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/nodepool/kubevirt"
-	"github.com/openshift/hypershift/hypershift-operator/controllers/sharedingress"
+	"github.com/openshift/hypershift/hypershift-operator/featuregate"
 	kvinfra "github.com/openshift/hypershift/kubevirtexternalinfra"
 	"github.com/openshift/hypershift/support/awsapi"
 	"github.com/openshift/hypershift/support/capabilities"
 	"github.com/openshift/hypershift/support/images"
+	"github.com/openshift/hypershift/support/k8sutil"
+	"github.com/openshift/hypershift/support/netutil"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	"github.com/openshift/hypershift/support/supportedversion"
 	"github.com/openshift/hypershift/support/upsert"
@@ -34,11 +38,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/utils/ptr"
 
 	capiaws "sigs.k8s.io/cluster-api-provider-aws/v2/api/v1beta2"
 	capiazure "sigs.k8s.io/cluster-api-provider-azure/api/v1beta1"
 	capiopenstackv1beta1 "sigs.k8s.io/cluster-api-provider-openstack/api/v1beta1"
-	capiv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/patch"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -47,6 +52,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/blang/semver"
@@ -71,7 +77,12 @@ const (
 
 	nodePoolAnnotationPlatformMachineTemplate = "hypershift.openshift.io/nodePoolPlatformMachineTemplate"
 	nodePoolAnnotationTaints                  = "hypershift.openshift.io/nodePoolTaints"
-	nodePoolCoreIgnitionConfigLabel           = "hypershift.openshift.io/core-ignition-config"
+	// nodePoolAnnotationCanonicalDataPlaneImages gates the use of canonical
+	// (pre-override) image references for data plane static pods. Set automatically
+	// on new NodePools and during version upgrades to avoid triggering rollouts on
+	// existing stable NodePools.
+	nodePoolAnnotationCanonicalDataPlaneImages = "hypershift.openshift.io/canonical-data-plane-images"
+	nodePoolCoreIgnitionConfigLabel            = "hypershift.openshift.io/core-ignition-config"
 
 	tuningConfigKey                                      = "tuning"
 	tunedConfigMapLabel                                  = "hypershift.openshift.io/tuned-config"
@@ -99,6 +110,8 @@ type NodePoolReconciler struct {
 	KubevirtInfraClients    kvinfra.KubevirtInfraClientMap
 	EC2Client               awsapi.EC2API
 	InstanceTypeProvider    instancetype.Provider
+	ScaleFromZeroPlatform   hyperv1.PlatformType
+	resolveDNSHostname      func(context.Context, string) error
 }
 
 type NotReadyError struct {
@@ -110,12 +123,10 @@ type CPOCapabilities struct {
 	CreateDefaultAWSSecurityGroup bool
 }
 
-var (
-	// when using the conditions.SetSummary, with the WithStepCounter or WithStepCounterIf(true) options,
-	// the result Ready condition message is something like "1 of 2 completed". If we want to use this kind
-	// of messages for our own condition message, this is not useful. This regexp finds these condition messages
-	isSetupCounterCondMessage = regexp.MustCompile(`\d+ of \d+ completed`)
-)
+// when using the conditions.SetSummary, with the WithStepCounter or WithStepCounterIf(true) options,
+// the result Ready condition message is something like "1 of 2 completed". If we want to use this kind
+// of messages for our own condition message, this is not useful. This regexp finds these condition messages
+var isSetupCounterCondMessage = regexp.MustCompile(`\d+ of \d+ completed`)
 
 var capiRelatedNodePoolManagedResourcesToWatch = []client.Object{
 	&capiaws.AWSMachineTemplate{},
@@ -131,10 +142,15 @@ func (r *NodePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&hyperv1.HostedCluster{}, handler.EnqueueRequestsFromMapFunc(r.enqueueNodePoolsForHostedCluster), builder.WithPredicates(supportutil.PredicatesForHostedClusterAnnotationScoping(mgr.GetClient()))).
 		Watches(&capiv1.MachineDeployment{}, handler.EnqueueRequestsFromMapFunc(enqueueParentNodePool), builder.WithPredicates(supportutil.PredicatesForHostedClusterAnnotationScoping(mgr.GetClient()))).
 		Watches(&capiv1.MachineSet{}, handler.EnqueueRequestsFromMapFunc(enqueueParentNodePool), builder.WithPredicates(supportutil.PredicatesForHostedClusterAnnotationScoping(mgr.GetClient()))).
+		Watches(&capiv1.MachineHealthCheck{}, handler.EnqueueRequestsFromMapFunc(enqueueParentNodePool), builder.WithPredicates(predicate.And(mhcRemediationAllowedChangedPredicate(), supportutil.PredicatesForHostedClusterAnnotationScoping(mgr.GetClient())))).
 		// We want to reconcile when the user data Secret or the token Secret is unexpectedly changed out of band.
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(enqueueParentNodePool), builder.WithPredicates(supportutil.PredicatesForHostedClusterAnnotationScoping(mgr.GetClient()))).
 		// We want to reconcile when the ConfigMaps referenced by the spec.config and also the core ones change.
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.enqueueNodePoolsForConfig), builder.WithPredicates(supportutil.PredicatesForHostedClusterAnnotationScoping(mgr.GetClient()))).
+		// We want to reconcile when cloud provider config ConfigMaps change in the control plane namespace.
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.enqueueNodePoolsForCloudConfig), builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+			return obj.GetName() == "azure-cloud-config" || obj.GetName() == "openstack-cloud-config"
+		}))).
 		WithOptions(controller.Options{
 			RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](1*time.Second, 10*time.Second),
 			MaxConcurrentReconciles: 10,
@@ -169,7 +185,7 @@ func (r *NodePoolReconciler) managedResources() []client.Object {
 
 	if platformsInstalled := os.Getenv("PLATFORMS_INSTALLED"); len(platformsInstalled) > 0 {
 		// Watch based on platforms installed
-		managedResources = append(managedResources, supportutil.GetNodePoolManagedResources(platformsInstalled)...)
+		managedResources = append(managedResources, k8sutil.GetNodePoolManagedResources(platformsInstalled)...)
 	} else {
 		// Watch all CAPI platform related resources
 		managedResources = append(managedResources, capiRelatedNodePoolManagedResourcesToWatch...)
@@ -180,7 +196,6 @@ func (r *NodePoolReconciler) managedResources() []client.Object {
 
 func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
-	log.Info("Reconciling")
 
 	// Fetch the nodePool instance
 	nodePool := &hyperv1.NodePool{}
@@ -253,6 +268,7 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	return result, nil
 }
 
+//nolint:gocyclo
 func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.HostedCluster, nodePool *hyperv1.NodePool) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
 
@@ -272,6 +288,21 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 	// Get HostedCluster deps.
 	controlPlaneNamespace := manifests.HostedControlPlaneNamespace(hcluster.Namespace, hcluster.Name)
 	infraID := hcluster.Spec.InfraID
+
+	// Fetch machines once for all status aggregations that need them.
+	machines, err := r.getMachinesForNodePool(ctx, nodePool)
+	if err != nil {
+		log.Error(err, "Failed to get Machines for status aggregation")
+	} else {
+		// Aggregate node version and health information into NodesInfo status.
+		// This is done before the conditions loop so that nodesInfo stays accurate
+		// even when later validations (e.g. release image) short-circuit the reconcile.
+		r.setNodesInfoStatus(nodePool, machines)
+
+		// Infer the observed RHEL stream from Machine NodeInfo.OSImage and set
+		// status.osImageStream when a majority of machines report a consistent stream.
+		r.setOSImageStreamStatus(nodePool, machines)
+	}
 
 	// Loop over all conditions.
 	// Order matter as conditions might choose to short circuit returning ctrl.Result or error.
@@ -319,7 +350,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 		return ctrl.Result{}, nil
 	}
 	// Retrieve pull secret name to check for changes when config is checked for updates
-	_, err := r.getPullSecretName(ctx, hcluster)
+	_, err = r.getPullSecretName(ctx, hcluster)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -336,7 +367,19 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 		return ctrl.Result{}, fmt.Errorf("failed to look up release image metadata: %w", err)
 	}
 
-	if err := r.setPlatformConditions(ctx, hcluster, nodePool, controlPlaneNamespace, releaseImage); err != nil {
+	osStreamsEnabled := featuregate.Gate().Enabled(featuregate.OSStreams)
+	resolvedRHELStream, err := GetRHELStreamForBootImage(ctx, r.Client, nodePool, releaseImage, osStreamsEnabled)
+	if err != nil {
+		SetStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
+			Type:               hyperv1.NodePoolValidPlatformImageType,
+			Status:             corev1.ConditionFalse,
+			Reason:             hyperv1.NodePoolValidationFailedReason,
+			Message:            fmt.Sprintf("Couldn't resolve RHEL stream for release image: %s", err.Error()),
+			ObservedGeneration: nodePool.Generation,
+		})
+		return ctrl.Result{}, fmt.Errorf("failed to resolve RHEL stream for boot image: %w", err)
+	}
+	if err := r.setPlatformConditions(ctx, hcluster, nodePool, controlPlaneNamespace, releaseImage, resolvedRHELStream); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -349,7 +392,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to generate HAProxy raw config: %w", err)
 	}
-	configGenerator, err := NewConfigGenerator(ctx, r.Client, hcluster, nodePool, releaseImage, haproxyRawConfig, controlPlaneNamespace)
+	configGenerator, err := NewConfigGenerator(ctx, r.Client, hcluster, nodePool, releaseImage, haproxyRawConfig, controlPlaneNamespace, resolvedRHELStream)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to generate config: %w", err)
 	}
@@ -375,6 +418,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	capi.scaleFromZeroPlatform = r.ScaleFromZeroPlatform
 	if isPaused, duration := supportutil.IsReconciliationPaused(log, nodePool.Spec.PausedUntil); isPaused {
 		if err := capi.Pause(ctx); err != nil {
 			return ctrl.Result{}, fmt.Errorf("error pausing CAPI: %w", err)
@@ -406,7 +450,8 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 	}
 
 	if err := capi.Reconcile(ctx); err != nil {
-		if _, isNotReady := err.(*NotReadyError); isNotReady {
+		var notReadyErr *NotReadyError
+		if coreerrors.As(err, &notReadyErr) {
 			log.Info("Waiting to create machine template", "message", err.Error())
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
@@ -415,19 +460,22 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 
 	// Set scale-from-zero annotations if provider is configured and platform is supported
 	// This works for both Replace (MachineDeployment) and InPlace (MachineSet) upgrade types
-	if isAutoscalingEnabled(nodePool) && r.InstanceTypeProvider != nil && supportedScaleFromZeroPlatform(nodePool.Spec.Platform.Type) {
+	if isAutoscalingEnabled(nodePool) && r.InstanceTypeProvider != nil && r.ScaleFromZeroPlatform == nodePool.Spec.Platform.Type {
 		if err = r.reconcileScaleFromZeroAnnotations(ctx, nodePool, capi); err != nil {
+			// Distinguish permanent errors (VM size doesn't exist in this region)
+			// from transient errors (API failure, cache load error) to avoid
+			// retrying indefinitely for non-existent VM sizes.
+			var vmNotFound *azureinstancetype.VMSizeNotFoundError
+			if coreerrors.As(err, &vmNotFound) {
+				log.Error(err, "Permanent error setting scale-from-zero annotations; verify the VM size exists in this region")
+				return ctrl.Result{}, nil
+			}
 			log.Error(err, "Failed to set scale-from-zero annotations, will retry")
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 	}
 
 	return ctrl.Result{}, nil
-}
-
-// supportedScaleFromZeroPlatform checks if the platform supports scale-from-zero functionality.
-func supportedScaleFromZeroPlatform(platform hyperv1.PlatformType) bool {
-	return platform == hyperv1.AWSPlatform
 }
 
 func (r *NodePoolReconciler) token(ctx context.Context, hcluster *hyperv1.HostedCluster, nodePool *hyperv1.NodePool) (*Token, error) {
@@ -442,7 +490,12 @@ func (r *NodePoolReconciler) token(ctx context.Context, hcluster *hyperv1.Hosted
 		return nil, fmt.Errorf("failed to generate HAProxy raw config: %w", err)
 	}
 	controlPlaneNamespace := manifests.HostedControlPlaneNamespace(hcluster.Namespace, hcluster.Name)
-	configGenerator, err := NewConfigGenerator(ctx, r.Client, hcluster, nodePool, releaseImage, haproxyRawConfig, controlPlaneNamespace)
+	osStreamsEnabled := featuregate.Gate().Enabled(featuregate.OSStreams)
+	resolvedRHELStream, err := GetRHELStreamForBootImage(ctx, r.Client, nodePool, releaseImage, osStreamsEnabled)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve RHEL stream for boot image: %w", err)
+	}
+	configGenerator, err := NewConfigGenerator(ctx, r.Client, hcluster, nodePool, releaseImage, haproxyRawConfig, controlPlaneNamespace, resolvedRHELStream)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate config: %w", err)
 	}
@@ -537,6 +590,9 @@ func (r *NodePoolReconciler) delete(ctx context.Context, nodePool *hyperv1.NodeP
 	}
 
 	// Delete any ConfigMap belonging to this NodePool i.e. TunedConfig ConfigMaps.
+	// NOTE: HCCO's reconcileKubeletConfig infers NodePool liveness from the
+	// presence of CMs in this namespace. This cleanup must complete before
+	// the finalizer is removed.
 	err = r.DeleteAllOf(ctx, &corev1.ConfigMap{},
 		client.InNamespace(controlPlaneNamespace),
 		client.MatchingLabels{nodePoolAnnotation: nodePool.GetName()},
@@ -662,12 +718,13 @@ func (r *NodePoolReconciler) getReleaseImage(ctx context.Context, hostedCluster 
 		return nil, err
 	}
 
-	var currentVersionParsed semver.Version
+	var currentVersionParsed *semver.Version
 	if currentVersion != "" {
-		currentVersionParsed, err = semver.Parse(currentVersion)
+		parsed, err := semver.Parse(currentVersion)
 		if err != nil {
 			return nil, err
 		}
+		currentVersionParsed = &parsed
 	}
 
 	minSupportedVersion := supportedversion.GetMinSupportedVersion(hostedCluster)
@@ -677,7 +734,7 @@ func (r *NodePoolReconciler) getReleaseImage(ctx context.Context, hostedCluster 
 		return nil, err
 	}
 
-	return ReleaseImage, supportedversion.IsValidReleaseVersion(&wantedVersion, &currentVersionParsed, hostedClusterVersion, &minSupportedVersion, hostedCluster.Spec.Networking.NetworkType, hostedCluster.Spec.Platform.Type)
+	return ReleaseImage, supportedversion.IsValidReleaseVersion(&wantedVersion, currentVersionParsed, hostedClusterVersion, &minSupportedVersion, hostedCluster.Spec.Networking.NetworkType, hostedCluster.Spec.Platform.Type)
 }
 
 func (r *NodePoolReconciler) getHostedClusterVersion(ctx context.Context, hostedCluster *hyperv1.HostedCluster, pullSecretBytes []byte) (*semver.Version, error) {
@@ -724,16 +781,24 @@ func isAutoscalingEnabled(nodePool *hyperv1.NodePool) bool {
 	return nodePool.Spec.AutoScaling != nil
 }
 
-func defaultNodePoolAMI(region string, specifiedArch string, releaseImage *releaseinfo.ReleaseImage) (string, error) {
-	if releaseImage.StreamMetadata == nil {
-		return "", fmt.Errorf("release image stream metadata is nil")
+// defaultNodePoolAMI resolves the default AWS AMI for a NodePool from release image stream metadata.
+func defaultNodePoolAMI(region string, specifiedArch string, rhelStream string, releaseImage *releaseinfo.ReleaseImage) (string, error) {
+	if releaseImage == nil {
+		return "", fmt.Errorf("release image is nil")
 	}
-	arch, foundArch := releaseImage.StreamMetadata.Architectures[hyperv1.ArchAliases[specifiedArch]]
+	streamMeta, err := releaseImage.StreamForName(rhelStream)
+	if err != nil {
+		return "", fmt.Errorf("couldn't resolve stream metadata: %w", err)
+	}
+	arch, foundArch := streamMeta.Architectures[hyperv1.ArchAliases[specifiedArch]]
 	if !foundArch {
 		return "", fmt.Errorf("couldn't find OS metadata for architecture %q", specifiedArch)
 	}
 
-	regionData, hasRegionData := arch.Images.AWS.Regions[region]
+	if arch.Images.Aws == nil {
+		return "", fmt.Errorf("release image metadata has no AWS images")
+	}
+	regionData, hasRegionData := arch.Images.Aws.Regions[region]
 	if !hasRegionData {
 		return "", fmt.Errorf("couldn't find AWS image for region %q", region)
 	}
@@ -744,33 +809,62 @@ func defaultNodePoolAMI(region string, specifiedArch string, releaseImage *relea
 }
 
 // defaultNodePoolGCPImage returns the default GCP image for a given architecture from release metadata.
-func defaultNodePoolGCPImage(specifiedArch string, releaseImage *releaseinfo.ReleaseImage) (string, error) {
+func defaultNodePoolGCPImage(specifiedArch string, releaseImage *releaseinfo.ReleaseImage, rhelStream string) (string, error) {
 	if releaseImage == nil {
 		return "", fmt.Errorf("release image is nil, cannot determine GCP image")
 	}
-	if releaseImage.StreamMetadata == nil {
-		return "", fmt.Errorf("release image stream metadata is nil, cannot determine GCP image for architecture %q", specifiedArch)
+	streamMeta, err := releaseImage.StreamForName(rhelStream)
+	if err != nil {
+		return "", fmt.Errorf("couldn't resolve stream metadata: %w", err)
 	}
 
-	arch, foundArch := releaseImage.StreamMetadata.Architectures[hyperv1.ArchAliases[specifiedArch]]
+	arch, foundArch := streamMeta.Architectures[hyperv1.ArchAliases[specifiedArch]]
 	if !foundArch {
 		return "", fmt.Errorf("couldn't find OS metadata for architecture %q", specifiedArch)
 	}
 
-	if len(arch.Images.GCP.Project) == 0 || len(arch.Images.GCP.Name) == 0 {
+	if arch.Images.Gcp == nil || len(arch.Images.Gcp.Project) == 0 || len(arch.Images.Gcp.Name) == 0 {
 		return "", fmt.Errorf("release image metadata has no GCP image for architecture %q", specifiedArch)
 	}
-	return fmt.Sprintf("projects/%s/global/images/%s", arch.Images.GCP.Project, arch.Images.GCP.Name), nil
+	return fmt.Sprintf("projects/%s/global/images/%s", arch.Images.Gcp.Project, arch.Images.Gcp.Name), nil
 }
 
 // MachineDeploymentComplete considers a MachineDeployment to be complete once all of its desired replicas
 // are updated and available, and no old machines are running.
+//
+// In CAPI v1.11+, the controller writes status natively in v1beta2 and the v1beta1 status
+// fields come from conversion. The converted v1beta1 fields (especially UpdatedReplicas,
+// which maps from deprecated.v1beta1.updatedReplicas rather than the native upToDateReplicas)
+// can transiently disagree with the v1beta2 native fields. To guard against this, when the
+// v1beta1 fields indicate completion we cross-check against the v1beta2 status stored in the
+// Status.V1Beta2 field, which is kept current on every status-subresource write.
 func MachineDeploymentComplete(deployment *capiv1.MachineDeployment) bool {
 	newStatus := &deployment.Status
-	return newStatus.UpdatedReplicas == *(deployment.Spec.Replicas) &&
+	v1beta1Complete := newStatus.UpdatedReplicas == *(deployment.Spec.Replicas) &&
 		newStatus.Replicas == *(deployment.Spec.Replicas) &&
 		newStatus.AvailableReplicas == *(deployment.Spec.Replicas) &&
 		newStatus.ObservedGeneration >= deployment.Generation
+	if !v1beta1Complete {
+		return false
+	}
+	return machineDeploymentCompleteFromV1Beta2Status(deployment)
+}
+
+// machineDeploymentCompleteFromV1Beta2Status verifies that the native v1beta2 status fields
+// also indicate completion. The v1beta1 Status.V1Beta2 field is populated by the v1beta2-to-v1beta1
+// conversion on every status-subresource write, so it is always current.
+// If V1Beta2 is nil (e.g. CAPI < v1.11), returns true to preserve backwards compatibility.
+func machineDeploymentCompleteFromV1Beta2Status(deployment *capiv1.MachineDeployment) bool {
+	v1beta2 := deployment.Status.V1Beta2
+	if v1beta2 == nil {
+		return true
+	}
+	if v1beta2.UpToDateReplicas == nil || v1beta2.AvailableReplicas == nil {
+		return false
+	}
+	desired := ptr.Deref(deployment.Spec.Replicas, 0)
+	return *v1beta2.UpToDateReplicas == desired &&
+		*v1beta2.AvailableReplicas == desired
 }
 
 // GetHostedClusterByName finds and return a HostedCluster object using the specified params.
@@ -890,6 +984,33 @@ func (r *NodePoolReconciler) enqueueNodePoolsForConfig(ctx context.Context, obj 
 	return result
 }
 
+func (r *NodePoolReconciler) enqueueNodePoolsForCloudConfig(ctx context.Context, obj client.Object) []reconcile.Request {
+	hcpList := &hyperv1.HostedControlPlaneList{}
+	if err := r.List(ctx, hcpList, client.InNamespace(obj.GetNamespace())); err != nil || len(hcpList.Items) == 0 {
+		return nil
+	}
+	hcName, ok := hcpList.Items[0].Annotations[k8sutil.HostedClusterAnnotation]
+	if !ok {
+		return nil
+	}
+	hc := supportutil.ParseNamespacedName(hcName)
+
+	nodePoolList := &hyperv1.NodePoolList{}
+	if err := r.List(ctx, nodePoolList, client.InNamespace(hc.Namespace)); err != nil {
+		return nil
+	}
+
+	var result []reconcile.Request
+	for i := range nodePoolList.Items {
+		if nodePoolList.Items[i].Spec.ClusterName == hc.Name {
+			result = append(result, reconcile.Request{
+				NamespacedName: client.ObjectKeyFromObject(&nodePoolList.Items[i]),
+			})
+		}
+	}
+	return result
+}
+
 // getNodePoolNamespace returns the namespaced name of a NodePool, given the NodePools name
 // and the control plane namespace name for the hosted cluster that this NodePool is a part of.
 func (r *NodePoolReconciler) getNodePoolNamespacedName(nodePoolName string, controlPlaneNamespace string) (types.NamespacedName, error) {
@@ -899,7 +1020,7 @@ func (r *NodePoolReconciler) getNodePoolNamespacedName(nodePoolName string, cont
 	}); err != nil || len(hcpList.Items) < 1 {
 		return types.NamespacedName{Name: nodePoolName}, err
 	}
-	hostedCluster, ok := hcpList.Items[0].Annotations[supportutil.HostedClusterAnnotation]
+	hostedCluster, ok := hcpList.Items[0].Annotations[k8sutil.HostedClusterAnnotation]
 	if !ok {
 		return types.NamespacedName{Name: nodePoolName}, fmt.Errorf("failed to get Hosted Cluster name for HostedControlPlane %s", hcpList.Items[0].Name)
 	}
@@ -945,6 +1066,7 @@ func (r *NodePoolReconciler) listSecrets(ctx context.Context, nodePool *hyperv1.
 	}
 	return filtered, nil
 }
+
 func isAutomatedMachineManagement(nodePool *hyperv1.NodePool) bool {
 	return !(isIBMUPI(nodePool) || isPlatformNone(nodePool))
 }
@@ -1028,30 +1150,50 @@ func (r *NodePoolReconciler) getAdditionalTrustBundle(ctx context.Context, hoste
 
 // resolveHAProxyImage determines which HAProxy image to use based on priority:
 // 1. NodePool annotation (highest priority)
-// 2. Environment variable override (when shared ingress enabled)
-// 3. Hardcoded default (when shared ingress enabled)
-// 4. Release payload (default)
-func resolveHAProxyImage(nodePool *hyperv1.NodePool, releaseImage *releaseinfo.ReleaseImage) (string, error) {
-	// Check NodePool annotation first (highest priority)
+// 2. Shared ingress image (when cluster uses shared ingress for public endpoints)
+// 3. Release payload (default)
+//
+// When useCanonicalImages is true and the image comes from the release payload,
+// canonical (pre-override) component images are used. The HAProxy image is
+// embedded in a static pod manifest that runs on data plane nodes, where CRI-O
+// handles mirroring natively via IDMS/ICSP — so the canonical (non-overridden)
+// image reference must be used.
+func resolveHAProxyImage(nodePool *hyperv1.NodePool, hcluster *hyperv1.HostedCluster, releaseImage *releaseinfo.ReleaseImage, useCanonicalImages bool) (string, error) {
 	if annotationImage := strings.TrimSpace(nodePool.Annotations[hyperv1.NodePoolHAProxyImageAnnotation]); annotationImage != "" {
 		return annotationImage, nil
 	}
 
-	// Check if shared ingress is enabled
-	if sharedingress.UseSharedIngress() {
+	if netutil.UseSharedIngressHC(hcluster) {
 		return images.GetSharedIngressHAProxyImage(), nil
 	}
 
-	// Fall back to release payload image
-	haProxyImage, ok := releaseImage.ComponentImages()[haproxy.HAProxyRouterImageName]
+	componentImages := releaseImage.ComponentImages()
+	if useCanonicalImages {
+		componentImages = releaseImage.CanonicalComponentImages()
+	}
+
+	haProxyImage, ok := componentImages[haproxy.HAProxyRouterImageName]
 	if !ok {
 		return "", fmt.Errorf("release image doesn't have a %s image", haproxy.HAProxyRouterImageName)
 	}
+
 	return haProxyImage, nil
 }
 
 func (r *NodePoolReconciler) generateHAProxyRawConfig(ctx context.Context, nodePool *hyperv1.NodePool, hcluster *hyperv1.HostedCluster, releaseImage *releaseinfo.ReleaseImage) (string, error) {
-	haProxyImage, err := resolveHAProxyImage(nodePool, releaseImage)
+	useCanonicalImages := nodePool.Annotations[nodePoolAnnotationCanonicalDataPlaneImages] == "true"
+	if !useCanonicalImages {
+		isNewOrUpgrading := nodePool.Status.Version == "" || nodePool.Status.Version != releaseImage.Version()
+		if isNewOrUpgrading {
+			useCanonicalImages = true
+			if nodePool.Annotations == nil {
+				nodePool.Annotations = make(map[string]string)
+			}
+			nodePool.Annotations[nodePoolAnnotationCanonicalDataPlaneImages] = "true"
+		}
+	}
+
+	haProxyImage, err := resolveHAProxyImage(nodePool, hcluster, releaseImage, useCanonicalImages)
 	if err != nil {
 		return "", err
 	}
@@ -1087,8 +1229,13 @@ func sortedByCreationTimestamp(machines []*capiv1.Machine) []*capiv1.Machine {
 
 const (
 	endOfMessage                         = "... too many similar errors\n"
+	endOfGlobalMessage                   = "... message truncated\n"
+	endOfReasons                         = ",ReasonsTruncated"
 	maxMessageLength                     = 1000
+	maxGlobalMessageLength               = 3000
+	maxReasonLength                      = 1024 // +kubebuilder:validation:MaxLength on NodePoolCondition.Reason
 	aggregatorMachineStateReady          = "ready"
+	aggregatorMachineStateHealthy        = "healthy"
 	aggregatorMachineStateLiveMigratable = "live migratable"
 )
 
@@ -1109,10 +1256,46 @@ func aggregateMachineReasonsAndMessages(messageMap map[string][]string, numMachi
 	sort.Strings(reasons)
 
 	for _, reason := range reasons {
-		msgBuilder.WriteString(aggregateMachineMessages(messageMap[reason]))
+		// Sort messages within each reason bucket to ensure deterministic output
+		// regardless of Kubernetes list order, avoiding unnecessary status updates.
+		sort.Strings(messageMap[reason])
+		reasonBlock := aggregateMachineMessages(messageMap[reason])
+		if msgBuilder.Len()+len(reasonBlock)+len(endOfGlobalMessage) > maxGlobalMessageLength {
+			msgBuilder.WriteString(endOfGlobalMessage)
+			break
+		}
+		msgBuilder.WriteString(reasonBlock)
 	}
 
-	return strings.Join(reasons, ","), msgBuilder.String()
+	return truncateReasons(reasons), msgBuilder.String()
+}
+
+// truncateReasons joins reasons with commas and truncates the result to fit
+// within the NodePoolCondition.Reason MaxLength=1024 validation limit.
+// When truncation occurs, the suffix ",ReasonsTruncated" is appended.
+func truncateReasons(reasons []string) string {
+	joined := strings.Join(reasons, ",")
+	if len(joined) <= maxReasonLength {
+		return joined
+	}
+
+	// Build the truncated reason string by adding reasons one at a time,
+	// reserving space for the endOfReasons suffix.
+	builder := strings.Builder{}
+	for i, reason := range reasons {
+		separator := ""
+		if i > 0 {
+			separator = ","
+		}
+		if builder.Len()+len(separator)+len(reason)+len(endOfReasons) > maxReasonLength {
+			builder.WriteString(endOfReasons)
+			break
+		}
+		builder.WriteString(separator)
+		builder.WriteString(reason)
+	}
+
+	return builder.String()
 }
 
 func aggregateMachineMessages(msgs []string) string {
@@ -1139,7 +1322,7 @@ func deleteConfigByLabel(ctx context.Context, c client.Client, lbl map[string]st
 	}
 	for i := range cmList.Items {
 		cm := &cmList.Items[i]
-		if _, err := supportutil.DeleteIfNeeded(ctx, c, cm); err != nil {
+		if _, err := k8sutil.DeleteIfNeeded(ctx, c, cm); err != nil {
 			return err
 		}
 	}
@@ -1163,16 +1346,15 @@ func (r *NodePoolReconciler) reconcileScaleFromZeroAnnotations(ctx context.Conte
 		}
 		machineTemplate = awsMachineTemplate
 
-	// Future platform support can be added here:
-	// case hyperv1.AzurePlatform:
-	//     azureTemplate := &capiazure.AzureMachineTemplate{}
-	//     if err := capi.getExistingMachineTemplate(ctx, azureTemplate); err != nil {
-	//         if apierrors.IsNotFound(err) {
-	//             return nil
-	//         }
-	//         return fmt.Errorf("failed to get AzureMachineTemplate: %w", err)
-	//     }
-	//     machineTemplate = azureTemplate
+	case hyperv1.AzurePlatform:
+		azureTemplate := &capiazure.AzureMachineTemplate{}
+		if err := capi.getExistingMachineTemplate(ctx, azureTemplate); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to get AzureMachineTemplate: %w", err)
+		}
+		machineTemplate = azureTemplate
 
 	default:
 		return fmt.Errorf("unsupported platform for scale-from-zero: %s", nodePool.Spec.Platform.Type)

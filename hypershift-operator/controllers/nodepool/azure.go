@@ -14,6 +14,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	capiazure "sigs.k8s.io/cluster-api-provider-azure/api/v1beta1"
+	capzutil "sigs.k8s.io/cluster-api-provider-azure/util/azure"
 
 	"github.com/blang/semver"
 )
@@ -36,7 +37,7 @@ type azureMarketplaceImageInfo struct {
 
 // defaultAzureNodePoolImage applies Azure Marketplace image defaults for OCP >= 4.20
 // when Type is AzureMarketplace and azureMarketplace data is not provided and marketplace metadata is available in the release payload.
-func defaultAzureNodePoolImage(nodePool *hyperv1.NodePool, releaseImage *releaseinfo.ReleaseImage) error {
+func defaultAzureNodePoolImage(nodePool *hyperv1.NodePool, releaseImage *releaseinfo.ReleaseImage, streamName string) error {
 	// Skip if ImageID is explicitly set
 	if nodePool.Spec.Platform.Azure.Image.ImageID != nil {
 		return nil
@@ -81,7 +82,7 @@ func defaultAzureNodePoolImage(nodePool *hyperv1.NodePool, releaseImage *release
 	}
 
 	// Extract marketplace metadata from release payload
-	azureMarketplace, err := getAzureMarketplaceMetadata(releaseImage, streamArch)
+	azureMarketplace, err := getAzureMarketplaceMetadata(releaseImage, streamArch, streamName)
 	if err != nil {
 		return fmt.Errorf("failed to get Azure Marketplace metadata: %w", err)
 	}
@@ -119,13 +120,18 @@ func defaultAzureNodePoolImage(nodePool *hyperv1.NodePool, releaseImage *release
 	return nil
 }
 
-// getAzureMarketplaceMetadata extracts Azure Marketplace metadata from the release payload
-func getAzureMarketplaceMetadata(releaseImage *releaseinfo.ReleaseImage, arch string) (*azureMarketplaceMetadata, error) {
-	if releaseImage.StreamMetadata == nil {
-		return nil, nil // No stream metadata available
+// getAzureMarketplaceMetadata extracts Azure Marketplace metadata from the release payload.
+// Note: unlike the pre-streamName code this returns an error (rather than nil, nil)
+// when no stream metadata is available at all. The version guard in
+// defaultAzureNodePoolImage (< 4.20 returns early) protects older payloads;
+// for 4.20+ a missing StreamMetadata indicates a broken release image.
+func getAzureMarketplaceMetadata(releaseImage *releaseinfo.ReleaseImage, arch string, streamName string) (*azureMarketplaceMetadata, error) {
+	streamMeta, err := releaseImage.StreamForName(streamName)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't resolve stream metadata for stream %q: %w", streamName, err)
 	}
 
-	archData, foundArch := releaseImage.StreamMetadata.Architectures[arch]
+	archData, foundArch := streamMeta.Architectures[arch]
 	if !foundArch {
 		return nil, fmt.Errorf("architecture %s not found in stream metadata", arch)
 	}
@@ -133,33 +139,39 @@ func getAzureMarketplaceMetadata(releaseImage *releaseinfo.ReleaseImage, arch st
 	// Extract marketplace metadata from the RHCOS extensions
 	// Structure: .architectures.<arch>.rhel-coreos-extensions.marketplace.azure.no-purchase-plan
 	// Check for nil safety before accessing nested fields
-	if archData.RHCOS.Marketplace.Azure.NoPurchasePlan.HyperVGen1 == nil &&
-		archData.RHCOS.Marketplace.Azure.NoPurchasePlan.HyperVGen2 == nil {
+	if archData.RHELCoreOSExtensions == nil ||
+		archData.RHELCoreOSExtensions.Marketplace == nil ||
+		archData.RHELCoreOSExtensions.Marketplace.Azure == nil ||
+		archData.RHELCoreOSExtensions.Marketplace.Azure.NoPurchasePlan == nil {
 		return nil, nil // No marketplace data available
 	}
-	azureMarketplace := archData.RHCOS.Marketplace.Azure.NoPurchasePlan
+
+	azureMarketplace := archData.RHELCoreOSExtensions.Marketplace.Azure.NoPurchasePlan
+	if azureMarketplace.Gen1 == nil && azureMarketplace.Gen2 == nil {
+		return nil, nil // No marketplace data available
+	}
 
 	// Convert from release info format to our internal format
 	result := &azureMarketplaceMetadata{
 		NoPurchasePlan: &azureMarketplaceImageInfo{},
 	}
 
-	if azureMarketplace.HyperVGen1 != nil {
+	if azureMarketplace.Gen1 != nil {
 		result.NoPurchasePlan.HyperVGen1 = &hyperv1.AzureMarketplaceImage{
-			Publisher:       azureMarketplace.HyperVGen1.Publisher,
-			Offer:           azureMarketplace.HyperVGen1.Offer,
-			SKU:             azureMarketplace.HyperVGen1.SKU,
-			Version:         azureMarketplace.HyperVGen1.Version,
+			Publisher:       azureMarketplace.Gen1.Publisher,
+			Offer:           azureMarketplace.Gen1.Offer,
+			SKU:             azureMarketplace.Gen1.SKU,
+			Version:         azureMarketplace.Gen1.Version,
 			ImageGeneration: ptr.To(hyperv1.Gen1),
 		}
 	}
 
-	if azureMarketplace.HyperVGen2 != nil {
+	if azureMarketplace.Gen2 != nil {
 		result.NoPurchasePlan.HyperVGen2 = &hyperv1.AzureMarketplaceImage{
-			Publisher:       azureMarketplace.HyperVGen2.Publisher,
-			Offer:           azureMarketplace.HyperVGen2.Offer,
-			SKU:             azureMarketplace.HyperVGen2.SKU,
-			Version:         azureMarketplace.HyperVGen2.Version,
+			Publisher:       azureMarketplace.Gen2.Publisher,
+			Offer:           azureMarketplace.Gen2.Offer,
+			SKU:             azureMarketplace.Gen2.SKU,
+			Version:         azureMarketplace.Gen2.Version,
 			ImageGeneration: ptr.To(hyperv1.Gen2),
 		}
 	}
@@ -167,7 +179,7 @@ func getAzureMarketplaceMetadata(releaseImage *releaseinfo.ReleaseImage, arch st
 	return result, nil
 }
 
-func azureMachineTemplateSpec(nodePool *hyperv1.NodePool) (*capiazure.AzureMachineTemplateSpec, error) {
+func azureMachineTemplateSpec(nodePool *hyperv1.NodePool, acrIdentityResourceID string) (*capiazure.AzureMachineTemplateSpec, error) {
 	subnetName, err := azureutil.GetSubnetNameFromSubnetID(nodePool.Spec.Platform.Azure.SubnetID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine subnet name for Azure machine: %w", err)
@@ -244,18 +256,33 @@ func azureMachineTemplateSpec(nodePool *hyperv1.NodePool) (*capiazure.AzureMachi
 		}
 	}
 
+	if acrIdentityResourceID != "" {
+		azureMachineTemplate.Template.Spec.Identity = capiazure.VMIdentityUserAssigned
+		azureMachineTemplate.Template.Spec.UserAssignedIdentities = append(
+			azureMachineTemplate.Template.Spec.UserAssignedIdentities,
+			capiazure.UserAssignedIdentity{
+				ProviderID: capzutil.ProviderIDPrefix + acrIdentityResourceID,
+			},
+		)
+	}
+
 	azureMachineTemplate.Template.Spec.SSHPublicKey = dummySSHKey
 
 	return azureMachineTemplate, nil
 }
 
-func (c *CAPI) azureMachineTemplate(ctx context.Context, templateNameGenerator func(spec any) (string, error)) (*capiazure.AzureMachineTemplate, error) {
+func (c *CAPI) azureMachineTemplate(_ context.Context, templateNameGenerator func(spec any) (string, error)) (*capiazure.AzureMachineTemplate, error) {
 	// Apply Azure Marketplace image defaults before generating machine template spec
-	if err := defaultAzureNodePoolImage(c.nodePool, c.ConfigGenerator.rolloutConfig.releaseImage); err != nil {
+	if err := defaultAzureNodePoolImage(c.nodePool, c.ConfigGenerator.rolloutConfig.releaseImage, c.resolvedRHELStreamForBootImage); err != nil {
 		return nil, fmt.Errorf("failed to apply Azure image defaults: %w", err)
 	}
 
-	spec, err := azureMachineTemplateSpec(c.nodePool)
+	var acrIdentityResourceID string
+	if c.hostedCluster != nil && c.hostedCluster.Spec.Platform.Azure != nil && c.hostedCluster.Spec.Platform.Azure.ContainerRegistry.Credentials.ManagedIdentity.ResourceID != "" {
+		acrIdentityResourceID = string(c.hostedCluster.Spec.Platform.Azure.ContainerRegistry.Credentials.ManagedIdentity.ResourceID)
+	}
+
+	spec, err := azureMachineTemplateSpec(c.nodePool, acrIdentityResourceID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate AzureMachineTemplateSpec: %w", err)
 	}

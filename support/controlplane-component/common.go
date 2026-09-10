@@ -2,7 +2,7 @@ package controlplanecomponent
 
 import (
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/k8sutil"
 
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -38,7 +38,7 @@ func SetHostedClusterAnnotation() option {
 			if annotations == nil {
 				annotations = map[string]string{}
 			}
-			annotations[util.HostedClusterAnnotation] = cpContext.HCP.Annotations[util.HostedClusterAnnotation]
+			annotations[k8sutil.HostedClusterAnnotation] = cpContext.HCP.Annotations[k8sutil.HostedClusterAnnotation]
 			resource.SetAnnotations(annotations)
 			return nil
 		}
@@ -60,4 +60,13 @@ func EnableForPlatform(platform hyperv1.PlatformType) option {
 	return WithPredicate(func(cpContext WorkloadContext) bool {
 		return cpContext.HCP.Spec.Platform.Type == platform
 	})
+}
+
+// IsStorageAndCSIManaged returns true if storage and CSI components should be managed for the given platform.
+// IBMCloud and PowerVS platforms do not support managed storage/CSI.
+func IsStorageAndCSIManaged(platform hyperv1.PlatformType) bool {
+	if platform == hyperv1.IBMCloudPlatform || platform == hyperv1.PowerVSPlatform {
+		return false
+	}
+	return true
 }

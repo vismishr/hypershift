@@ -1,6 +1,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    hypershift.openshift.io/desired-state-hash: 706eb25ea887a11a643d2de15d55d833d4d2d5b48c7a19ee50edb40b36337387
   labels:
     hypershift.openshift.io/managed-by: control-plane-operator
   name: openshift-apiserver
@@ -28,7 +30,7 @@ spec:
     metadata:
       annotations:
         cluster-autoscaler.kubernetes.io/safe-to-evict-local-volumes: work-logs,oas-trust-anchor,tmp-dir
-        component.hypershift.openshift.io/config-hash: 0fd3eed819dc307e829b997b83c6a3e3
+        component.hypershift.openshift.io/config-hash: 0fd3eed819dc307e829b997b86ed74e7
         hypershift.openshift.io/release-image: quay.io/openshift-release-dev/ocp-release:4.16.10-x86_64
       labels:
         app: openshift-apiserver
@@ -87,6 +89,7 @@ spec:
         - --requestheader-group-headers=X-Remote-Group
         - --requestheader-extra-headers-prefix=X-Remote-Extra-
         - --client-ca-file=/etc/kubernetes/certs/client-ca/ca.crt
+        - --v=2
         env:
         - name: HTTP_PROXY
           value: http://127.0.0.1:8090
@@ -332,6 +335,14 @@ spec:
         key: hypershift.openshift.io/cluster
         operator: Equal
         value: hcp-namespace
+      - effect: NoExecute
+        key: node.kubernetes.io/not-ready
+        operator: Exists
+        tolerationSeconds: 10
+      - effect: NoExecute
+        key: node.kubernetes.io/unreachable
+        operator: Exists
+        tolerationSeconds: 10
       volumes:
       - emptyDir: {}
         name: work-logs

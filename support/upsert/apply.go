@@ -2,10 +2,13 @@ package upsert
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"maps"
 
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/k8sutil"
+	"github.com/openshift/hypershift/support/netutil"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -20,6 +23,13 @@ import (
 
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+)
+
+const (
+	// DesiredStateHashAnnotation stores a SHA-256 hash of the desired manifest
+	// state. Used to detect changes that DeepDerivative cannot detect, such as
+	// removal of spec fields (nodeSelector, tolerations, trailing container args).
+	DesiredStateHashAnnotation = "hypershift.openshift.io/desired-state-hash"
 )
 
 type ApplyProvider interface {
@@ -65,6 +75,9 @@ func (p *applyProvider) ApplyManifest(ctx context.Context, c crclient.Client, ob
 		if !apierrors.IsNotFound(err) {
 			return controllerutil.OperationResultNone, err
 		}
+		if hash := computeDesiredHash(obj); hash != "" {
+			setDesiredStateHash(obj, hash)
+		}
 		// Clean up removal markers before creating the object, as Kubernetes validates
 		// labels during creation and the removal marker value is not a valid label value.
 		cleanupRemovalMarkers(obj)
@@ -80,14 +93,14 @@ func (p *applyProvider) ApplyManifest(ctx context.Context, c crclient.Client, ob
 		switch typedObj := obj.(type) {
 		case *batchv1.Job:
 			existingTyped := existing.(*batchv1.Job)
-			failed := util.FindJobCondition(existingTyped, batchv1.JobFailed)
+			failed := k8sutil.FindJobCondition(existingTyped, batchv1.JobFailed)
 			if failed == nil || failed.Status == corev1.ConditionFalse {
 				if equality.Semantic.DeepDerivative(typedObj.Spec, existingTyped.Spec) {
 					return controllerutil.OperationResultNone, nil
 				}
 			}
 			// Delete the job if it has failed or it needs to be updated
-			_, err := util.DeleteIfNeededWithOptions(ctx, c, obj, crclient.PropagationPolicy(metav1.DeletePropagationForeground))
+			_, err := k8sutil.DeleteIfNeededWithOptions(ctx, c, obj, crclient.PropagationPolicy(metav1.DeletePropagationForeground))
 			return controllerutil.OperationResultNone, err
 		}
 	}
@@ -116,36 +129,57 @@ func (p *applyProvider) update(ctx context.Context, c crclient.Client, obj crcli
 			obj.(*appsv1.Deployment).Spec.Selector = existingTyped.Spec.Selector
 		}
 	}
+
+	// Compute desired hash BEFORE preserveOriginalMetadata merges existing
+	// metadata into obj. This captures our pure desired state.
+	desiredHash := computeDesiredHash(obj)
+
+	storedHash := ""
+	if existingAnnotations := existing.GetAnnotations(); existingAnnotations != nil {
+		storedHash = existingAnnotations[DesiredStateHashAnnotation]
+	}
+
 	preserveOriginalMetadata(existing, obj)
 
-	current, err := toUnstructured(existing)
-	if err != nil {
-		return controllerutil.OperationResultNone, err
+	needsUpdate := false
+	if desiredHash != "" && storedHash != "" {
+		needsUpdate = desiredHash != storedHash
+	} else if desiredHash != "" && storedHash == "" {
+		// Migration: object was created before the hash annotation was added.
+		needsUpdate = true
 	}
-	modified, err := toUnstructured(obj)
-	if err != nil {
-		return controllerutil.OperationResultNone, err
-	}
-
-	// DeepDerivative ignores unset fields in 'modified' (empty/nil arrays, empty strings, etc.)
-	isEqual := equality.Semantic.DeepDerivative(modified, current)
 
 	// Special handling for label removal: DeepDerivative ignores empty maps, but we need
 	// to update when labels have been explicitly removed. Check if label count decreased
 	// (either partial or complete removal).
 	mutatedLabels := obj.GetLabels()
-	labelsRemoved := len(mutatedLabels) < originalLabelCount
-	if labelsRemoved {
-		// Force an update even though DeepDerivative says they're equal
-		isEqual = false
+	if len(mutatedLabels) < originalLabelCount {
+		needsUpdate = true
 	}
 
-	// If objects are equal (no changes needed), record no-op update and return early
-	if isEqual {
-		if p.loopDetector != nil {
-			p.loopDetector.recordNoOpUpdate(obj, key)
+	// Fall back to DeepDerivative for drift detection (external modifications
+	// to the cluster object) and when hash comparison is unavailable.
+	if !needsUpdate {
+		current, err := toUnstructured(existing)
+		if err != nil {
+			return controllerutil.OperationResultNone, err
 		}
-		return controllerutil.OperationResultNone, nil
+		modified, err := toUnstructured(obj)
+		if err != nil {
+			return controllerutil.OperationResultNone, err
+		}
+		if equality.Semantic.DeepDerivative(modified, current) {
+			if p.loopDetector != nil {
+				p.loopDetector.recordNoOpUpdate(obj, key)
+			}
+			return controllerutil.OperationResultNone, nil
+		}
+	}
+
+	// Stamp the hash annotation before update, overwriting the old value
+	// that was merged in by preserveOriginalMetadata.
+	if desiredHash != "" {
+		setDesiredStateHash(obj, desiredHash)
 	}
 
 	// In the case a job, if an update is needed, the previous job must be deleted
@@ -179,7 +213,7 @@ func cleanupRemovalMarkers(obj crclient.Object) {
 	}
 	filteredLabels := make(map[string]string)
 	for k, v := range labels {
-		if v != util.RemoveLabelMarker {
+		if v != netutil.RemoveLabelMarker {
 			filteredLabels[k] = v
 		}
 	}
@@ -198,7 +232,7 @@ func preserveOriginalMetadata(original, mutated crclient.Object) {
 
 	// Process mutated labels: add/update new labels, remove labels marked with RemoveLabelMarker
 	for k, v := range mutated.GetLabels() {
-		if v == util.RemoveLabelMarker {
+		if v == netutil.RemoveLabelMarker {
 			delete(labels, k)
 		} else {
 			labels[k] = v
@@ -233,17 +267,16 @@ func preserveServiceAccountPullSecrets(original, mutated *corev1.ServiceAccount)
 }
 
 var (
-	// ignore read-only fields managed by k8s.
 	ignoreMetadataFields = []string{
 		"uid",
 		"generation",
 		"creationTimestamp",
+		"resourceVersion",
+		"managedFields",
 	}
 )
 
 func toUnstructured(obj crclient.Object) (map[string]any, error) {
-	// Create a copy of the original object as well as converting that copy to
-	// unstructured data.
 	u, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
 	if err != nil {
 		return nil, err
@@ -253,7 +286,38 @@ func toUnstructured(obj crclient.Object) (map[string]any, error) {
 		unstructured.RemoveNestedField(u, "metadata", field)
 	}
 
-	// status is updated separately, ignore.
 	unstructured.RemoveNestedField(u, "status")
+
+	// Remove the hash annotation to avoid self-referential comparison.
+	if annotations, ok, _ := unstructured.NestedMap(u, "metadata", "annotations"); ok {
+		delete(annotations, DesiredStateHashAnnotation)
+		if len(annotations) == 0 {
+			unstructured.RemoveNestedField(u, "metadata", "annotations")
+		} else {
+			_ = unstructured.SetNestedField(u, annotations, "metadata", "annotations")
+		}
+	}
+
 	return u, nil
+}
+
+func computeDesiredHash(obj crclient.Object) string {
+	u, err := toUnstructured(obj)
+	if err != nil {
+		return ""
+	}
+	data, err := json.Marshal(u)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
+func setDesiredStateHash(obj crclient.Object, hash string) {
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+	annotations[DesiredStateHashAnnotation] = hash
+	obj.SetAnnotations(annotations)
 }

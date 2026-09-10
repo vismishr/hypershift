@@ -6,8 +6,8 @@ import (
 	. "github.com/onsi/gomega"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	"github.com/openshift/hypershift/support/netutil"
 	"github.com/openshift/hypershift/support/upsert"
-	supportutil "github.com/openshift/hypershift/support/util"
 
 	performanceprofilev2 "github.com/openshift/cluster-node-tuning-operator/pkg/apis/performanceprofile/v2"
 	crconditionsv1 "github.com/openshift/custom-resource-status/conditions/v1"
@@ -208,7 +208,7 @@ status: {}
 		error              bool
 	}{
 		{
-			name: "gets a single valid TunedConfig",
+			name: "When a single valid TunedConfig is provided, it should return the defaulted config",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -239,7 +239,7 @@ status: {}
 			error:          false,
 		},
 		{
-			name: "gets two valid TunedConfigs",
+			name: "When two valid TunedConfigs are provided, it should return both defaulted configs",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -281,7 +281,7 @@ status: {}
 			error:          false,
 		},
 		{
-			name: "fails if a non existent TunedConfig is referenced",
+			name: "When a non-existent TunedConfig is referenced, it should fail",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -302,7 +302,7 @@ status: {}
 		},
 		//-------------------------------------------------------------------------
 		{
-			name: "gets a single valid PerformanceProfileConfig",
+			name: "When a single valid PerformanceProfileConfig is provided, it should return the defaulted config",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -334,7 +334,7 @@ status: {}
 			error:              false,
 		},
 		{
-			name: "Should be at most one PerformanceProfileConfig per NodePool",
+			name: "When more than one PerformanceProfileConfig is provided, it should fail",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -376,7 +376,7 @@ status: {}
 			error:          true,
 		},
 		{
-			name: "fails if a non existent PerformanceProfile is referenced",
+			name: "When a non-existent PerformanceProfile is referenced, it should fail",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -396,7 +396,7 @@ status: {}
 			error:          true,
 		},
 		{
-			name: "PerformanceProfiles and Tuned Configs could coexists",
+			name: "When PerformanceProfiles and Tuned Configs coexist, it should return both",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
@@ -531,7 +531,7 @@ func TestReconcileMirroredConfigs(t *testing.T) {
 		expectedError           bool
 	}{
 		{
-			name:                  "with containerruntime",
+			name:                  "When containerruntime config is mirrored, it should create the mirrored configmap",
 			nodePool:              np,
 			controlPlaneNamespace: hcpNamespace,
 			configsToBeMirrored: []*MirrorConfig{
@@ -553,9 +553,9 @@ func TestReconcileMirroredConfigs(t *testing.T) {
 			existingConfigsInHcpNs: nil,
 			expectedMirroredConfigs: []corev1.ConfigMap{
 				{
-					Immutable: ptr.To(true),
+					Immutable: ptr.To(false),
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      supportutil.ShortenName("foo", npName, validation.LabelValueMaxLength),
+						Name:      netutil.ShortenName("foo", npName, validation.LabelValueMaxLength),
 						Namespace: hcpNamespace,
 						Labels: map[string]string{
 							NTOMirroredConfigLabel:               "true",
@@ -570,7 +570,7 @@ func TestReconcileMirroredConfigs(t *testing.T) {
 			},
 		},
 		{
-			name:                  "with configs that need to be deleted",
+			name:                  "When configs change, it should delete outdated and create new mirrored configs",
 			nodePool:              np,
 			controlPlaneNamespace: hcpNamespace,
 			configsToBeMirrored: []*MirrorConfig{
@@ -602,9 +602,9 @@ func TestReconcileMirroredConfigs(t *testing.T) {
 			},
 			expectedMirroredConfigs: []corev1.ConfigMap{
 				{
-					Immutable: ptr.To(true),
+					Immutable: ptr.To(false),
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      supportutil.ShortenName("foo", npName, validation.LabelValueMaxLength),
+						Name:      netutil.ShortenName("foo", npName, validation.LabelValueMaxLength),
 						Namespace: hcpNamespace,
 						Labels: map[string]string{
 							NTOMirroredConfigLabel:               "true",
@@ -620,7 +620,7 @@ func TestReconcileMirroredConfigs(t *testing.T) {
 			configsForDeletion: []corev1.ConfigMap{
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      supportutil.ShortenName("bar", npName, validation.LabelValueMaxLength),
+						Name:      netutil.ShortenName("bar", npName, validation.LabelValueMaxLength),
 						Namespace: hcpNamespace,
 					},
 					Data: map[string]string{
@@ -630,7 +630,7 @@ func TestReconcileMirroredConfigs(t *testing.T) {
 			},
 		},
 		{
-			name:                  "with kubeletconfig objects",
+			name:                  "When kubeletconfig is mirrored, it should create the mirrored configmap",
 			nodePool:              np,
 			controlPlaneNamespace: hcpNamespace,
 			configsToBeMirrored: []*MirrorConfig{
@@ -652,9 +652,9 @@ func TestReconcileMirroredConfigs(t *testing.T) {
 			existingConfigsInHcpNs: nil,
 			expectedMirroredConfigs: []corev1.ConfigMap{
 				{
-					Immutable: ptr.To(true),
+					Immutable: ptr.To(false),
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      supportutil.ShortenName("bar", npName, validation.LabelValueMaxLength),
+						Name:      netutil.ShortenName("bar", npName, validation.LabelValueMaxLength),
 						Namespace: hcpNamespace,
 						Labels: map[string]string{
 							NTOMirroredConfigLabel:      "true",
@@ -669,7 +669,7 @@ func TestReconcileMirroredConfigs(t *testing.T) {
 			},
 		},
 		{
-			name:                  "negative: with multiple kubeletconfig objects expect validation error",
+			name:                  "When an immutable mirrored ConfigMap exists and data changes, it should delete and recreate as mutable",
 			nodePool:              np,
 			controlPlaneNamespace: hcpNamespace,
 			configsToBeMirrored: []*MirrorConfig{
@@ -692,7 +692,172 @@ func TestReconcileMirroredConfigs(t *testing.T) {
 				&corev1.ConfigMap{
 					Immutable: ptr.To(true),
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      supportutil.ShortenName("bar-2", npName, validation.LabelValueMaxLength),
+						Name:      netutil.ShortenName("bar", npName, validation.LabelValueMaxLength),
+						Namespace: hcpNamespace,
+						Labels: map[string]string{
+							NTOMirroredConfigLabel:      "true",
+							nodePoolAnnotation:          npName,
+							KubeletConfigConfigMapLabel: "true",
+						},
+					},
+					Data: map[string]string{
+						TokenSecretConfigKey: "old-data",
+					},
+				},
+			},
+			expectedMirroredConfigs: []corev1.ConfigMap{
+				{
+					Immutable: ptr.To(false),
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      netutil.ShortenName("bar", npName, validation.LabelValueMaxLength),
+						Namespace: hcpNamespace,
+						Labels: map[string]string{
+							NTOMirroredConfigLabel:      "true",
+							nodePoolAnnotation:          npName,
+							KubeletConfigConfigMapLabel: "true",
+						},
+					},
+					Data: map[string]string{
+						TokenSecretConfigKey: kubeletConfig1,
+					},
+				},
+			},
+		},
+		{
+			name:                  "When an immutable mirrored ConfigMap belongs to a different NodePool, it should not be deleted",
+			nodePool:              np,
+			controlPlaneNamespace: hcpNamespace,
+			configsToBeMirrored: []*MirrorConfig{
+				{
+					ConfigMap: &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "bar",
+							Namespace: npNamespace,
+						},
+						Data: map[string]string{
+							TokenSecretConfigKey: kubeletConfig1,
+						},
+					},
+					Labels: map[string]string{
+						KubeletConfigConfigMapLabel: "true",
+					},
+				},
+			},
+			existingConfigsInHcpNs: []client.Object{
+				&corev1.ConfigMap{
+					Immutable: ptr.To(true),
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      netutil.ShortenName("bar", npName, validation.LabelValueMaxLength),
+						Namespace: hcpNamespace,
+						Labels: map[string]string{
+							NTOMirroredConfigLabel:      "true",
+							nodePoolAnnotation:          "other-nodepool",
+							KubeletConfigConfigMapLabel: "true",
+						},
+					},
+					Data: map[string]string{
+						TokenSecretConfigKey: "old-data",
+					},
+				},
+			},
+			expectedMirroredConfigs: []corev1.ConfigMap{
+				{
+					Immutable: ptr.To(false),
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      netutil.ShortenName("bar", npName, validation.LabelValueMaxLength),
+						Namespace: hcpNamespace,
+						Labels: map[string]string{
+							NTOMirroredConfigLabel:      "true",
+							nodePoolAnnotation:          npName,
+							KubeletConfigConfigMapLabel: "true",
+						},
+					},
+					Data: map[string]string{
+						TokenSecretConfigKey: kubeletConfig1,
+					},
+				},
+			},
+		},
+		{
+			name:                  "When an existing mirrored ConfigMap is already mutable, it should not be deleted",
+			nodePool:              np,
+			controlPlaneNamespace: hcpNamespace,
+			configsToBeMirrored: []*MirrorConfig{
+				{
+					ConfigMap: &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "bar",
+							Namespace: npNamespace,
+						},
+						Data: map[string]string{
+							TokenSecretConfigKey: kubeletConfig1,
+						},
+					},
+					Labels: map[string]string{
+						KubeletConfigConfigMapLabel: "true",
+					},
+				},
+			},
+			existingConfigsInHcpNs: []client.Object{
+				&corev1.ConfigMap{
+					Immutable: ptr.To(false),
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      netutil.ShortenName("bar", npName, validation.LabelValueMaxLength),
+						Namespace: hcpNamespace,
+						Labels: map[string]string{
+							NTOMirroredConfigLabel:      "true",
+							nodePoolAnnotation:          npName,
+							KubeletConfigConfigMapLabel: "true",
+						},
+					},
+					Data: map[string]string{
+						TokenSecretConfigKey: "old-data",
+					},
+				},
+			},
+			expectedMirroredConfigs: []corev1.ConfigMap{
+				{
+					Immutable: ptr.To(false),
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      netutil.ShortenName("bar", npName, validation.LabelValueMaxLength),
+						Namespace: hcpNamespace,
+						Labels: map[string]string{
+							NTOMirroredConfigLabel:      "true",
+							nodePoolAnnotation:          npName,
+							KubeletConfigConfigMapLabel: "true",
+						},
+					},
+					Data: map[string]string{
+						TokenSecretConfigKey: kubeletConfig1,
+					},
+				},
+			},
+		},
+		{
+			name:                  "When multiple kubeletconfig objects exist, it should return validation error",
+			nodePool:              np,
+			controlPlaneNamespace: hcpNamespace,
+			configsToBeMirrored: []*MirrorConfig{
+				{
+					ConfigMap: &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "bar",
+							Namespace: npNamespace,
+						},
+						Data: map[string]string{
+							TokenSecretConfigKey: kubeletConfig1,
+						},
+					},
+					Labels: map[string]string{
+						KubeletConfigConfigMapLabel: "true",
+					},
+				},
+			},
+			existingConfigsInHcpNs: []client.Object{
+				&corev1.ConfigMap{
+					Immutable: ptr.To(true),
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      netutil.ShortenName("bar-2", npName, validation.LabelValueMaxLength),
 						Namespace: hcpNamespace,
 						Labels: map[string]string{
 							nodeTuningGeneratedConfigLabel: "true",
@@ -752,14 +917,14 @@ func TestSetPerformanceProfileStatus(t *testing.T) {
 	}{
 
 		{
-			name:                         "No Performance profile applied",
+			name:                         "When no performance profile is applied, it should not set performance profile conditions",
 			PerformanceProfileStatusCM:   &corev1.ConfigMap{},
 			wantConditions:               map[string]hyperv1.NodePoolCondition{},
 			hasPerformanceProfileApplied: false,
 		},
 
 		{
-			name: "Performance profile is available",
+			name: "When performance profile is available, it should set conditions to reflect availability",
 			PerformanceProfileStatusCM: &corev1.ConfigMap{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "ConfigMap",
@@ -818,7 +983,7 @@ func TestSetPerformanceProfileStatus(t *testing.T) {
 			hasPerformanceProfileApplied: true,
 		},
 		{
-			name: "Performance profile is progressing",
+			name: "When performance profile is progressing, it should set conditions to reflect progress",
 			PerformanceProfileStatusCM: &corev1.ConfigMap{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "ConfigMap",
@@ -875,7 +1040,7 @@ func TestSetPerformanceProfileStatus(t *testing.T) {
 			hasPerformanceProfileApplied: true,
 		},
 		{
-			name: "Performance profile is degraded",
+			name: "When performance profile is degraded, it should set conditions to reflect degradation",
 			PerformanceProfileStatusCM: &corev1.ConfigMap{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "ConfigMap",
@@ -1076,19 +1241,19 @@ spec:
 		input []byte
 	}{
 		{
-			name:  "Valid MachineConfig",
+			name:  "When a valid MachineConfig is provided, it should return mirror config",
 			input: []byte(machineConfig),
 		},
 		{
-			name:  "Valid ContainerRuntimeConfig",
+			name:  "When a valid ContainerRuntimeConfig is provided, it should return mirror config",
 			input: []byte(containerRuntimeConfig),
 		},
 		{
-			name:  "Valid KubeletConfig",
+			name:  "When a valid KubeletConfig is provided, it should return mirror config",
 			input: []byte(kubeletConfig),
 		},
 		{
-			name:  "Valid ImageDigestMirrorSet",
+			name:  "When a valid ImageDigestMirrorSet is provided, it should return mirror config",
 			input: []byte(imageDigestMirrorSet),
 		},
 	}

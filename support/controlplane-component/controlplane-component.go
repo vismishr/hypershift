@@ -10,7 +10,9 @@ import (
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/infra"
 	assets "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/assets"
 	"github.com/openshift/hypershift/support/config"
+	"github.com/openshift/hypershift/support/k8sutil"
 	"github.com/openshift/hypershift/support/metrics"
+	"github.com/openshift/hypershift/support/podspec"
 	"github.com/openshift/hypershift/support/upsert"
 	"github.com/openshift/hypershift/support/util"
 
@@ -18,6 +20,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -68,6 +71,10 @@ type ControlPlaneContext struct {
 	SkipPredicate bool
 	// SkipCertificateSigning is used for the generic unit test to skip the signing of certificates and maintain a stable output.
 	SkipCertificateSigning bool
+
+	// NativeSidecarContainersEnabled indicates whether the management cluster supports native sidecar containers
+	// (K8s >= 1.29 with SidecarContainers feature gate enabled by default).
+	NativeSidecarContainersEnabled bool
 }
 
 // WorkloadContext is what we pass to the components(adapt, predicate functions, etc..).
@@ -123,6 +130,7 @@ type controlPlaneWorkload[T client.Object] struct {
 	ComponentOptions
 
 	name             string
+	assetDir         string
 	workloadProvider WorkloadProvider[T]
 
 	// list of component names that this component depends on.
@@ -136,10 +144,13 @@ type controlPlaneWorkload[T client.Object] struct {
 	// predicate is called at the beginning, the component is disabled if it returns false.
 	predicate func(cpContext WorkloadContext) (bool, error)
 
+	// templateData, when non-nil, causes asset YAMLs to be rendered as Go templates before decoding.
+	templateData map[string]string
+
 	// if provided, konnectivity proxy container and required volumes will be injected into the deployment/statefulset.
 	konnectivityContainerOpts *KonnectivityContainerOptions
 	// if provided, availabilityProber container and required volumes will be injected into the deployment/statefulset.
-	availabilityProberOpts *util.AvailabilityProberOpts
+	availabilityProberOpts *podspec.AvailabilityProberOpts
 	// if provided, token-minter container and required volumes will be injected into the deployment/statefulset.
 	tokenMinterContainerOpts *TokenMinterContainerOptions
 	// serviceAccountKubeConfigOpts will cause the generation of a secret with a kubeconfig using certificates for the given named service account
@@ -148,6 +159,15 @@ type controlPlaneWorkload[T client.Object] struct {
 
 	customOperandsRolloutCheck   func(cpContext WorkloadContext) (bool, error)
 	monitorOperandsRolloutStatus bool
+}
+
+// AssetDirName returns the asset directory name for loading manifests.
+// If assetDir is set, it overrides the component name for asset loading.
+func (c *controlPlaneWorkload[T]) AssetDirName() string {
+	if c.assetDir != "" {
+		return c.assetDir
+	}
+	return c.name
 }
 
 // Name implements ControlPlaneComponent.
@@ -171,7 +191,7 @@ func (c *controlPlaneWorkload[T]) Reconcile(cpContext ControlPlaneContext) error
 
 	unavailableDependencies, err := c.checkDependencies(cpContext)
 	if err != nil {
-		return fmt.Errorf("failed checking for dependencies availability: %v", err)
+		return fmt.Errorf("failed checking for dependencies availability: %w", err)
 	}
 	var reconcilationError error
 	if len(unavailableDependencies) == 0 {
@@ -194,20 +214,31 @@ func (c *controlPlaneWorkload[T]) Reconcile(cpContext ControlPlaneContext) error
 	return reconcilationError
 }
 
+// loadManifest loads a manifest, applying template rendering if templateData is set.
+func (c *controlPlaneWorkload[T]) loadManifest(fileName string) (client.Object, *schema.GroupVersionKind, error) {
+	return assets.LoadManifestTemplated(c.AssetDirName(), fileName, c.templateData)
+}
+
 func (c *controlPlaneWorkload[T]) delete(cpContext ControlPlaneContext) error {
 	workloadObj := c.workloadProvider.NewObject()
 	// make sure that the Deployment/Statefulset name matches the component name.
 	workloadObj.SetName(c.Name())
 	workloadObj.SetNamespace(cpContext.HCP.Namespace)
 
-	_, err := util.DeleteIfNeeded(cpContext, cpContext.Client, workloadObj)
+	_, err := k8sutil.DeleteIfNeeded(cpContext, cpContext.Client, workloadObj)
 	if err != nil {
 		return err
 	}
 
 	// delete all resources.
-	if err := assets.ForEachManifest(c.name, func(manifestName string) error {
-		obj, _, err := assets.LoadManifest(c.name, manifestName)
+	// When using WithAssetDir, the raw manifest names may not match the
+	// When using WithTemplateData, template rendering produces correctly-named
+	// objects at load time. Do NOT call adapt functions during delete — the
+	// delete path runs when a component's predicate returns false (e.g. Azure
+	// CCM on an AWS cluster), and adapt functions may assume platform-specific
+	// config exists, causing nil pointer panics.
+	if err := assets.ForEachManifest(c.AssetDirName(), func(manifestName string) error {
+		obj, _, err := c.loadManifest(manifestName)
 		if err != nil {
 			return err
 		}
@@ -223,7 +254,7 @@ func (c *controlPlaneWorkload[T]) delete(cpContext ControlPlaneContext) error {
 			}
 		}
 
-		_, err = util.DeleteIfNeeded(cpContext, cpContext.Client, obj)
+		_, err = k8sutil.DeleteIfNeeded(cpContext, cpContext.Client, obj)
 		return err
 	}); err != nil {
 		return err
@@ -235,7 +266,7 @@ func (c *controlPlaneWorkload[T]) delete(cpContext ControlPlaneContext) error {
 			Namespace: cpContext.HCP.Namespace,
 		},
 	}
-	_, err = util.DeleteIfNeeded(cpContext, cpContext.Client, component)
+	_, err = k8sutil.DeleteIfNeeded(cpContext, cpContext.Client, component)
 	return err
 }
 
@@ -244,8 +275,8 @@ func (c *controlPlaneWorkload[T]) update(cpContext ControlPlaneContext) error {
 	hcp := cpContext.HCP
 	ownerRef := config.OwnerRefFrom(hcp)
 	// reconcile resources such as ConfigMaps and Secrets first, as the deployment might depend on them.
-	if err := assets.ForEachManifest(c.name, func(manifestName string) error {
-		obj, _, err := assets.LoadManifest(c.name, manifestName)
+	if err := assets.ForEachManifest(c.AssetDirName(), func(manifestName string) error {
+		obj, _, err := c.loadManifest(manifestName)
 		if err != nil {
 			return err
 		}
@@ -262,7 +293,7 @@ func (c *controlPlaneWorkload[T]) update(cpContext ControlPlaneContext) error {
 				}
 			}
 		case *corev1.ServiceAccount:
-			util.EnsurePullSecret(typedObj, common.PullSecret("").Name)
+			k8sutil.EnsurePullSecret(typedObj, common.PullSecret("").Name)
 		}
 
 		adapter, exist := c.manifestsAdapters[manifestName]
@@ -303,9 +334,9 @@ func (c *controlPlaneWorkload[T]) update(cpContext ControlPlaneContext) error {
 }
 
 func (c *controlPlaneWorkload[T]) reconcileWorkload(cpContext ControlPlaneContext) error {
-	workloadObj, err := c.workloadProvider.LoadManifest(c.Name())
+	workloadObj, err := c.workloadProvider.LoadManifestTemplated(c.AssetDirName(), c.templateData)
 	if err != nil {
-		return fmt.Errorf("failed loading workload manifest: %v", err)
+		return fmt.Errorf("failed loading workload manifest: %w", err)
 	}
 	// make sure that the Deployment/Statefulset name matches the component name.
 	workloadObj.SetName(c.Name())
@@ -314,7 +345,7 @@ func (c *controlPlaneWorkload[T]) reconcileWorkload(cpContext ControlPlaneContex
 	oldWorkloadObj := c.workloadProvider.NewObject()
 	if err := cpContext.Client.Get(cpContext, client.ObjectKeyFromObject(workloadObj), oldWorkloadObj); err != nil {
 		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("failed to get old workload object: %v", err)
+			return fmt.Errorf("failed to get old workload object: %w", err)
 		}
 	}
 

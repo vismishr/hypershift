@@ -29,17 +29,23 @@ import (
 	capigcp "sigs.k8s.io/cluster-api-provider-gcp/api/v1beta1"
 	capikubevirt "sigs.k8s.io/cluster-api-provider-kubevirt/api/v1alpha1"
 	capiopenstackv1beta1 "sigs.k8s.io/cluster-api-provider-openstack/api/v1beta1"
-	capiv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/go-logr/logr"
 )
 
 const (
 	interruptibleInstanceLabel = "hypershift.openshift.io/interruptible-instance"
+	// globalPSNodeLabel is the label applied to Nodes to indicate they are eligible for
+	// the GlobalPullSecret DaemonSet. Only Replace (MachineDeployment) nodes get this label;
+	// InPlace (MachineSet) nodes are excluded to avoid conflicts with Machine Config Daemon.
+	globalPSNodeLabel = "hypershift.openshift.io/nodepool-globalps-enabled"
 )
 
 // CAPI Knows how to reconcile all the CAPI resources for a unique token.
@@ -47,8 +53,21 @@ const (
 // and let nodepool, hostedcluster, and client be fields of CAPI / interface methods.
 type CAPI struct {
 	*Token
-	capiClusterName string
+	capiClusterName       string
+	scaleFromZeroPlatform hyperv1.PlatformType
 	upsert.ApplyProvider
+}
+
+// hasStatusCapacity checks if a machine template has Status.Capacity populated
+// by the infrastructure provider (native scale-from-zero support).
+func hasStatusCapacity(template client.Object) bool {
+	switch t := template.(type) {
+	case *capiaws.AWSMachineTemplate:
+		return len(t.Status.Capacity) > 0
+	case *capiazure.AzureMachineTemplate:
+		return len(t.Status.Capacity) > 0
+	}
+	return false
 }
 
 func newCAPI(token *Token, capiClusterName string) (*CAPI, error) {
@@ -168,6 +187,20 @@ func (c *CAPI) Reconcile(ctx context.Context) error {
 			Reason:             hyperv1.AsExpectedReason,
 			ObservedGeneration: nodePool.Generation,
 		})
+
+		// When MHC RemediationAllowed is False, override the Ready condition to signal
+		// that auto-repair is blocked because too many machines are unhealthy.
+		if remediationAllowed := findMHCRemediationAllowedCondition(mhc.Status.Conditions); remediationAllowed != nil {
+			if remediationAllowed.Status == corev1.ConditionFalse {
+				SetStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
+					Type:               hyperv1.NodePoolReadyConditionType,
+					Status:             corev1.ConditionFalse,
+					Reason:             remediationAllowed.Reason,
+					Message:            remediationAllowed.Message,
+					ObservedGeneration: nodePool.Generation,
+				})
+			}
+		}
 	} else {
 		err := c.Get(ctx, client.ObjectKeyFromObject(mhc), mhc)
 		if err != nil && !apierrors.IsNotFound(err) {
@@ -399,26 +432,12 @@ func deleteMachineHealthCheck(ctx context.Context, c client.Client, mhc *capiv1.
 
 func (c *CAPI) reconcileMachineDeployment(ctx context.Context, log logr.Logger,
 	machineDeployment *capiv1.MachineDeployment,
-	machineTemplateCR client.Object) error {
-
+	machineTemplateCR client.Object,
+) error {
 	nodePool := c.nodePool
 	capiClusterName := c.capiClusterName
-	// Set annotations and labels
-	if machineDeployment.GetAnnotations() == nil {
-		machineDeployment.Annotations = map[string]string{}
-	}
-	machineDeployment.Annotations[nodePoolAnnotation] = client.ObjectKeyFromObject(nodePool).String()
-	// Delete any paused annotation
-	delete(machineDeployment.Annotations, capiv1.PausedAnnotation)
-	if machineDeployment.GetLabels() == nil {
-		machineDeployment.Labels = map[string]string{}
-	}
-	machineDeployment.Labels[capiv1.ClusterNameLabel] = capiClusterName
 
-	// Set defaults. These are normally set by the CAPI machinedeployment webhook.
-	// However, since we don't run the webhook, CAPI updates the machinedeployment
-	// after it has been created with defaults.
-	machineDeployment.Spec.MinReadySeconds = ptr.To[int32](0)
+	c.setMachineDeploymentMetadata(machineDeployment, capiClusterName)
 
 	machineDeployment.Spec.ClusterName = capiClusterName
 	if machineDeployment.Spec.Selector.MatchLabels == nil {
@@ -441,95 +460,38 @@ func (c *CAPI) reconcileMachineDeployment(ctx context.Context, log logr.Logger,
 			// Annotations here propagate down to Machines
 			// https://cluster-api.sigs.k8s.io/developer/architecture/controllers/metadata-propagation.html#machinedeployment.
 			Annotations: map[string]string{
-				nodePoolAnnotation: client.ObjectKeyFromObject(nodePool).String(),
+				nodePoolAnnotation:                       client.ObjectKeyFromObject(nodePool).String(),
+				hyperv1.NodePoolReleaseVersionAnnotation: c.Version(),
 			},
 		},
 		Spec: capiv1.MachineSpec{
 			ClusterName: capiClusterName,
 			Bootstrap: capiv1.Bootstrap{
-				// Keep current user data for later check.
 				DataSecretName: machineDeployment.Spec.Template.Spec.Bootstrap.DataSecretName,
 			},
 			InfrastructureRef: corev1.ObjectReference{
 				Kind:       gvk.Kind,
 				APIVersion: gvk.GroupVersion().String(),
 				Namespace:  machineTemplateCR.GetNamespace(),
-				// keep current template name for later check.
-				Name: machineDeployment.Spec.Template.Spec.InfrastructureRef.Name,
+				Name:       machineDeployment.Spec.Template.Spec.InfrastructureRef.Name,
 			},
-			// Keep current version for later check.
 			Version:                 machineDeployment.Spec.Template.Spec.Version,
 			NodeDrainTimeout:        nodePool.Spec.NodeDrainTimeout,
 			NodeVolumeDetachTimeout: nodePool.Spec.NodeVolumeDetachTimeout,
 		},
 	}
 
-	// Add interruptible-instance label for spot instances
 	// This label must be on the MachineDeployment template so the spot MHC can select machines
 	if isSpotEnabled(nodePool) {
 		machineDeployment.Spec.Template.Labels[interruptibleInstanceLabel] = ""
 	}
 
-	// The CAPI provider for OpenStack uses the FailureDomain field to set the availability zone.
-	if c.nodePool.Spec.Platform.Type == hyperv1.OpenStackPlatform && c.nodePool.Spec.Platform.OpenStack != nil {
-		if c.nodePool.Spec.Platform.OpenStack.AvailabilityZone != "" {
-			machineDeployment.Spec.Template.Spec.FailureDomain = ptr.To(c.nodePool.Spec.Platform.OpenStack.AvailabilityZone)
-		}
-	}
+	setMachineDeploymentFailureDomain(c.nodePool, machineDeployment)
 
-	// The CAPI provider for GCP uses the FailureDomain field to set the zone.
-	if c.nodePool.Spec.Platform.Type == hyperv1.GCPPlatform && c.nodePool.Spec.Platform.GCP != nil {
-		if c.nodePool.Spec.Platform.GCP.Zone != "" {
-			machineDeployment.Spec.Template.Spec.FailureDomain = ptr.To(c.nodePool.Spec.Platform.GCP.Zone)
-		}
-	}
-
-	// After a MachineDeployment is created we propagate label/taints directly into Machines.
-	// This is to avoid a NodePool label/taints to trigger a rolling upgrade.
-	// TODO(Alberto): drop this an rely on core in-place propagation once CAPI 1.4.0 https://github.com/kubernetes-sigs/cluster-api/releases comes through the payload.
-	// https://issues.redhat.com/browse/HOSTEDCP-971
-	machineList := &capiv1.MachineList{}
-	if err := c.List(ctx, machineList, client.InNamespace(machineDeployment.Namespace)); err != nil {
+	if err := c.propagateLabelsAndTaintsToMachines(ctx, log, machineDeployment); err != nil {
 		return err
 	}
-	for _, machine := range machineList.Items {
-		if nodePoolName := machine.GetAnnotations()[nodePoolAnnotation]; nodePoolName != client.ObjectKeyFromObject(nodePool).String() {
-			continue
-		}
 
-		if machine.Annotations == nil {
-			machine.Annotations = make(map[string]string)
-		}
-		if machine.Labels == nil {
-			machine.Labels = make(map[string]string)
-		}
-
-		if result, err := controllerutil.CreateOrPatch(ctx, c.Client, &machine, func() error {
-			// Propagate labels.
-			for k, v := range nodePool.Spec.NodeLabels {
-				// Propagated managed labels down to Machines with a known hardcoded prefix
-				// so the CPO HCCO Node controller can recognize them and apply them to Nodes.
-				labelKey := fmt.Sprintf("%s.%s", labelManagedPrefix, k)
-				machine.Labels[labelKey] = v
-			}
-
-			// Propagate taints.
-			taintsInJSON, err := taintsToJSON(nodePool.Spec.Taints)
-			if err != nil {
-				return err
-			}
-
-			machine.Annotations[nodePoolAnnotationTaints] = taintsInJSON
-			return nil
-		}); err != nil {
-			return fmt.Errorf("failed to reconcile Machine %q: %w",
-				client.ObjectKeyFromObject(&machine).String(), err)
-		} else {
-			log.Info("Reconciled Machine", "result", result)
-		}
-	}
-
-	// Set strategy
 	machineDeployment.Spec.Strategy = &capiv1.MachineDeploymentStrategy{}
 	machineDeployment.Spec.Strategy.Type = capiv1.MachineDeploymentStrategyType(nodePool.Spec.Management.Replace.Strategy)
 	if nodePool.Spec.Management.Replace.RollingUpdate != nil {
@@ -539,14 +501,105 @@ func (c *CAPI) reconcileMachineDeployment(ctx context.Context, log logr.Logger,
 		}
 	}
 
-	setMachineDeploymentReplicas(nodePool, machineDeployment)
+	scaleFromZeroSupported := hasStatusCapacity(machineTemplateCR) || nodePool.Spec.Platform.Type == c.scaleFromZeroPlatform
+	setMachineDeploymentReplicas(nodePool, machineDeployment, scaleFromZeroSupported)
 
-	isUpdating := false
-	// Propagate version and userData Secret to the machineDeployment.
+	if updated := c.propagateVersionAndTemplate(log, machineDeployment, machineTemplateCR); updated {
+		return nil
+	}
+
+	c.reconcileMachineDeploymentStatus(log, machineDeployment, machineTemplateCR)
+
+	return nil
+}
+
+func (c *CAPI) setMachineDeploymentMetadata(machineDeployment *capiv1.MachineDeployment, capiClusterName string) {
+	if machineDeployment.GetAnnotations() == nil {
+		machineDeployment.Annotations = map[string]string{}
+	}
+	machineDeployment.Annotations[nodePoolAnnotation] = client.ObjectKeyFromObject(c.nodePool).String()
+	delete(machineDeployment.Annotations, capiv1.PausedAnnotation)
+	if machineDeployment.GetLabels() == nil {
+		machineDeployment.Labels = map[string]string{}
+	}
+	machineDeployment.Labels[capiv1.ClusterNameLabel] = capiClusterName
+}
+
+func setMachineDeploymentFailureDomain(nodePool *hyperv1.NodePool, machineDeployment *capiv1.MachineDeployment) {
+	// The CAPI provider for OpenStack uses the FailureDomain field to set the availability zone.
+	if nodePool.Spec.Platform.Type == hyperv1.OpenStackPlatform && nodePool.Spec.Platform.OpenStack != nil {
+		if nodePool.Spec.Platform.OpenStack.AvailabilityZone != "" {
+			machineDeployment.Spec.Template.Spec.FailureDomain = ptr.To(nodePool.Spec.Platform.OpenStack.AvailabilityZone)
+		}
+	}
+	// The CAPI provider for GCP uses the FailureDomain field to set the zone.
+	if nodePool.Spec.Platform.Type == hyperv1.GCPPlatform && nodePool.Spec.Platform.GCP != nil {
+		if nodePool.Spec.Platform.GCP.Zone != "" {
+			machineDeployment.Spec.Template.Spec.FailureDomain = ptr.To(nodePool.Spec.Platform.GCP.Zone)
+		}
+	}
+}
+
+// propagateLabelsAndTaintsToMachines propagates label/taints directly into Machines
+// to avoid a NodePool label/taints change triggering a rolling upgrade.
+// TODO(Alberto): drop this and rely on core in-place propagation once CAPI 1.4.0
+// https://github.com/kubernetes-sigs/cluster-api/releases comes through the payload.
+// https://issues.redhat.com/browse/HOSTEDCP-971
+func (c *CAPI) propagateLabelsAndTaintsToMachines(ctx context.Context, log logr.Logger, machineDeployment *capiv1.MachineDeployment) error {
+	nodePool := c.nodePool
+	machineList := &capiv1.MachineList{}
+	if err := c.List(ctx, machineList, client.InNamespace(machineDeployment.Namespace)); err != nil {
+		return err
+	}
+	for _, machine := range machineList.Items {
+		if nodePoolName := machine.GetAnnotations()[nodePoolAnnotation]; nodePoolName != client.ObjectKeyFromObject(nodePool).String() {
+			continue
+		}
+
+		if result, err := controllerutil.CreateOrPatch(ctx, c.Client, &machine, func() error {
+			if machine.Labels == nil {
+				machine.Labels = make(map[string]string)
+			}
+			if machine.Annotations == nil {
+				machine.Annotations = make(map[string]string)
+			}
+
+			for k, v := range nodePool.Spec.NodeLabels {
+				labelKey := fmt.Sprintf("%s.%s", labelManagedPrefix, k)
+				machine.Labels[labelKey] = v
+			}
+
+			// Propagate globalPS managed label to Machines so the HCCO Node controller
+			// applies it to Nodes. This enables the GlobalPullSecret DaemonSet to
+			// schedule on Replace nodes. Only AWS and Azure platforms support this.
+			if nodePool.Spec.Platform.Type == hyperv1.AWSPlatform || nodePool.Spec.Platform.Type == hyperv1.AzurePlatform {
+				globalPSLabelKey := fmt.Sprintf("%s.%s", labelManagedPrefix, globalPSNodeLabel)
+				machine.Labels[globalPSLabelKey] = "true"
+			}
+
+			taintsInJSON, err := taintsToJSON(nodePool.Spec.Taints)
+			if err != nil {
+				return err
+			}
+			machine.Annotations[nodePoolAnnotationTaints] = taintsInJSON
+			return nil
+		}); err != nil {
+			return fmt.Errorf("failed to reconcile Machine %q: %w",
+				client.ObjectKeyFromObject(&machine).String(), err)
+		} else {
+			log.Info("Reconciled Machine", "result", result)
+		}
+	}
+	return nil
+}
+
+func (c *CAPI) propagateVersionAndTemplate(log logr.Logger, machineDeployment *capiv1.MachineDeployment, machineTemplateCR client.Object) bool {
+	nodePool := c.nodePool
 	userDataSecret := c.UserDataSecret()
 	targetVersion := c.Version()
 	targetConfigHash := c.HashWithoutVersion()
-	targetConfigVersionHash := c.Hash()
+	isUpdating := false
+
 	if userDataSecret.Name != ptr.Deref(machineDeployment.Spec.Template.Spec.Bootstrap.DataSecretName, "") {
 		log.Info("New user data Secret has been generated",
 			"current", machineDeployment.Spec.Template.Spec.Bootstrap.DataSecretName,
@@ -566,22 +619,22 @@ func (c *CAPI) reconcileMachineDeployment(ctx context.Context, log logr.Logger,
 		isUpdating = true
 	}
 
-	// template spec has changed, signal a rolling upgrade.
 	if machineTemplateCR.GetName() != machineDeployment.Spec.Template.Spec.InfrastructureRef.Name {
 		log.Info("New machine template has been generated",
 			"current", machineDeployment.Spec.Template.Spec.InfrastructureRef.Name,
 			"target", machineTemplateCR.GetName())
-
 		machineDeployment.Spec.Template.Spec.InfrastructureRef.Name = machineTemplateCR.GetName()
 		isUpdating = true
 	}
 
-	if isUpdating {
-		// We return early here during a version/config/MachineTemplate update to persist the resource with new user data Secret / MachineTemplate,
-		// so in the next reconciling loop we get a new MachineDeployment.Generation
-		// and we can do a legit MachineDeploymentComplete/MachineDeployment.Status.ObservedGeneration check.
-		return nil
-	}
+	return isUpdating
+}
+
+func (c *CAPI) reconcileMachineDeploymentStatus(log logr.Logger, machineDeployment *capiv1.MachineDeployment, machineTemplateCR client.Object) {
+	nodePool := c.nodePool
+	targetVersion := c.Version()
+	targetConfigHash := c.HashWithoutVersion()
+	targetConfigVersionHash := c.Hash()
 
 	// If the MachineDeployment is now processing we know
 	// is at the expected version (spec.version) and config (userData Secret) so we reconcile status and annotation.
@@ -609,31 +662,23 @@ func (c *CAPI) reconcileMachineDeployment(ctx context.Context, log logr.Logger,
 		}
 	}
 
-	// Bubble up AvailableReplicas and Ready condition from MachineDeployment.
 	nodePool.Status.Replicas = machineDeployment.Status.AvailableReplicas
-	for _, c := range machineDeployment.Status.Conditions {
-		// This condition should aggregate and summarize readiness from underlying MachineSets and Machines
-		// https://github.com/kubernetes-sigs/cluster-api/issues/3486.
-		if c.Type == capiv1.ReadyCondition {
-			// this is so api server does not complain
-			// invalid value: \"\": status.conditions.reason in body should be at least 1 chars long"
+	for _, cond := range machineDeployment.Status.Conditions {
+		if cond.Type == capiv1.ReadyCondition {
 			reason := hyperv1.AsExpectedReason
-			if c.Reason != "" {
-				reason = c.Reason
+			if cond.Reason != "" {
+				reason = cond.Reason
 			}
-
 			SetStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 				Type:               hyperv1.NodePoolReadyConditionType,
-				Status:             c.Status,
+				Status:             cond.Status,
 				ObservedGeneration: nodePool.Generation,
-				Message:            c.Message,
+				Message:            cond.Message,
 				Reason:             reason,
 			})
 			break
 		}
 	}
-
-	return nil
 }
 
 func taintsToJSON(taints []hyperv1.Taint) (string, error) {
@@ -646,8 +691,8 @@ func taintsToJSON(taints []hyperv1.Taint) (string, error) {
 }
 
 func (c *CAPI) reconcileMachineHealthCheck(ctx context.Context,
-	mhc *capiv1.MachineHealthCheck) error {
-
+	mhc *capiv1.MachineHealthCheck,
+) error {
 	log := ctrl.LoggerFrom(ctx)
 	nodePool := c.nodePool
 	hc := c.hostedCluster
@@ -707,6 +752,13 @@ func (c *CAPI) reconcileMachineHealthCheck(ctx context.Context,
 		}
 	}
 
+	// Set the nodePoolAnnotation so the enqueueParentNodePool watch handler
+	// can map MHC changes back to the parent NodePool.
+	if mhc.Annotations == nil {
+		mhc.Annotations = map[string]string{}
+	}
+	mhc.Annotations[nodePoolAnnotation] = client.ObjectKeyFromObject(nodePool).String()
+
 	resourcesName := generateName(capiClusterName, nodePool.Spec.ClusterName, nodePool.GetName())
 	mhc.Spec = capiv1.MachineHealthCheckSpec{
 		ClusterName: capiClusterName,
@@ -741,7 +793,7 @@ func (c *CAPI) reconcileMachineHealthCheck(ctx context.Context,
 
 // setMachineDeploymentReplicas sets wanted replicas:
 // If autoscaling is enabled we reconcile min/max annotations and leave replicas untouched.
-func setMachineDeploymentReplicas(nodePool *hyperv1.NodePool, machineDeployment *capiv1.MachineDeployment) {
+func setMachineDeploymentReplicas(nodePool *hyperv1.NodePool, machineDeployment *capiv1.MachineDeployment, scaleFromZeroSupported bool) {
 	if machineDeployment.Annotations == nil {
 		machineDeployment.Annotations = make(map[string]string)
 	}
@@ -753,12 +805,11 @@ func setMachineDeploymentReplicas(nodePool *hyperv1.NodePool, machineDeployment 
 		// 1. if it's a new MachineDeployment, or the replicas field of the old MachineDeployment is <= min size, use min size
 		// 2. if the replicas field of the old MachineDeployment is > max size, use max size
 		//
-		// Guard: Enforce min=1 for non-AWS platforms to prevent scale-from-zero issues.
-		// Even if API validation fails or pre-existing objects exist with min=0, this prevents
-		// NodePools from being permanently stuck at 0 replicas on platforms that don't support
-		// scale-from-zero metadata.
+		// Guard: Enforce min=1 when scale-from-zero is not supported to prevent
+		// NodePools from being permanently stuck at 0 replicas without the
+		// capacity metadata the autoscaler needs to scale back up.
 		effectiveMin := ptr.Deref(nodePool.Spec.AutoScaling.Min, 0)
-		if effectiveMin == 0 && nodePool.Spec.Platform.Type != hyperv1.AWSPlatform {
+		if effectiveMin == 0 && !scaleFromZeroSupported {
 			effectiveMin = 1
 		}
 
@@ -844,8 +895,8 @@ func generateMachineTemplateName(nodePool *hyperv1.NodePool, machineTemplateSpec
 
 func (c *CAPI) reconcileMachineSet(ctx context.Context,
 	machineSet *capiv1.MachineSet,
-	machineTemplateCR client.Object) error {
-
+	machineTemplateCR client.Object,
+) error {
 	nodePool := c.nodePool
 	userDataSecret := c.UserDataSecret()
 	capiClusterName := c.capiClusterName
@@ -867,7 +918,6 @@ func (c *CAPI) reconcileMachineSet(ctx context.Context,
 	machineSet.Labels[capiv1.ClusterNameLabel] = capiClusterName
 
 	resourcesName := generateName(capiClusterName, nodePool.Spec.ClusterName, nodePool.GetName())
-	machineSet.Spec.MinReadySeconds = int32(0)
 
 	gvk, err := apiutil.GVKForObject(machineTemplateCR, api.Scheme)
 	if err != nil {
@@ -893,8 +943,11 @@ func (c *CAPI) reconcileMachineSet(ctx context.Context,
 				resourcesName:           resourcesName,
 				capiv1.ClusterNameLabel: capiClusterName,
 			},
-			// Annotations here propagate down to Machines
-			// https://cluster-api.sigs.k8s.io/developer/architecture/controllers/metadata-propagation.html#machinedeployment.
+			// Annotations here propagate down to Machines.
+			// NodePoolReleaseVersionAnnotation is NOT set on the MachineSet template
+			// to avoid conflicting with the in-place upgrader, which sets it per-Machine
+			// after each node completes its upgrade. Machines without the annotation
+			// fall back to nodePool.Status.Version in nodeVersionsFromMachines.
 			Annotations: map[string]string{
 				nodePoolAnnotation: client.ObjectKeyFromObject(nodePool).String(),
 			},
@@ -940,7 +993,8 @@ func (c *CAPI) reconcileMachineSet(ctx context.Context,
 	}
 	machineSet.Spec.Template.Annotations[nodePoolAnnotationTaints] = taintsInJSON
 
-	setMachineSetReplicas(nodePool, machineSet)
+	scaleFromZeroSupported := hasStatusCapacity(machineTemplateCR) || nodePool.Spec.Platform.Type == c.scaleFromZeroPlatform
+	setMachineSetReplicas(nodePool, machineSet, scaleFromZeroSupported)
 
 	isUpdating := false
 	// Propagate version and userData Secret to the MachineSet.
@@ -1047,7 +1101,7 @@ func machineSetInPlaceRolloutIsComplete(machineSet *capiv1.MachineSet) bool {
 
 // setMachineSetReplicas sets wanted replicas:
 // If autoscaling is enabled we reconcile min/max annotations and leave replicas untouched.
-func setMachineSetReplicas(nodePool *hyperv1.NodePool, machineSet *capiv1.MachineSet) {
+func setMachineSetReplicas(nodePool *hyperv1.NodePool, machineSet *capiv1.MachineSet, scaleFromZeroSupported bool) {
 	if machineSet.Annotations == nil {
 		machineSet.Annotations = make(map[string]string)
 	}
@@ -1059,12 +1113,11 @@ func setMachineSetReplicas(nodePool *hyperv1.NodePool, machineSet *capiv1.Machin
 		// 1. if it's a new MachineSet, or the replicas field of the old MachineSet is <= min size, use min size
 		// 2. if the replicas field of the old MachineSet is > max size, use max size
 		//
-		// Guard: Enforce min=1 for non-AWS platforms to prevent scale-from-zero issues.
-		// Even if API validation fails or pre-existing objects exist with min=0, this prevents
-		// NodePools from being permanently stuck at 0 replicas on platforms that don't support
-		// scale-from-zero metadata.
+		// Guard: Enforce min=1 when scale-from-zero is not supported to prevent
+		// NodePools from being permanently stuck at 0 replicas without the
+		// capacity metadata the autoscaler needs to scale back up.
 		effectiveMin := ptr.Deref(nodePool.Spec.AutoScaling.Min, 0)
-		if effectiveMin == 0 && nodePool.Spec.Platform.Type != hyperv1.AWSPlatform {
+		if effectiveMin == 0 && !scaleFromZeroSupported {
 			effectiveMin = 1
 		}
 
@@ -1147,7 +1200,16 @@ func (c *CAPI) spotMachineHealthCheck() *capiv1.MachineHealthCheck {
 
 // reconcileSpotMachineHealthCheck reconciles a MachineHealthCheck specifically for spot instances.
 // This MHC selects machines with the interruptibleInstanceLabel.
-func (c *CAPI) reconcileSpotMachineHealthCheck(ctx context.Context, mhc *capiv1.MachineHealthCheck) error {
+func (c *CAPI) reconcileSpotMachineHealthCheck(_ context.Context, mhc *capiv1.MachineHealthCheck) error {
+	nodePool := c.nodePool
+
+	// Set the nodePoolAnnotation so the enqueueParentNodePool watch handler
+	// can map MHC changes back to the parent NodePool.
+	if mhc.Annotations == nil {
+		mhc.Annotations = map[string]string{}
+	}
+	mhc.Annotations[nodePoolAnnotation] = client.ObjectKeyFromObject(nodePool).String()
+
 	// Spot instances need shorter timeouts for faster response to interruption
 	maxUnhealthy := intstr.FromString("100%")
 	timeOut := 8 * time.Minute
@@ -1319,7 +1381,7 @@ func (c *CAPI) getExistingMachineTemplate(ctx context.Context, template client.O
 			if client.IgnoreNotFound(err) != nil {
 				return fmt.Errorf("failed to get MachineSet %s: %w", ms.Name, err)
 			}
-			//MachineSet does not exist, return NotFoundError.
+			// MachineSet does not exist, return NotFoundError.
 			return err
 		}
 		templateName = ms.Spec.Template.Spec.InfrastructureRef.Name
@@ -1374,4 +1436,45 @@ func (r *NodePoolReconciler) getMachinesForNodePool(ctx context.Context, nodePoo
 	}
 
 	return sortedByCreationTimestamp(machinesForNodePool), nil
+}
+
+// findMHCRemediationAllowedCondition finds the RemediationAllowed condition in a CAPI Conditions slice.
+func findMHCRemediationAllowedCondition(conditions capiv1.Conditions) *capiv1.Condition {
+	for i := range conditions {
+		if conditions[i].Type == capiv1.RemediationAllowedCondition {
+			return &conditions[i]
+		}
+	}
+	return nil
+}
+
+// mhcRemediationAllowedChangedPredicate returns a predicate that filters MHC events
+// to only pass through when the RemediationAllowed condition has changed. Create and
+// Delete events always pass through; Update events are filtered to avoid unnecessary
+// NodePool reconciliations from unrelated MHC status field changes (e.g. CurrentHealthy,
+// Targets) that are already covered by MachineDeployment/MachineSet/Machine watches.
+func mhcRemediationAllowedChangedPredicate() predicate.Funcs {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldMHC, ok := e.ObjectOld.(*capiv1.MachineHealthCheck)
+			if !ok {
+				return true
+			}
+			newMHC, ok := e.ObjectNew.(*capiv1.MachineHealthCheck)
+			if !ok {
+				return true
+			}
+			oldCond := findMHCRemediationAllowedCondition(oldMHC.Status.Conditions)
+			newCond := findMHCRemediationAllowedCondition(newMHC.Status.Conditions)
+			if oldCond == nil && newCond == nil {
+				return false
+			}
+			if oldCond == nil || newCond == nil {
+				return true
+			}
+			return oldCond.Status != newCond.Status ||
+				oldCond.Reason != newCond.Reason ||
+				oldCond.Message != newCond.Message
+		},
+	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests/ignitionserver"
 	"github.com/openshift/hypershift/support/backwardcompat"
 	"github.com/openshift/hypershift/support/globalconfig"
+	"github.com/openshift/hypershift/support/k8sutil"
 	karpenterutil "github.com/openshift/hypershift/support/karpenter"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	"github.com/openshift/hypershift/support/upsert"
@@ -35,14 +36,17 @@ import (
 const (
 	TokenSecretTokenGenerationTime       = "hypershift.openshift.io/last-token-generation-time"
 	TokenSecretReleaseKey                = "release"
+	TokenSecretReleaseVersionKey         = "release-version"
 	TokenSecretTokenKey                  = "token"
 	TokenSecretPullSecretHashKey         = "pull-secret-hash"
 	TokenSecretHCConfigurationHashKey    = "hc-configuration-hash"
 	TokenSecretAdditionalTrustBundleKey  = "additional-trust-bundle-hash"
+	TokenSecretCloudConfigHashKey        = "cloud-config-hash"
 	TokenSecretConfigKey                 = "config"
 	TokenSecretAnnotation                = "hypershift.openshift.io/ignition-config"
 	TokenSecretIgnitionReachedAnnotation = "hypershift.openshift.io/ignition-reached"
 	TokenSecretNodePoolUpgradeType       = "hypershift.openshift.io/node-pool-upgrade-type"
+	TokenSecretOSStreamKey               = "os-stream"
 )
 
 // Token knows how to create an UUUID token for a unique configGenerator Hash.
@@ -59,6 +63,7 @@ type Token struct {
 	pullSecretHash            []byte
 	additionalTrustBundleHash []byte
 	globalConfigHash          []byte
+	cloudConfigHash           []byte
 	userData                  *userData
 }
 
@@ -111,6 +116,11 @@ func NewToken(ctx context.Context, configGenerator *ConfigGenerator, cpoCapabili
 		return nil, fmt.Errorf("failed to hash HostedCluster configuration: %w", err)
 	}
 
+	cloudConfigHash, err := configGenerator.GetCloudConfigHash(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	token := &Token{
 		CreateOrUpdateProvider:    upsert.New(false),
 		ConfigGenerator:           configGenerator,
@@ -118,6 +128,7 @@ func NewToken(ctx context.Context, configGenerator *ConfigGenerator, cpoCapabili
 		pullSecretHash:            []byte(supportutil.HashSimple(pullSecretBytes)),
 		additionalTrustBundleHash: []byte(supportutil.HashSimple(additionalTrustBundle)),
 		globalConfigHash:          []byte(hcConfigurationHash),
+		cloudConfigHash:           []byte(cloudConfigHash),
 	}
 
 	// User data input.
@@ -176,10 +187,14 @@ func (t *Token) cleanupOutdated(ctx context.Context) error {
 		}
 	}
 
-	// For AWS, we keep the old userdata Secret so old Machines during rolled out can be deleted.
-	// Otherwise, deletion fails because of https://github.com/kubernetes-sigs/cluster-api-provider-aws/pull/3805.
-	// TODO (Alberto): enable back deletion when the PR above gets merged.
-	if t.nodePool.Spec.Platform.Type != hyperv1.AWSPlatform {
+	// For AWS and KubeVirt, we keep the old userdata Secret so old Machines during rollout can be deleted.
+	// AWS: deletion fails on CAPA < v2.2.0 (OCP < 4.16) because of
+	// https://github.com/kubernetes-sigs/cluster-api-provider-aws/pull/3805.
+	// TODO (Alberto): remove the AWS guard when OCP < 4.16 support is dropped.
+	// KubeVirt: the Secret is shared by all VMs in the NodePool generation and must
+	// survive until the rollout completes and all old VMs are gone. This is an
+	// architectural requirement, not a temporary workaround.
+	if t.nodePool.Spec.Platform.Type != hyperv1.AWSPlatform && t.nodePool.Spec.Platform.Type != hyperv1.KubevirtPlatform {
 		userDataSecret := t.outdatedUserDataSecret()
 		err = t.Get(ctx, client.ObjectKeyFromObject(userDataSecret), userDataSecret)
 		if err != nil && !apierrors.IsNotFound(err) {
@@ -304,7 +319,7 @@ func (t *Token) reconcileTokenSecret(tokenSecret *corev1.Secret) error {
 	if karpenterutil.IsKarpenterEnabled(t.hostedCluster.Spec.AutoNode) {
 		npLabels := t.nodePool.GetLabels()
 		if npLabels != nil && npLabels[karpenterutil.ManagedByKarpenterLabel] == "true" {
-			tokenSecret.Annotations[supportutil.HostedClusterAnnotation] = client.ObjectKeyFromObject(t.ConfigGenerator.hostedCluster).String()
+			tokenSecret.Annotations[k8sutil.HostedClusterAnnotation] = client.ObjectKeyFromObject(t.ConfigGenerator.hostedCluster).String()
 			if tokenSecret.Labels == nil {
 				tokenSecret.Labels = make(map[string]string)
 			}
@@ -344,6 +359,7 @@ func (t *Token) reconcileTokenSecret(tokenSecret *corev1.Secret) error {
 		tokenSecret.Annotations[TokenSecretTokenGenerationTime] = time.Now().Format(time.RFC3339Nano)
 		tokenSecret.Data[TokenSecretTokenKey] = []byte(uuid.New().String())
 		tokenSecret.Data[TokenSecretReleaseKey] = []byte(t.nodePool.Spec.Release.Image)
+		tokenSecret.Data[TokenSecretReleaseVersionKey] = []byte(t.releaseImage.Version())
 		tokenSecret.Data[TokenSecretConfigKey] = compressedConfig.Bytes()
 
 		// Hash values that are used by the "token secret controller" / "local ignition provider"  to determine if this input
@@ -351,11 +367,14 @@ func (t *Token) reconcileTokenSecret(tokenSecret *corev1.Secret) error {
 		tokenSecret.Data[TokenSecretPullSecretHashKey] = t.pullSecretHash
 		tokenSecret.Data[TokenSecretAdditionalTrustBundleKey] = t.additionalTrustBundleHash
 		tokenSecret.Data[TokenSecretHCConfigurationHashKey] = t.globalConfigHash
+		tokenSecret.Data[TokenSecretOSStreamKey] = []byte(t.resolvedRHELStreamForBootImage)
+		tokenSecret.Data[TokenSecretCloudConfigHashKey] = t.cloudConfigHash
 	}
 	// TODO (alberto): Only apply this on creation and change the hash generation to only use triggering upgrade fields.
 	// We let this change to happen inplace now as the tokenSecret and the mcs config use the whole spec.Config for the comparing hash.
 	// Otherwise if something which does not trigger a new token generation from spec.Config changes, like .IDP, both hashes would mismatch forever.
 	tokenSecret.Data[TokenSecretHCConfigurationHashKey] = t.globalConfigHash
+	tokenSecret.Data[TokenSecretCloudConfigHashKey] = t.cloudConfigHash
 
 	return nil
 }
@@ -378,7 +397,7 @@ func (t *Token) reconcileUserDataSecret(log logr.Logger, userDataSecret *corev1.
 	if karpenterutil.IsKarpenterEnabled(t.hostedCluster.Spec.AutoNode) {
 		npLabels := t.nodePool.GetLabels()
 		if npLabels != nil && npLabels[karpenterutil.ManagedByKarpenterLabel] == "true" {
-			err := setKarpenterAMILabels(log, userDataSecret, t.hostedCluster.Spec.Platform.AWS.Region, t.releaseImage, t.hostedCluster.Spec.Platform.Type)
+			err := setKarpenterAMILabels(log, userDataSecret, t.hostedCluster.Spec.Platform.AWS.Region, t.releaseImage, t.hostedCluster.Spec.Platform.Type, t.resolvedRHELStreamForBootImage)
 			if err != nil {
 				return err
 			}
@@ -400,14 +419,14 @@ func (t *Token) reconcileUserDataSecret(log logr.Logger, userDataSecret *corev1.
 	return nil
 }
 
-func setKarpenterAMILabels(log logr.Logger, userDataSecret *corev1.Secret, region string, releaseImage *releaseinfo.ReleaseImage, platform hyperv1.PlatformType) error {
+func setKarpenterAMILabels(log logr.Logger, userDataSecret *corev1.Secret, region string, releaseImage *releaseinfo.ReleaseImage, platform hyperv1.PlatformType, rhelStream string) error {
 	supportedArchitectures, err := karpenterutil.SupportedArchitectures(platform)
 	if err != nil {
 		return fmt.Errorf("failed to get supported architectures: %w", err)
 	}
 	supported := 0
 	for _, arch := range supportedArchitectures {
-		ami, err := defaultNodePoolAMI(region, arch, releaseImage)
+		ami, err := defaultNodePoolAMI(region, arch, rhelStream, releaseImage)
 		if err != nil {
 			// skip unavailable architectures gracefully
 			log.Error(err, "failed to get default NodePool AMI for architecture", "architecture", arch)

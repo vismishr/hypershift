@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path"
 	"strings"
+	"time"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/cloud/azure"
@@ -21,13 +23,17 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/utils/ptr"
 
 	capiazure "sigs.k8s.io/cluster-api-provider-azure/api/v1beta1"
-	capiv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/blang/semver"
 )
@@ -88,7 +94,7 @@ func (a Azure) ReconcileCAPIInfraCR(
 	return azureCluster, nil
 }
 
-func (a Azure) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _ *hyperv1.HostedControlPlane) (*appsv1.DeploymentSpec, error) {
+func (a Azure) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, hcp *hyperv1.HostedControlPlane) (*appsv1.DeploymentSpec, error) {
 	image := a.capiProviderImage
 	if envImage := os.Getenv(images.AzureCAPIProviderEnvVar); len(envImage) > 0 {
 		image = envImage
@@ -96,6 +102,23 @@ func (a Azure) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _ *hy
 	if override, ok := hcluster.Annotations[hyperv1.ClusterAPIAzureProviderImage]; ok {
 		image = override
 	}
+
+	args := []string{
+		"--namespace=$(MY_NAMESPACE)",
+		"--leader-elect=true",
+		"--feature-gates=MachinePool=false,ASOAPI=false",
+		"--disable-controllers-or-webhooks=DisableASOSecretController",
+	}
+	if hcp != nil && a.payloadVersion != nil && (a.payloadVersion.Major >= 5 || (a.payloadVersion.Major == 4 && a.payloadVersion.Minor >= 23)) {
+		tlsArgs, err := config.TLSArgs(hcp.Spec.Configuration.GetTLSSecurityProfile())
+		if err != nil {
+			return nil, err
+		}
+		if len(tlsArgs) > 0 {
+			args = append(args, tlsArgs...)
+		}
+	}
+
 	defaultMode := int32(0640)
 	deploymentSpec := &appsv1.DeploymentSpec{
 		Replicas: ptr.To[int32](1),
@@ -107,12 +130,7 @@ func (a Azure) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _ *hy
 						Name:            "manager",
 						Image:           image,
 						ImagePullPolicy: corev1.PullIfNotPresent,
-						Args: []string{
-							"--namespace=$(MY_NAMESPACE)",
-							"--leader-elect=true",
-							"--feature-gates=MachinePool=false,ASOAPI=false",
-							"--disable-controllers-or-webhooks=DisableASOSecretController",
-						},
+						Args:            args,
 						Resources: corev1.ResourceRequirements{
 							Requests: corev1.ResourceList{
 								corev1.ResourceCPU:    resource.MustParse("10m"),
@@ -203,13 +221,12 @@ func (a Azure) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _ *hy
 	}
 
 	// For self-managed Azure with workload identity, instruct Azure SDK to use the minted SA token
-	if azureutil.IsSelfManagedAzure(hcluster.Spec.Platform.Type) &&
-		hcluster.Spec.Platform.Azure.AzureAuthenticationConfig.WorkloadIdentities != nil {
+	if azureutil.IsSelfManagedAzureWithWorkloadIdentity(hcluster.Spec.Platform.Type, hcluster.Spec.Platform.Azure) {
 		deploymentSpec.Template.Spec.Containers[0].Env = append(
 			deploymentSpec.Template.Spec.Containers[0].Env,
 			corev1.EnvVar{
 				Name:  "AZURE_FEDERATED_TOKEN_FILE",
-				Value: "/var/run/secrets/openshift/serviceaccount/token",
+				Value: path.Join(config.CloudTokenMountPath, "token"),
 			},
 			corev1.EnvVar{
 				Name:  "AZURE_CLIENT_ID",
@@ -232,7 +249,7 @@ func (a Azure) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _ *hy
 
 		deploymentSpec.Template.Spec.Containers[0].VolumeMounts = append(deploymentSpec.Template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
 			Name:      tokenVolume.Name,
-			MountPath: "/var/run/secrets/openshift/serviceaccount",
+			MountPath: config.CloudTokenMountPath,
 		})
 
 		deploymentSpec.Template.Spec.Containers = append(deploymentSpec.Template.Spec.Containers, corev1.Container{
@@ -243,7 +260,7 @@ func (a Azure) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _ *hy
 				"--token-audience=openshift",
 				"--service-account-namespace=kube-system",
 				"--service-account-name=capi-provider",
-				"--token-file=/var/run/secrets/openshift/serviceaccount/token",
+				fmt.Sprintf("--token-file=%s", path.Join(config.CloudTokenMountPath, "token")),
 				"--kubeconfig=/etc/kubernetes/kubeconfig",
 			},
 			ImagePullPolicy: corev1.PullIfNotPresent,
@@ -256,7 +273,7 @@ func (a Azure) CAPIProviderDeploymentSpec(hcluster *hyperv1.HostedCluster, _ *hy
 			VolumeMounts: []corev1.VolumeMount{
 				{
 					Name:      tokenVolume.Name,
-					MountPath: "/var/run/secrets/openshift/serviceaccount",
+					MountPath: config.CloudTokenMountPath,
 				},
 				{
 					Name:      "svc-kubeconfig",
@@ -280,9 +297,9 @@ func (a Azure) ReconcileCredentials(ctx context.Context, c client.Client, create
 	}
 
 	// For self-managed Azure, use workload identity credentials; for managed Azure, use the existing approach
-	if azureutil.IsSelfManagedAzure(hcluster.Spec.Platform.Type) && hcluster.Spec.Platform.Azure.AzureAuthenticationConfig.WorkloadIdentities != nil {
+	if azureutil.IsSelfManagedAzureWithWorkloadIdentity(hcluster.Spec.Platform.Type, hcluster.Spec.Platform.Azure) {
 		// Add federated token file for workload identity authentication
-		baseSecretData["azure_federated_token_file"] = []byte("/var/run/secrets/openshift/serviceaccount/token")
+		baseSecretData["azure_federated_token_file"] = []byte(path.Join(config.CloudTokenMountPath, "token"))
 
 		// Create credentials for each control plane operator using workload identity client IDs
 		workloadIdentities := hcluster.Spec.Platform.Azure.AzureAuthenticationConfig.WorkloadIdentities
@@ -324,7 +341,7 @@ func (a Azure) ReconcileCredentials(ctx context.Context, c client.Client, create
 	if _, err := createOrUpdate(ctx, c, cloudNetworkConfigCreds, func() error {
 		secretData := maps.Clone(baseSecretData)
 		// For self-managed Azure with workload identities, add the network client ID
-		if azureutil.IsSelfManagedAzure(hcluster.Spec.Platform.Type) && hcluster.Spec.Platform.Azure.AzureAuthenticationConfig.WorkloadIdentities != nil {
+		if azureutil.IsSelfManagedAzureWithWorkloadIdentity(hcluster.Spec.Platform.Type, hcluster.Spec.Platform.Azure) {
 			secretData["azure_client_id"] = []byte(hcluster.Spec.Platform.Azure.AzureAuthenticationConfig.WorkloadIdentities.Network.ClientID)
 		}
 		cloudNetworkConfigCreds.Data = secretData
@@ -355,7 +372,110 @@ func (a Azure) DeleteCredentials(ctx context.Context, c client.Client, hcluster 
 	return nil
 }
 
-func reconcileAzureCluster(azureCluster *capiazure.AzureCluster, hcluster *hyperv1.HostedCluster, apiEndpoint hyperv1.APIEndpoint, azureClusterIdentity *capiazure.AzureClusterIdentity, controlPlaneNamespace string) error {
+// deletionFailedThreshold is the minimum duration a machine must have had a non-zero
+// DeletionTimestamp before it is considered permanently stuck and eligible for orphaning.
+// This guards against orphaning machines that hit transient failures (e.g. rate limiting).
+const deletionFailedThreshold = 10 * time.Minute
+
+// DeleteOrphanedMachines removes the finalizer from AzureMachines that are stuck in deletion
+// either due to credential failures or because the capi-provider (CAPZ) deployment has been
+// unable to run for at least deletionFailedThreshold (e.g. its availability-prober init
+// container is blocked on an unreachable guest API and can never start the manager). The
+// credential-failure case is detected by checking each AzureMachine's Status.Conditions for a
+// Ready=False condition with Reason=DeletionFailed. The CAPZ-unavailable case is detected by
+// checking whether the capi-provider deployment's Available condition has been reporting False
+// for that long. Orphaning the machine allows management cluster cleanup to proceed without
+// requiring valid cloud credentials or a healthy guest API.
+func (Azure) DeleteOrphanedMachines(ctx context.Context, c client.Client, hc *hyperv1.HostedCluster, controlPlaneNamespace string) error {
+	// This orphaning behavior is intended for managed-identity cleanup flow.
+	if hc.Spec.Platform.Azure.AzureAuthenticationConfig.ManagedIdentities == nil {
+		return nil
+	}
+
+	azureMachineList := capiazure.AzureMachineList{}
+	if err := c.List(ctx, &azureMachineList, client.InNamespace(controlPlaneNamespace)); err != nil {
+		return fmt.Errorf("failed to list AzureMachines in %s: %w", controlPlaneNamespace, err)
+	}
+
+	providerUnavailable, err := capiProviderUnavailable(ctx, c, controlPlaneNamespace)
+	if err != nil {
+		return fmt.Errorf("failed to determine capi-provider availability in %s: %w", controlPlaneNamespace, err)
+	}
+
+	logger := ctrl.LoggerFrom(ctx)
+	var errs []error
+
+	for i := range azureMachineList.Items {
+		azureMachine := &azureMachineList.Items[i]
+		if azureMachine.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if time.Since(azureMachine.DeletionTimestamp.Time) < deletionFailedThreshold {
+			continue
+		}
+		deletionFailed := hasDeletionFailedCondition(azureMachine)
+		if !deletionFailed && !providerUnavailable {
+			continue
+		}
+		// Remove the AzureMachine finalizer to orphan the machine, leaving Azure
+		// infrastructure intact rather than attempting cloud API calls with invalid credentials
+		// or waiting indefinitely for a CAPZ manager that can never start.
+		if removed := controllerutil.RemoveFinalizer(azureMachine, capiazure.MachineFinalizer); !removed {
+			continue
+		}
+		if err := c.Update(ctx, azureMachine); err != nil {
+			errs = append(errs, fmt.Errorf("failed to orphan machine %s/%s: %w",
+				azureMachine.Namespace, azureMachine.Name, err))
+			continue
+		}
+		reason := "credential failure"
+		if !deletionFailed {
+			reason = "capi-provider unavailable"
+		}
+		logger.Info("orphaning azuremachine stuck in deletion",
+			"machine", client.ObjectKeyFromObject(azureMachine), "reason", reason)
+	}
+
+	return utilerrors.NewAggregate(errs)
+}
+
+// capiProviderUnavailable reports whether the capi-provider (CAPZ) deployment has been unable
+// to process AzureMachine finalizers for at least deletionFailedThreshold. A missing deployment
+// is treated as immediately unavailable. Otherwise this requires the deployment's Available
+// condition to have been reporting False for at least that long, rather than a point-in-time
+// replica count, so a brief CAPZ restart (e.g. an OOM kill or rolling update) that could still
+// finish real Azure cleanup does not cause a machine to be orphaned prematurely.
+func capiProviderUnavailable(ctx context.Context, c client.Client, controlPlaneNamespace string) (bool, error) {
+	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "capi-provider", Namespace: controlPlaneNamespace}}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(dep), dep); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	for _, cond := range dep.Status.Conditions {
+		if cond.Type == appsv1.DeploymentAvailable {
+			return cond.Status == corev1.ConditionFalse && time.Since(cond.LastTransitionTime.Time) >= deletionFailedThreshold, nil
+		}
+	}
+	return false, nil
+}
+
+// hasDeletionFailedCondition returns true if the AzureMachine has a Ready condition with
+// Status=False and Reason=DeletionFailed, indicating the cloud provider could not delete
+// the underlying VM (e.g., due to invalid or expired credentials).
+func hasDeletionFailedCondition(azureMachine *capiazure.AzureMachine) bool {
+	for _, condition := range azureMachine.Status.Conditions {
+		if condition.Type == capiv1.ReadyCondition &&
+			condition.Status == corev1.ConditionFalse &&
+			condition.Reason == capiazure.DeletionFailedReason {
+			return true
+		}
+	}
+	return false
+}
+
+func reconcileAzureCluster(azureCluster *capiazure.AzureCluster, hcluster *hyperv1.HostedCluster, apiEndpoint hyperv1.APIEndpoint, azureClusterIdentity *capiazure.AzureClusterIdentity, _ string) error {
 	if azureCluster.Annotations == nil {
 		azureCluster.Annotations = map[string]string{}
 	}
@@ -393,7 +513,7 @@ func reconcileAzureCluster(azureCluster *capiazure.AzureCluster, hcluster *hyper
 // resource type can be found here: https://capz.sigs.k8s.io/topics/identities.
 //
 // For non-managed Azure deployments, the AzureClusterIdentity is created using WorkloadIdentity.
-func reconcileAzureClusterIdentity(hc *hyperv1.HostedCluster, azureClusterIdentity *capiazure.AzureClusterIdentity, controlPlaneNamespace string, payloadVersion *semver.Version) error {
+func reconcileAzureClusterIdentity(hc *hyperv1.HostedCluster, azureClusterIdentity *capiazure.AzureClusterIdentity, controlPlaneNamespace string, _ *semver.Version) error {
 	if azureutil.IsAroHCP() {
 		azureCloudType, err := parseCloudType(hc.Spec.Platform.Azure.Cloud)
 		if err != nil {
@@ -464,7 +584,14 @@ func reconcileKMSConfigSecret(secret *corev1.Secret, hc *hyperv1.HostedCluster) 
 		UseInstanceMetadata:          false,
 		LoadBalancerSku:              "standard",
 		DisableOutboundSNAT:          true,
-		AADMSIDataPlaneIdentityPath:  config.ManagedAzureCertificatePath + hc.Spec.SecretEncryption.KMS.Azure.KMS.CredentialsSecretName,
+	}
+
+	if azureutil.IsAroHCP() && hc.Spec.SecretEncryption.KMS.Azure.KMS.CredentialsSecretName != "" {
+		azureConfig.AADMSIDataPlaneIdentityPath = config.ManagedAzureCertificatePath + hc.Spec.SecretEncryption.KMS.Azure.KMS.CredentialsSecretName
+	} else if hc.Spec.SecretEncryption.KMS.Azure.WorkloadIdentity.ClientID != "" {
+		azureConfig.UseWorkloadIdentityExtension = true
+	} else {
+		return fmt.Errorf("azure KMS configured but neither managed identity (kms) nor workload identity (workloadIdentity) credentials are set")
 	}
 
 	serializedConfig, err := json.MarshalIndent(azureConfig, "", "  ")

@@ -3,14 +3,18 @@ package oauth
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
+	"strconv"
 	"strings"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
 	"github.com/openshift/hypershift/support/api"
 	"github.com/openshift/hypershift/support/config"
 	component "github.com/openshift/hypershift/support/controlplane-component"
 	"github.com/openshift/hypershift/support/globalconfig"
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/k8sutil"
 
 	osinv1 "github.com/openshift/api/osin/v1"
 
@@ -23,6 +27,7 @@ const (
 	auditPolicyProfileMapKey = "profile"
 
 	defaultAccessTokenMaxAgeSeconds int32 = 86400
+	OAuthServerPort                 int32 = 6443
 )
 
 // ConfigOverride defines the oauth parameters that can be overridden in special use cases. The only supported
@@ -33,6 +38,15 @@ type ConfigOverride struct {
 	URLs      osinv1.OpenIDURLs   `json:"urls,omitempty"`
 	Claims    osinv1.OpenIDClaims `json:"claims,omitempty"`
 	Challenge *bool               `json:"challenge,omitempty"`
+}
+
+// getOAuthServiceDNS returns the internal cluster DNS name for the OAuth service
+// in the given namespace.
+func getOAuthServiceDNS(namespace string) string {
+	if namespace == "" {
+		return ""
+	}
+	return manifests.OauthServerService("").Name + "." + namespace + ".svc.cluster.local"
 }
 
 func adaptAuditConfig(cpContext component.WorkloadContext, cm *corev1.ConfigMap) error {
@@ -47,12 +61,14 @@ func adaptConfigMap(cpContext component.WorkloadContext, cm *corev1.ConfigMap) e
 	}
 
 	oauthConfig := &osinv1.OsinServerConfig{}
-	if err := util.DeserializeResource(cm.Data[oauthServerConfigKey], oauthConfig, api.Scheme); err != nil {
+	if err := k8sutil.DeserializeResource(cm.Data[oauthServerConfigKey], oauthConfig, api.Scheme); err != nil {
 		return fmt.Errorf("failed to decode existing oauth server configuration: %w", err)
 	}
 
-	adaptOAuthConfig(cpContext, oauthConfig)
-	serializedConfig, err := util.SerializeResource(oauthConfig, api.Scheme)
+	if err := adaptOAuthConfig(cpContext, oauthConfig); err != nil {
+		return err
+	}
+	serializedConfig, err := k8sutil.SerializeResource(oauthConfig, api.Scheme)
 	if err != nil {
 		return fmt.Errorf("failed to serialize oauth server configuration: %w", err)
 	}
@@ -60,19 +76,32 @@ func adaptConfigMap(cpContext component.WorkloadContext, cm *corev1.ConfigMap) e
 	return nil
 }
 
-func adaptOAuthConfig(cpContext component.WorkloadContext, cfg *osinv1.OsinServerConfig) {
+func adaptOAuthConfig(cpContext component.WorkloadContext, cfg *osinv1.OsinServerConfig) error {
 	configuration := cpContext.HCP.Spec.Configuration
 
 	cfg.GenericAPIServerConfig.ServingInfo.NamedCertificates = globalconfig.GetConfigNamedCertificates(configuration.GetNamedCertificates(), oauthNamedCertificateMountPathPrefix)
 
-	cfg.ServingInfo.MinTLSVersion = config.MinTLSVersion(configuration.GetTLSSecurityProfile())
-	cfg.ServingInfo.CipherSuites = config.CipherSuites(configuration.GetTLSSecurityProfile())
+	if err := config.ApplyServingInfoFromTLSProfile(&cfg.ServingInfo.ServingInfo, configuration.GetTLSSecurityProfile()); err != nil {
+		return err
+	}
 
-	masterUrl := fmt.Sprintf("https://%s:%d", cpContext.InfraStatus.OAuthHost, cpContext.InfraStatus.OAuthPort)
+	masterUrl := (&url.URL{
+		Scheme: "https",
+		Host:   net.JoinHostPort(cpContext.InfraStatus.OAuthHost, strconv.Itoa(int(cpContext.InfraStatus.OAuthPort))),
+	}).String()
 	controlPlaneEndpoint := cpContext.HCP.Status.ControlPlaneEndpoint
-	cfg.OAuthConfig.MasterURL = masterUrl
+	cfg.OAuthConfig.MasterURL = fmt.Sprintf("https://%s:%d", getOAuthServiceDNS(cpContext.HCP.Namespace), OAuthServerPort)
 	cfg.OAuthConfig.MasterPublicURL = masterUrl
-	cfg.OAuthConfig.LoginURL = fmt.Sprintf("https://%s:%d", controlPlaneEndpoint.Host, controlPlaneEndpoint.Port)
+
+	loginHost := controlPlaneEndpoint.Host
+	if customDNS := cpContext.HCP.Spec.KubeAPIServerDNSName; len(customDNS) > 0 {
+		loginHost = customDNS
+	}
+	cfg.OAuthConfig.LoginURL = (&url.URL{
+		Scheme: "https",
+		Host:   net.JoinHostPort(loginHost, strconv.Itoa(int(controlPlaneEndpoint.Port))),
+	}).String()
+
 	// loginURLOverride can be used to specify an override for the oauth config login url. The need for this arises
 	// when the login a provider uses doesn't conform to the standard login url in hypershift. The only supported use case
 	// for this is IBMCloud Red Hat Openshift
@@ -90,6 +119,7 @@ func adaptOAuthConfig(cpContext component.WorkloadContext, cfg *osinv1.OsinServe
 		identityProviders, _, _ := ConvertIdentityProviders(cpContext, configuration.OAuth.IdentityProviders, providerOverrides(cpContext.HCP), cpContext.Client, cpContext.HCP.Namespace)
 		cfg.OAuthConfig.IdentityProviders = identityProviders
 	}
+	return nil
 }
 
 func providerOverrides(hcp *hyperv1.HostedControlPlane) map[string]*ConfigOverride {

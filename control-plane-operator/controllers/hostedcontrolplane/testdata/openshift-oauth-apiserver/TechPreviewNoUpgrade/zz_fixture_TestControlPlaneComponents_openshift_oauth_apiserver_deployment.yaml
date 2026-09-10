@@ -1,6 +1,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    hypershift.openshift.io/desired-state-hash: b07ebfe4cda81b8df911b438a1d0528bcf7df8a72e0873c3eb1b4667bdb34415
   labels:
     hypershift.openshift.io/managed-by: control-plane-operator
   name: openshift-oauth-apiserver
@@ -95,7 +97,6 @@ spec:
         - --audit-policy-file=/etc/kubernetes/audit-config/policy.yaml
         - --cors-allowed-origins='//127\.0\.0\.1(:|$)'
         - --cors-allowed-origins='//localhost(:|$)'
-        - --v=2
         - --requestheader-client-ca-file=/etc/kubernetes/certs/aggregator-client-ca/ca.crt
         - --requestheader-allowed-names=kube-apiserver-proxy,system:kube-apiserver-proxy,system:openshift-aggregator
         - --requestheader-username-headers=X-Remote-User
@@ -105,6 +106,8 @@ spec:
         - --api-audiences=https://test-oidc-bucket.s3.us-east-1.amazonaws.com/test-cluster
         - --etcd-servers=https://etcd-client:2379
         - --tls-min-version=VersionTLS12
+        - --tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+        - --v=2
         command:
         - /usr/bin/oauth-apiserver
         env:
@@ -260,6 +263,24 @@ spec:
         name: availability-prober
         resources: {}
         terminationMessagePolicy: FallbackToLogsOnError
+      - args:
+        - -c
+        - |
+          #!/bin/sh
+          while ! nslookup etcd-client.$(POD_NAMESPACE).svc; do sleep 1; done
+        command:
+        - /bin/bash
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        image: cli
+        imagePullPolicy: IfNotPresent
+        name: wait-for-etcd
+        resources: {}
+        terminationMessagePolicy: FallbackToLogsOnError
       priorityClassName: hypershift-api-critical
       terminationGracePeriodSeconds: 120
       tolerations:
@@ -271,6 +292,14 @@ spec:
         key: hypershift.openshift.io/cluster
         operator: Equal
         value: hcp-namespace
+      - effect: NoExecute
+        key: node.kubernetes.io/not-ready
+        operator: Exists
+        tolerationSeconds: 10
+      - effect: NoExecute
+        key: node.kubernetes.io/unreachable
+        operator: Exists
+        tolerationSeconds: 10
       volumes:
       - emptyDir: {}
         name: work-logs

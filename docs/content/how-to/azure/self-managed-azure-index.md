@@ -30,7 +30,7 @@ Unlike managed Azure HyperShift deployments, self-managed Azure:
 Self-managed Azure HyperShift supports two DNS management approaches, and both are documented in the same guides:
 
 | Aspect | With External DNS | Without External DNS |
-|--------|------------------|---------------------|
+| -------- | ------------------ | --------------------- |
 | **Best For** | Production, multi-cluster | Development, testing |
 | **API Server DNS** | Custom (e.g., `api-cluster.example.com`) | Azure LoadBalancer (e.g., `abc123.region.cloudapp.azure.com`) |
 | **Setup Complexity** | Higher (requires DNS zones, service principal) | Lower (minimal configuration) |
@@ -66,10 +66,7 @@ You can create workload identities using either:
 
 **When to Complete**: This is a one-time setup that can be reused across multiple hosted clusters. Complete this before proceeding to Phase 2.
 
-👉 **Guides**:
-
-- [Azure Workload Identity Setup](azure-workload-identity-setup.md) - Overview with CLI and OIDC configuration
-- [Create Azure IAM Resources Separately](create-iam-separately.md) - Detailed IAM command reference
+👉 **Guide**: [Create Azure IAM Resources](create-iam-separately.md) - OIDC issuer configuration and workload identity creation
 
 ### Phase 2: Management Cluster Setup
 
@@ -96,6 +93,7 @@ This phase creates your actual hosted OpenShift clusters:
 - **Infrastructure Provisioning**: Creates resource groups, VNets, subnets, and network security groups
 - **HostedCluster Creation**: Deploys the control plane on the management cluster and worker nodes in your Azure subscription
 - **Workload Identity Integration**: Links the hosted cluster to the workload identities created in Phase 1
+- **Private Endpoint Access** (Optional): Configures Azure Private Link for private API server connectivity
 
 **Why This Matters**: This is where you deploy the actual OpenShift clusters that your applications will run on. Each hosted cluster gets its own control plane running on the management cluster and its own set of worker node VMs in Azure. The cluster uses the workload identities from Phase 1 to securely access Azure services without storing credentials.
 
@@ -109,23 +107,23 @@ Before beginning the deployment process, ensure you have:
 
 - **Azure Resources**:
 
-    - An existing Azure OpenShift management cluster
-    - Azure subscription with appropriate permissions (Contributor + User Access Administrator)
-    - (Optional) A parent DNS zone in Azure DNS for delegating cluster DNS records (required only if using External DNS)
+  - An existing Azure OpenShift management cluster
+  - Azure subscription with appropriate permissions (Contributor + User Access Administrator)
+  - (Optional) A parent DNS zone in Azure DNS for delegating cluster DNS records (required only if using External DNS)
 
 - **Tools and Access**:
 
-    - Azure CLI (`az`) configured with your subscription
-    - OpenShift CLI (`oc`) or Kubernetes CLI (`kubectl`)
-    - HyperShift CLI binary
-    - `jq` command-line JSON processor
-    - Cloud Credential Operator (CCO) tool
-    - Valid OpenShift pull secret
+  - Azure CLI (`az`) configured with your subscription
+  - OpenShift CLI (`oc`) or Kubernetes CLI (`kubectl`)
+  - HyperShift CLI binary
+  - `jq` command-line JSON processor
+  - Cloud Credential Operator (CCO) tool
+  - Valid OpenShift pull secret
 
 - **Permissions**:
 
-    - Subscription-level Contributor and User Access Administrator roles
-    - Microsoft Graph API permissions (Application.ReadWrite.OwnedBy) for creating service principals
+  - Subscription-level Contributor and User Access Administrator roles
+  - Microsoft Graph API permissions (Application.ReadWrite.OwnedBy) for creating service principals
 
 ## Resource Group Strategy
 
@@ -133,16 +131,16 @@ Self-managed Azure deployments use multiple resource groups with different lifec
 
 - **Persistent Resource Group** (e.g., `os4-common`): Long-lived resources shared across multiple clusters
 
-    - Workload identities (managed identities)
-    - OIDC issuer storage account
-    - Azure DNS zones (if using External DNS)
-    - External DNS service principal (if using External DNS)
+  - Workload identities (managed identities)
+  - OIDC issuer storage account
+  - Azure DNS zones (if using External DNS)
+  - External DNS service principal (if using External DNS)
 
 - **Cluster-Specific Resource Groups**: Created and destroyed with each hosted cluster
 
-    - Managed resource group for cluster infrastructure
-    - VNet resource group (if using custom networking)
-    - NSG resource group (if using custom networking)
+  - Managed resource group for cluster infrastructure
+  - VNet resource group (if using custom networking)
+  - NSG resource group (if using custom networking)
 
 !!! tip "Resource Reuse"
 
@@ -161,14 +159,18 @@ Self-managed Azure HyperShift implements several security best practices:
 2. **Least Privilege Access**: Each component gets its own managed identity with minimal required permissions
 3. **Network Isolation**: Custom VNets and NSGs allow you to implement network segmentation and security policies
 4. **Federated Credentials**: Trust relationships are scoped to specific service accounts, preventing unauthorized access
+5. **Private Connectivity** (Optional): Azure Private Link provides private API server access, ensuring control plane traffic never traverses the public internet. See [Deploy Azure Private Clusters](deploy-azure-private-clusters.md)
 
 ## Next Steps
 
 Begin your self-managed Azure HyperShift deployment by following the guides in order:
 
-1. **[Azure Workload Identity Setup](azure-workload-identity-setup.md)** - Set up managed identities and OIDC federation (or use [Create Azure IAM Resources Separately](create-iam-separately.md) for CLI-based setup)
+1. **[Create Azure IAM Resources](create-iam-separately.md)** - Set up OIDC issuer, managed identities, and workload identity federation
 2. **[Setup Azure Management Cluster for HyperShift](setup-management-cluster.md)** - Install HyperShift operator (with or without External DNS)
 3. **[Create a Self-Managed Azure HostedCluster](create-self-managed-azure-cluster.md)** - Deploy your first hosted cluster
+4. **[Deploy Azure Private Clusters](deploy-azure-private-clusters.md)** (Optional) - Configure private endpoint access with Azure Private Link
+5. **[Autoscaling](autoscaling-self-managed.md)** - Configure node pool and cluster autoscaling
+6. **[Etcd Snapshot Backup](../disaster-recovery/platform-guides/azure.md)** (Optional) - Configure etcd backup with Azure Blob Storage
 
 Each guide includes sections for both DNS approaches - simply follow the sections that match your choice.
 

@@ -158,22 +158,24 @@ func computeCatalogImages(releaseVersion func() (*semver.Version, error), imageE
 	catalogImageNames := map[string]string{
 		"certified-operators": "certified-operator-index",
 		"community-operators": "community-operator-index",
-		"redhat-marketplace":  "redhat-marketplace-index",
 		"redhat-operators":    "redhat-operator-index",
 	}
 
 	catalogs := map[string]string{
 		"certified-operators": "",
 		"community-operators": "",
-		"redhat-marketplace":  "",
 		"redhat-operators":    "",
 	}
 
+	maxCatalogVersion := semver.Version{Major: 4, Minor: 22}
 	for catalog := range catalogs {
 		catalogVersion := *version
-		// Start at 4.21 until the 4.22 catalog images works properly
-		if catalogVersion.Minor > 21 {
-			catalogVersion.Minor = 21
+		// Cap catalog version to the latest known-good catalog images.
+		// Use semver comparison to correctly handle the 4.x to 5.0 major version boundary.
+		catalogMajorMinor := semver.Version{Major: catalogVersion.Major, Minor: catalogVersion.Minor}
+		if catalogMajorMinor.GT(maxCatalogVersion) {
+			catalogVersion.Major = maxCatalogVersion.Major
+			catalogVersion.Minor = maxCatalogVersion.Minor
 		}
 		for i := range supportedVersions {
 			for _, registry := range registries {

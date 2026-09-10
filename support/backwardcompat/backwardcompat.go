@@ -1,14 +1,14 @@
 package backwardcompat
 
 import (
-	"context"
-	"fmt"
+	"bytes"
 
 	"github.com/openshift/hypershift/api/hypershift/v1beta1"
-	"github.com/openshift/hypershift/support/releaseinfo"
 	supportutil "github.com/openshift/hypershift/support/util"
 
-	"github.com/blang/semver"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	sigyaml "sigs.k8s.io/yaml"
 )
 
 const ImageStreamImportModeField = "imageStreamImportMode"
@@ -32,25 +32,20 @@ func GetBackwardCompatibleConfigHash(config *v1beta1.ClusterConfiguration) (stri
 	return supportutil.HashStructWithJSONMapper(config, supportutil.NewOmitFieldIfEmptyJSONMapper(ImageStreamImportModeField))
 }
 
-// GetBackwardCompatibleCAPIImage returns a CAPI image pinned to a CAPI 1.10 compatible version.
-// If the releaseVersion is 4.21 or higher. Otherwise an empty string is returned.
-func GetBackwardCompatibleCAPIImage(ctx context.Context, pullSecret []byte, releaseProvider releaseinfo.Provider, releaseVersion semver.Version, component string) (string, error) {
-	// TODO(https://issues.redhat.com/browse/CNTRLPLANE-1200): Remove this override once Hypershift installs the CAPI v1beta2 API version
-	// temporary override for 4.21 to unblock CAPI bump to 1.11 which introduces a new API version.
-	// The images returned are pinned to version 4.20.10.
-	const (
-		pinnedRelease = "quay.io/openshift-release-dev/ocp-release@sha256:7f183e9b5610a2c9f9aabfd5906b418adfbe659f441b019933426a19bf6a5962"
-		minRelease    = "4.21.0-0"
-	)
-
-	if releaseVersion.GTE(semver.MustParse(minRelease)) {
-		imageOverride, err := supportutil.GetPayloadImageFromRelease(ctx, releaseProvider, pinnedRelease, component, pullSecret)
-		if err != nil {
-			return "", fmt.Errorf("error getting backwards compatible image for %s:%s: %w", component, pinnedRelease, err)
-		}
-
-		return imageOverride, nil
+// NormalizeV1Alpha1ClusterImagePolicy rewrites the apiVersion of ClusterImagePolicy
+// manifests from config.openshift.io/v1alpha1 to config.openshift.io/v1.
+//
+// The ClusterImagePolicy type was promoted from v1alpha1 to v1 in openshift/api and the
+// Go type no longer exists in the v1alpha1 package. Without this normalization, existing
+// NodePools that reference v1alpha1 ClusterImagePolicy configs would fail to decode after
+// a HyperShift Operator upgrade, breaking reconciliation for those clusters.
+func NormalizeV1Alpha1ClusterImagePolicy(manifest []byte) []byte {
+	var meta metav1.TypeMeta
+	if err := sigyaml.Unmarshal(manifest, &meta); err != nil {
+		return manifest
 	}
-
-	return "", nil
+	if meta.APIVersion == "config.openshift.io/v1alpha1" && meta.Kind == "ClusterImagePolicy" {
+		manifest = bytes.Replace(manifest, []byte("config.openshift.io/v1alpha1"), []byte("config.openshift.io/v1"), 1)
+	}
+	return manifest
 }

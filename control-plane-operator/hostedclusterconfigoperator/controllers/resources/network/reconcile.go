@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -32,11 +33,10 @@ const kubevirtDefaultVXLANPort = uint32(9879)
 // 9880 is a currently unassigned IANA port in the user port range.
 const kubevirtDefaultGenevePort = uint32(9880)
 
-// The default OVN gateway router LRP CIDR is 100.64.0.0/16 and the default UDNs
-// is 100.65.0.0/16. We need to avoid that for kubernetes which runs nested.
-const kubevirtDefaultV4InternalSubnet = "100.66.0.0/16"
+const kubevirtDefaultV4InternalSubnet = hyperv1.KubevirtDefaultV4InternalSubnet
+const kubevirtDefaultV6InternalJoinSubnet = hyperv1.KubevirtDefaultV6InternalJoinSubnet
 
-func ReconcileNetworkOperator(network *operatorv1.Network, networkType hyperv1.NetworkType, platformType hyperv1.PlatformType, disableMultiNetwork bool, ovnConfig *hyperv1.OVNKubernetesConfig) {
+func ReconcileNetworkOperator(network *operatorv1.Network, networkType hyperv1.NetworkType, platformType hyperv1.PlatformType, disableMultiNetwork bool, ovnConfig *hyperv1.OVNKubernetesConfig, hasIPv6Network bool) {
 	switch platformType {
 	case hyperv1.KubevirtPlatform:
 		// Modify vxlan port to avoid collisions with management cluster's default vxlan port.
@@ -60,6 +60,14 @@ func ReconcileNetworkOperator(network *operatorv1.Network, networkType hyperv1.N
 			if network.Spec.DefaultNetwork.OVNKubernetesConfig.GenevePort == nil {
 				network.Spec.DefaultNetwork.OVNKubernetesConfig.GenevePort = &port
 			}
+			if hasIPv6Network {
+				if network.Spec.DefaultNetwork.OVNKubernetesConfig.IPv6 == nil {
+					network.Spec.DefaultNetwork.OVNKubernetesConfig.IPv6 = &operatorv1.IPv6OVNKubernetesConfig{}
+				}
+				if network.Spec.DefaultNetwork.OVNKubernetesConfig.IPv6.InternalJoinSubnet == "" {
+					network.Spec.DefaultNetwork.OVNKubernetesConfig.IPv6.InternalJoinSubnet = kubevirtDefaultV6InternalJoinSubnet
+				}
+			}
 		}
 	case hyperv1.PowerVSPlatform:
 		if networkType == hyperv1.OVNKubernetes {
@@ -81,19 +89,7 @@ func ReconcileNetworkOperator(network *operatorv1.Network, networkType hyperv1.N
 		if network.Spec.DefaultNetwork.OVNKubernetesConfig == nil {
 			network.Spec.DefaultNetwork.OVNKubernetesConfig = &operatorv1.OVNKubernetesConfig{}
 		}
-		ovnCfg := network.Spec.DefaultNetwork.OVNKubernetesConfig
-		// Apply IPv4 configuration
-		if ovnConfig.IPv4 != nil {
-			if ovnCfg.IPv4 == nil {
-				ovnCfg.IPv4 = &operatorv1.IPv4OVNKubernetesConfig{}
-			}
-			if ovnConfig.IPv4.InternalJoinSubnet != "" {
-				ovnCfg.IPv4.InternalJoinSubnet = ovnConfig.IPv4.InternalJoinSubnet
-			}
-			if ovnConfig.IPv4.InternalTransitSwitchSubnet != "" {
-				ovnCfg.IPv4.InternalTransitSwitchSubnet = ovnConfig.IPv4.InternalTransitSwitchSubnet
-			}
-		}
+		applyOVNConfig(network.Spec.DefaultNetwork.OVNKubernetesConfig, ovnConfig)
 	}
 
 	// Setting the management state is required in order to create
@@ -107,6 +103,48 @@ func ReconcileNetworkOperator(network *operatorv1.Network, networkType hyperv1.N
 	// Set disableMultiNetwork to disable Multus CNI and related components
 	if disableMultiNetwork {
 		network.Spec.DisableMultiNetwork = &disableMultiNetwork
+	}
+}
+
+// applyOVNConfig applies user-specified OVN configuration to the network operator config.
+// User-specified values take precedence over platform defaults (e.g., KubeVirt's 100.66.0.0/16).
+func applyOVNConfig(ovnCfg *operatorv1.OVNKubernetesConfig, ovnConfig *hyperv1.OVNKubernetesConfig) {
+	// Apply IPv4 configuration
+	if ovnConfig.IPv4 != nil {
+		if ovnCfg.IPv4 == nil {
+			ovnCfg.IPv4 = &operatorv1.IPv4OVNKubernetesConfig{}
+		}
+		if ovnConfig.IPv4.InternalJoinSubnet != "" {
+			ovnCfg.IPv4.InternalJoinSubnet = ovnConfig.IPv4.InternalJoinSubnet
+		}
+		if ovnConfig.IPv4.InternalTransitSwitchSubnet != "" {
+			ovnCfg.IPv4.InternalTransitSwitchSubnet = ovnConfig.IPv4.InternalTransitSwitchSubnet
+		}
+	}
+	// Apply IPv6 configuration
+	if ovnConfig.IPv6.InternalJoinSubnet != "" {
+		if ovnCfg.IPv6 == nil {
+			ovnCfg.IPv6 = &operatorv1.IPv6OVNKubernetesConfig{}
+		}
+		ovnCfg.IPv6.InternalJoinSubnet = ovnConfig.IPv6.InternalJoinSubnet
+	}
+	if ovnConfig.IPv6.InternalTransitSwitchSubnet != "" {
+		if ovnCfg.IPv6 == nil {
+			ovnCfg.IPv6 = &operatorv1.IPv6OVNKubernetesConfig{}
+		}
+		ovnCfg.IPv6.InternalTransitSwitchSubnet = ovnConfig.IPv6.InternalTransitSwitchSubnet
+	}
+	// Apply MTU configuration
+	if ovnConfig.MTU > 0 {
+		ovnCfg.MTU = ptr.To(uint32(ovnConfig.MTU))
+	}
+	// Apply V4InternalSubnet configuration.
+	if ovnConfig.V4InternalSubnet != "" {
+		ovnCfg.V4InternalSubnet = ovnConfig.V4InternalSubnet
+	}
+	// Apply V6InternalSubnet configuration.
+	if ovnConfig.V6InternalSubnet != "" {
+		ovnCfg.V6InternalSubnet = ovnConfig.V6InternalSubnet
 	}
 }
 

@@ -30,6 +30,8 @@ const (
 	// drainFailureRequeueDuration is the delay until we retry draining the node, such that other nodes
 	// get a chance in the queue
 	drainFailureRequeueDuration = 1 * time.Minute
+
+	machineConfigDaemonPodNameFormat = "machine-config-daemon-%s"
 )
 
 type Reconciler struct {
@@ -43,7 +45,6 @@ type Reconciler struct {
 
 func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
-	log.Info("Reconciling")
 
 	node := &corev1.Node{}
 	err := r.guestClusterClient.Get(ctx, req.NamespacedName, node)
@@ -73,8 +74,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 func (r *Reconciler) handleNodeDrainRequest(ctx context.Context, node *corev1.Node, desiredState string) error {
 	log := ctrl.LoggerFrom(ctx)
 
-	// TODO (jerzhang): this name is deterministic, but should make this a const somewhere
-	daemonPodOnNodeName := fmt.Sprintf("machine-config-daemon-%s", node.Name)
+	daemonPodOnNodeName := fmt.Sprintf(machineConfigDaemonPodNameFormat, node.Name)
 	drainer := &drain.Helper{
 		Client:              r.guestClusterKubeClient,
 		Force:               true,

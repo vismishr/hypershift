@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/openshift/hypershift/support/awsapi"
+	supportawsutil "github.com/openshift/hypershift/support/awsutil"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/route53"
@@ -114,6 +115,22 @@ func (o *CreateInfraOptions) CreatePrivateZone(ctx context.Context, logger logr.
 	id = cleanZoneID(aws.ToString(res.HostedZone.Id))
 	logger.Info("Created private zone", "name", name, "id", id)
 
+	r53Tags := []route53types.Tag{
+		{Key: aws.String(clusterTag(o.InfraID)), Value: aws.String(clusterTagValue)},
+		{Key: aws.String(supportawsutil.HypershiftInfraIDTagKey), Value: aws.String(o.InfraID)},
+		{Key: aws.String(supportawsutil.HypershiftClusterNameTagKey), Value: aws.String(o.Name)},
+	}
+	for _, t := range o.additionalEC2Tags {
+		r53Tags = append(r53Tags, route53types.Tag{Key: t.Key, Value: t.Value})
+	}
+	if _, err := client.ChangeTagsForResource(ctx, &route53.ChangeTagsForResourceInput{
+		ResourceId:   aws.String(id),
+		ResourceType: route53types.TagResourceTypeHostedzone,
+		AddTags:      r53Tags,
+	}); err != nil {
+		return "", fmt.Errorf("failed to tag hosted zone: %w", err)
+	}
+
 	err = setSOAMinimum(ctx, client, id, name)
 	if err != nil {
 		return "", err
@@ -188,7 +205,10 @@ func (o *DestroyInfraOptions) CleanupPublicZone(ctx context.Context, client awsa
 	name := o.BaseDomain
 	id, err := LookupZone(ctx, client, name, false)
 	if err != nil {
-		return nil
+		if strings.Contains(err.Error(), "not found") {
+			return nil
+		}
+		return fmt.Errorf("failed to lookup public hosted zone %s: %w", name, err)
 	}
 	recordName := fmt.Sprintf("*.apps.%s.%s", o.Name, o.BaseDomain)
 	err = deleteRecord(ctx, client, id, recordName)
@@ -239,12 +259,12 @@ func setSOAMinimum(ctx context.Context, client awsapi.ROUTE53API, id, name strin
 func deleteZone(ctx context.Context, id string, client awsapi.ROUTE53API, logger logr.Logger) error {
 	err := deleteRecords(ctx, client, id, logger)
 	if err != nil {
-		return fmt.Errorf("failed to delete hosted zone records: %v", err)
+		return fmt.Errorf("failed to delete hosted zone records: %w", err)
 	}
 	if _, err = client.DeleteHostedZone(ctx, &route53.DeleteHostedZoneInput{
 		Id: aws.String(id),
 	}); err != nil {
-		return fmt.Errorf("failed to delete hosted zone: %v", err)
+		return fmt.Errorf("failed to delete hosted zone: %w", err)
 	}
 	return nil
 }

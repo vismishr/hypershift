@@ -10,7 +10,9 @@ import (
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests/ignitionserver"
+	"github.com/openshift/hypershift/hypershift-operator/featuregate"
 	ignserver "github.com/openshift/hypershift/ignition-server/controllers"
+	"github.com/openshift/hypershift/support/netutil"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	"github.com/openshift/hypershift/support/supportedversion"
 	"github.com/openshift/hypershift/support/util"
@@ -20,7 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
-	capiv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	capiv1 "sigs.k8s.io/cluster-api/api/core/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -98,11 +100,24 @@ func FindStatusCondition(conditions []hyperv1.NodePoolCondition, conditionType s
 	return nil
 }
 
-// FindStatusCondition finds the conditionType in conditions.
-func findCAPIStatusCondition(conditions []capiv1.Condition, conditionType capiv1.ConditionType) *capiv1.Condition {
-	for i := range conditions {
-		if conditions[i].Type == conditionType {
-			return &conditions[i]
+// machineConditionResult normalizes a CAPI Machine condition into a common struct.
+type machineConditionResult struct {
+	Status  corev1.ConditionStatus
+	Reason  string
+	Message string
+}
+
+// findMachineStatusCondition looks up a condition on a CAPI Machine from
+// Machine.Status.Conditions ([]capiv1.Condition).
+// Returns nil if the condition is not found.
+func findMachineStatusCondition(machine *capiv1.Machine, conditionType string) *machineConditionResult {
+	for i := range machine.Status.Conditions {
+		if string(machine.Status.Conditions[i].Type) == conditionType {
+			return &machineConditionResult{
+				Status:  machine.Status.Conditions[i].Status,
+				Reason:  machine.Status.Conditions[i].Reason,
+				Message: machine.Status.Conditions[i].Message,
+			}
 		}
 	}
 
@@ -146,16 +161,16 @@ func generateReconciliationActiveCondition(pausedUntilField *string, objectGener
 
 // setPlatformConditions is a hook for platforms to implement custom logic/conditions freely
 // TODO: refactor signature to be inline with the rest of condition setters, and move common conditions like NodePoolValidPlatformImageType to a separate function.
-func (r *NodePoolReconciler) setPlatformConditions(ctx context.Context, hcluster *hyperv1.HostedCluster, nodePool *hyperv1.NodePool, controlPlaneNamespace string, releaseImage *releaseinfo.ReleaseImage) error {
+func (r *NodePoolReconciler) setPlatformConditions(ctx context.Context, hcluster *hyperv1.HostedCluster, nodePool *hyperv1.NodePool, controlPlaneNamespace string, releaseImage *releaseinfo.ReleaseImage, resolvedRHELStream string) error {
 	switch nodePool.Spec.Platform.Type {
 	case hyperv1.KubevirtPlatform:
-		return r.setKubevirtConditions(ctx, nodePool, hcluster, controlPlaneNamespace, releaseImage)
+		return r.setKubevirtConditions(ctx, nodePool, hcluster, controlPlaneNamespace, releaseImage, resolvedRHELStream)
 	case hyperv1.AWSPlatform:
-		return r.setAWSConditions(ctx, nodePool, hcluster, controlPlaneNamespace, releaseImage)
+		return r.setAWSConditions(ctx, nodePool, hcluster, controlPlaneNamespace, releaseImage, resolvedRHELStream)
 	case hyperv1.PowerVSPlatform:
-		return r.setPowerVSconditions(ctx, nodePool, hcluster, controlPlaneNamespace, releaseImage)
+		return r.setPowerVSconditions(ctx, nodePool, hcluster, controlPlaneNamespace, releaseImage, resolvedRHELStream)
 	case hyperv1.OpenStackPlatform:
-		return r.setOpenStackConditions(ctx, nodePool, hcluster, controlPlaneNamespace, releaseImage)
+		return r.setOpenStackConditions(ctx, nodePool, hcluster, controlPlaneNamespace, releaseImage, resolvedRHELStream)
 	default:
 		return nil
 	}
@@ -168,9 +183,7 @@ func (r *NodePoolReconciler) autoscalerEnabledCondition(_ context.Context, nodeP
 			// Check platform-specific support
 			var supported bool
 			switch nodePool.Spec.Platform.Type {
-			case hyperv1.AWSPlatform:
-				// AWS supports scale-from-zero either natively (when CPO supports it)
-				// or via MachineDeployment controller workaround annotations
+			case hyperv1.AWSPlatform, hyperv1.AzurePlatform:
 				supported = true
 			default:
 				// Other platforms don't support autoscaling from zero yet
@@ -272,6 +285,31 @@ func (r *NodePoolReconciler) ignitionEndpointAvailableCondition(ctx context.Cont
 		log.Info("Ignition endpoint not available, waiting")
 		return &ctrl.Result{}, nil
 	}
+	// Gate on AzurePlatform (not just ARO HCP) because Azure DNS API throttling
+	// (429s) can delay any Azure DNS zone, not only ARO-managed ones.
+	// ServiceExternalDNSHostnameByHC already narrows this to public clusters with
+	// an explicit external DNS hostname, so self-managed Azure without external
+	// DNS is unaffected.
+	if hcluster.Spec.Platform.Type == hyperv1.AzurePlatform {
+		ignitionHostname := netutil.ServiceExternalDNSHostnameByHC(hcluster, hyperv1.Ignition)
+		if ignitionHostname != "" {
+			resolveDNSHostname := r.resolveDNSHostname
+			if resolveDNSHostname == nil {
+				resolveDNSHostname = netutil.ResolveDNSHostname
+			}
+			if err := resolveDNSHostname(ctx, ignitionHostname); err != nil {
+				SetStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
+					Type:               string(hyperv1.IgnitionEndpointAvailable),
+					Status:             corev1.ConditionFalse,
+					Reason:             hyperv1.ExternalDNSHostNotReachableReason,
+					Message:            fmt.Sprintf("Ignition endpoint DNS hostname %q is not resolvable: %v", ignitionHostname, err),
+					ObservedGeneration: nodePool.Generation,
+				})
+				log.Info("Ignition endpoint DNS hostname is not resolvable, waiting")
+				return &ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
+		}
+	}
 	removeStatusCondition(&nodePool.Status.Conditions, string(hyperv1.IgnitionEndpointAvailable))
 
 	caSecret := ignitionserver.IgnitionCACertSecret(controlPlaneNamespace)
@@ -355,13 +393,37 @@ func (r *NodePoolReconciler) validMachineConfigCondition(ctx context.Context, no
 		return &ctrl.Result{}, nil
 	}
 
+	// Validate osImageStream before expensive config generation to fail fast.
+	osStreamsEnabled := featuregate.Gate().Enabled(featuregate.OSStreams)
+	if err := validateOSImageStream(ctx, r.Client, nodePool, releaseImage, osStreamsEnabled); err != nil {
+		SetStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
+			Type:               hyperv1.NodePoolValidMachineConfigConditionType,
+			Status:             corev1.ConditionFalse,
+			Reason:             hyperv1.NodePoolValidationFailedReason,
+			Message:            err.Error(),
+			ObservedGeneration: nodePool.Generation,
+		})
+		return &ctrl.Result{}, fmt.Errorf("failed to validate osImageStream: %w", err)
+	}
+
 	haproxyRawConfig, err := r.generateHAProxyRawConfig(ctx, nodePool, hcluster, releaseImage)
 	if err != nil {
 		return &ctrl.Result{}, fmt.Errorf("failed to generate HAProxy raw config: %w", err)
 	}
 
 	controlPlaneNamespace := manifests.HostedControlPlaneNamespace(hcluster.Namespace, hcluster.Name)
-	_, err = NewConfigGenerator(ctx, r.Client, hcluster, nodePool, releaseImage, haproxyRawConfig, controlPlaneNamespace)
+	resolvedRHELStream, err := GetRHELStreamForBootImage(ctx, r.Client, nodePool, releaseImage, osStreamsEnabled)
+	if err != nil {
+		SetStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
+			Type:               hyperv1.NodePoolValidPlatformImageType,
+			Status:             corev1.ConditionFalse,
+			Reason:             hyperv1.NodePoolValidationFailedReason,
+			Message:            err.Error(),
+			ObservedGeneration: nodePool.Generation,
+		})
+		return &ctrl.Result{}, fmt.Errorf("failed to resolve RHEL stream for boot image: %w", err)
+	}
+	_, err = NewConfigGenerator(ctx, r.Client, hcluster, nodePool, releaseImage, haproxyRawConfig, controlPlaneNamespace, resolvedRHELStream)
 	if err != nil {
 		SetStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 			Type:               hyperv1.NodePoolValidMachineConfigConditionType,
@@ -372,6 +434,7 @@ func (r *NodePoolReconciler) validMachineConfigCondition(ctx context.Context, no
 		})
 		return &ctrl.Result{}, fmt.Errorf("failed to generate config: %w", err)
 	}
+
 	SetStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 		Type:               hyperv1.NodePoolValidMachineConfigConditionType,
 		Status:             corev1.ConditionTrue,
@@ -586,7 +649,7 @@ func (r *NodePoolReconciler) setMachineAndNodeConditions(ctx context.Context, no
 
 	r.setAllNodesHealthyCondition(nodePool, machines)
 
-	err = r.setCIDRConflictCondition(nodePool, machines, hc)
+	err = r.setCIDRConflictCondition(ctx, nodePool, machines, hc)
 	if err != nil {
 		return err
 	}
@@ -604,9 +667,9 @@ func (r *NodePoolReconciler) setMachineAndNodeConditions(ctx context.Context, no
 func (r *NodePoolReconciler) setAllNodesHealthyCondition(nodePool *hyperv1.NodePool, machines []*capiv1.Machine) {
 	status := corev1.ConditionTrue
 	reason := hyperv1.AsExpectedReason
-	var message string
+	message := hyperv1.AllIsWellMessage
 
-	if len(machines) < 1 {
+	if numMachines := len(machines); numMachines == 0 {
 		status = corev1.ConditionFalse
 		reason = hyperv1.NodePoolNotFoundReason
 		message = "No Machines are created"
@@ -614,19 +677,35 @@ func (r *NodePoolReconciler) setAllNodesHealthyCondition(nodePool *hyperv1.NodeP
 			reason = hyperv1.AsExpectedReason
 			message = "NodePool set to no replicas"
 		}
-	}
+	} else {
+		numNotHealthy := 0
+		messageMap := make(map[string][]string)
 
-	for _, machine := range machines {
-		condition := findCAPIStatusCondition(machine.Status.Conditions, capiv1.MachineNodeHealthyCondition)
-		if condition != nil && condition.Status != corev1.ConditionTrue {
-			status = corev1.ConditionFalse
-			reason = condition.Reason
-			message = message + fmt.Sprintf("Machine %s: %s\n", machine.Name, condition.Reason)
+		for _, machine := range machines {
+			condition := findMachineStatusCondition(machine, string(capiv1.MachineNodeHealthyCondition))
+			if condition == nil {
+				// NodeHealthy condition not yet reported; treat as not healthy.
+				status = corev1.ConditionFalse
+				numNotHealthy++
+				mapReason := capiv1.WaitingForNodeRefReason
+				mapMessage := fmt.Sprintf("Machine %s: %s\n", machine.Name, mapReason)
+				messageMap[mapReason] = append(messageMap[mapReason], mapMessage)
+			} else if condition.Status != corev1.ConditionTrue {
+				status = corev1.ConditionFalse
+				numNotHealthy++
+				mapReason := condition.Reason
+				var mapMessage string
+				if condition.Message != "" {
+					mapMessage = fmt.Sprintf("Machine %s: %s: %s\n", machine.Name, condition.Reason, condition.Message)
+				} else {
+					mapMessage = fmt.Sprintf("Machine %s: %s\n", machine.Name, condition.Reason)
+				}
+				messageMap[mapReason] = append(messageMap[mapReason], mapMessage)
+			}
 		}
-	}
-
-	if status == corev1.ConditionTrue {
-		message = hyperv1.AllIsWellMessage
+		if numNotHealthy > 0 {
+			reason, message = aggregateMachineReasonsAndMessages(messageMap, numMachines, numNotHealthy, aggregatorMachineStateHealthy)
+		}
 	}
 
 	allMachinesHealthyCondition := &hyperv1.NodePoolCondition{
@@ -666,11 +745,18 @@ func (r *NodePoolReconciler) setAllMachinesReadyCondition(nodePool *hyperv1.Node
 		messageMap := make(map[string][]string)
 
 		for _, machine := range machines {
-			readyCond := findCAPIStatusCondition(machine.Status.Conditions, capiv1.ReadyCondition)
-			if readyCond != nil && readyCond.Status != corev1.ConditionTrue {
+			readyCond := findMachineStatusCondition(machine, string(capiv1.ReadyCondition))
+			if readyCond == nil {
+				// Ready condition not yet reported; treat as not ready.
 				status = corev1.ConditionFalse
 				numNotReady++
-				infraReadyCond := findCAPIStatusCondition(machine.Status.Conditions, capiv1.InfrastructureReadyCondition)
+				mapReason := capiv1.WaitingForInfrastructureFallbackReason
+				mapMessage := fmt.Sprintf("Machine %s: %s\n", machine.Name, mapReason)
+				messageMap[mapReason] = append(messageMap[mapReason], mapMessage)
+			} else if readyCond.Status != corev1.ConditionTrue {
+				status = corev1.ConditionFalse
+				numNotReady++
+				infraReadyCond := findMachineStatusCondition(machine, string(capiv1.InfrastructureReadyCondition))
 				// We append the reason as part of the higher Message, since the message is meaningless.
 				// This is how a CAPI condition looks like in AWS for an instance deleted out of band failure.
 				//	- lastTransitionTime: "2022-11-28T15:14:28Z"
@@ -685,7 +771,11 @@ func (r *NodePoolReconciler) setAllMachinesReadyCondition(nodePool *hyperv1.Node
 					mapMessage = fmt.Sprintf("Machine %s: %s: %s\n", machine.Name, infraReadyCond.Reason, infraReadyCond.Message)
 				} else {
 					mapReason = readyCond.Reason
-					mapMessage = fmt.Sprintf("Machine %s: %s\n", machine.Name, readyCond.Reason)
+					if readyCond.Message != "" && !isSetupCounterCondMessage.MatchString(readyCond.Message) {
+						mapMessage = fmt.Sprintf("Machine %s: %s: %s\n", machine.Name, readyCond.Reason, readyCond.Message)
+					} else {
+						mapMessage = fmt.Sprintf("Machine %s: %s\n", machine.Name, readyCond.Reason)
+					}
 				}
 
 				messageMap[mapReason] = append(messageMap[mapReason], mapMessage)
@@ -707,7 +797,13 @@ func (r *NodePoolReconciler) setAllMachinesReadyCondition(nodePool *hyperv1.Node
 	SetStatusCondition(&nodePool.Status.Conditions, *allMachinesReadyCondition)
 }
 
-func (r *NodePoolReconciler) setCIDRConflictCondition(nodePool *hyperv1.NodePool, machines []*capiv1.Machine, hc *hyperv1.HostedCluster) error {
+type cidrConflictEntry struct {
+	ip   string
+	cidr string
+}
+
+func (r *NodePoolReconciler) setCIDRConflictCondition(ctx context.Context, nodePool *hyperv1.NodePool, machines []*capiv1.Machine, hc *hyperv1.HostedCluster) error {
+	log := ctrl.LoggerFrom(ctx)
 	maxMessageLength := 256
 
 	if len(machines) < 1 || len(hc.Spec.Networking.ClusterNetwork) < 1 {
@@ -715,25 +811,68 @@ func (r *NodePoolReconciler) setCIDRConflictCondition(nodePool *hyperv1.NodePool
 		return nil
 	}
 
-	clusterNetworkStr := hc.Spec.Networking.ClusterNetwork[0].CIDR.String()
-	clusterNetwork, err := netip.ParsePrefix(clusterNetworkStr)
-	if err != nil {
-		return err
+	var clusterNetworks []netip.Prefix
+	for _, cn := range hc.Spec.Networking.ClusterNetwork {
+		prefix, err := netip.ParsePrefix(cn.CIDR.String())
+		if err != nil {
+			return err
+		}
+		clusterNetworks = append(clusterNetworks, prefix)
 	}
 
 	messages := []string{}
 	for _, machine := range machines {
+		seen := make(map[string]struct{})
+		var conflicting []cidrConflictEntry
+		hasAddressOutsideClusterNetwork := false
+
 		for _, addr := range machine.Status.Addresses {
 			if addr.Type != capiv1.MachineExternalIP && addr.Type != capiv1.MachineInternalIP {
 				continue
 			}
+
 			ipaddr, err := netip.ParseAddr(addr.Address)
 			if err != nil {
 				return err
 			}
-			if clusterNetwork.Contains(ipaddr) {
-				messages = append(messages, fmt.Sprintf("machine [%s] with ip [%s] collides with cluster-network cidr [%s]", machine.Name, addr.Address, clusterNetworkStr))
+			key := ipaddr.String()
+			if _, ok := seen[key]; ok {
+				continue
 			}
+			seen[key] = struct{}{}
+
+			if ipaddr.IsLinkLocalUnicast() || ipaddr.IsLinkLocalMulticast() {
+				continue
+			}
+
+			matchedCIDR := ""
+			for _, cn := range clusterNetworks {
+				if cn.Contains(ipaddr) {
+					matchedCIDR = cn.String()
+					break
+				}
+			}
+			if matchedCIDR != "" {
+				conflicting = append(conflicting, cidrConflictEntry{ip: addr.Address, cidr: matchedCIDR})
+			} else {
+				hasAddressOutsideClusterNetwork = true
+			}
+		}
+
+		// When a machine has addresses both inside and outside the cluster network,
+		// the in-network addresses are typically CNI-internal (e.g. OVN-Kubernetes
+		// management port IPs on KubeVirt VMs) and do not represent a real conflict.
+		// Only report a conflict when ALL of a machine's addresses fall within the
+		// cluster network, which indicates the machine's infrastructure IP genuinely
+		// overlaps with the pod CIDR.
+		if !hasAddressOutsideClusterNetwork {
+			for _, entry := range conflicting {
+				messages = append(messages, fmt.Sprintf("machine [%s] with ip [%s] collides with cluster-network cidr [%s]", machine.Name, entry.ip, entry.cidr))
+			}
+		} else if len(conflicting) > 0 {
+			log.V(4).Info("Skipping CNI-internal addresses for CIDR conflict check",
+				"machine", machine.Name,
+				"suppressedCount", len(conflicting))
 		}
 	}
 
@@ -758,13 +897,15 @@ func (r *NodePoolReconciler) setCIDRConflictCondition(nodePool *hyperv1.NodePool
 			ObservedGeneration: nodePool.Generation,
 		}
 		SetStatusCondition(&nodePool.Status.Conditions, *cidrConflictCondition)
+	} else {
+		removeStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolClusterNetworkCIDRConflictType)
 	}
 
 	return nil
 }
 
 // createReachedIgnitionEndpointCondition creates a condition for the NodePool based on the tokenSecret data.
-func (r NodePoolReconciler) createReachedIgnitionEndpointCondition(ctx context.Context, tokenSecret *corev1.Secret, generation int64) (*hyperv1.NodePoolCondition, error) {
+func (r NodePoolReconciler) createReachedIgnitionEndpointCondition(ctx context.Context, tokenSecret *corev1.Secret, generation int64) (*hyperv1.NodePoolCondition, error) { //nolint:unparam // error return kept for API consistency
 	var condition *hyperv1.NodePoolCondition
 	if err := r.Get(ctx, crclient.ObjectKeyFromObject(tokenSecret), tokenSecret); err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -810,7 +951,7 @@ func (r NodePoolReconciler) createReachedIgnitionEndpointCondition(ctx context.C
 }
 
 // createValidGeneratedPayloadCondition creates a condition for the NodePool based on the tokenSecret data.
-func (r NodePoolReconciler) createValidGeneratedPayloadCondition(ctx context.Context, tokenSecret *corev1.Secret, generation int64) (*hyperv1.NodePoolCondition, error) {
+func (r NodePoolReconciler) createValidGeneratedPayloadCondition(ctx context.Context, tokenSecret *corev1.Secret, generation int64) (*hyperv1.NodePoolCondition, error) { //nolint:unparam // error return kept for API consistency
 	var condition *hyperv1.NodePoolCondition
 	if err := r.Get(ctx, crclient.ObjectKeyFromObject(tokenSecret), tokenSecret); err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -962,7 +1103,7 @@ func (r *NodePoolReconciler) supportedVersionSkewCondition(ctx context.Context, 
 			Message:            err.Error(),
 			ObservedGeneration: nodePool.Generation,
 		})
-		return nil, nil
+		return nil, nil //nolint:nilerr // validation error is surfaced via status condition, not returned
 	}
 	SetStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 		Type:               hyperv1.NodePoolSupportedVersionSkewConditionType,

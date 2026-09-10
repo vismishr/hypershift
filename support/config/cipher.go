@@ -1,7 +1,16 @@
 package config
 
 import (
+	"context"
+	"crypto/tls"
+	"fmt"
+
 	configv1 "github.com/openshift/api/config/v1"
+	"github.com/openshift/library-go/pkg/crypto"
+
+	ctrl "sigs.k8s.io/controller-runtime"
+
+	"go.etcd.io/etcd/client/pkg/v3/tlsutil"
 )
 
 // openSSLToIANACiphersMap maps OpenSSL cipher suite names to IANA names
@@ -27,16 +36,19 @@ var openSSLToIANACiphersMap = map[string]string{
 	"ECDHE-RSA-AES256-SHA":   "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",   // 0xC0,0x14
 }
 
-func MinTLSVersion(securityProfile *configv1.TLSSecurityProfile) string {
+func MinTLSVersion(securityProfile *configv1.TLSSecurityProfile) (string, error) {
 	if securityProfile == nil {
 		securityProfile = &configv1.TLSSecurityProfile{
 			Type: configv1.TLSProfileIntermediateType,
 		}
 	}
 	if securityProfile.Type == configv1.TLSProfileCustomType {
-		return string(securityProfile.Custom.MinTLSVersion)
+		if securityProfile.Custom == nil {
+			return "", fmt.Errorf("TLS profile type is Custom but Custom field is nil")
+		}
+		return string(securityProfile.Custom.MinTLSVersion), nil
 	}
-	return string(configv1.TLSProfiles[securityProfile.Type].MinTLSVersion)
+	return string(configv1.TLSProfiles[securityProfile.Type].MinTLSVersion), nil
 }
 
 // OpenSSLToIANACipherSuites maps input OpenSSL Cipher Suite names to their
@@ -55,7 +67,7 @@ func OpenSSLToIANACipherSuites(ciphers []string) []string {
 	return ianaCiphers
 }
 
-func CipherSuites(securityProfile *configv1.TLSSecurityProfile) []string {
+func CipherSuites(securityProfile *configv1.TLSSecurityProfile) ([]string, error) {
 	if securityProfile == nil {
 		securityProfile = &configv1.TLSSecurityProfile{
 			Type: configv1.TLSProfileIntermediateType,
@@ -63,9 +75,67 @@ func CipherSuites(securityProfile *configv1.TLSSecurityProfile) []string {
 	}
 	var ciphers []string
 	if securityProfile.Type == configv1.TLSProfileCustomType {
+		if securityProfile.Custom == nil {
+			return nil, fmt.Errorf("TLS profile type is Custom but Custom field is nil")
+		}
 		ciphers = securityProfile.Custom.Ciphers
 	} else {
 		ciphers = configv1.TLSProfiles[securityProfile.Type].Ciphers
 	}
-	return OpenSSLToIANACipherSuites(ciphers)
+	return OpenSSLToIANACipherSuites(ciphers), nil
+}
+
+// SupportedEtcdCipherSuites filters the input cipher suites to only those supported by
+// etcd. It validates each cipher against etcd's tlsutil.GetCipherSuite(). Unknown suites
+// are logged.
+func SupportedEtcdCipherSuites(ctx context.Context, cipherSuites []string) []string {
+	log := ctrl.LoggerFrom(ctx)
+	allowedCiphers := []string{}
+	for _, cipher := range cipherSuites {
+		if _, ok := tlsutil.GetCipherSuite(cipher); !ok {
+			log.Info("cipher is not supported for use with etcd, skipping", "cipher", cipher)
+			continue
+		}
+		allowedCiphers = append(allowedCiphers, cipher)
+	}
+	return allowedCiphers
+}
+
+// SetMinTLSVersionUsingAPIServer returns a function capable of setting the min
+// tls version on a provided tls config struct. If the provided api server has
+// an invalid tls version this function returns an error.
+func SetMinTLSVersionUsingAPIServer(apiServerConfig *configv1.APIServer) (func(*tls.Config), error) {
+	minVersion, err := MinTLSVersion(apiServerConfig.Spec.TLSSecurityProfile)
+	if err != nil {
+		return nil, err
+	}
+	version, err := crypto.TLSVersion(minVersion)
+	if err != nil {
+		return nil, err
+	}
+	return func(tlsConfig *tls.Config) {
+		tlsConfig.MinVersion = version
+	}, nil
+}
+
+// SetCipherSuitesUsingAPIServer returns a function that is capable of setting
+// the right cipher suites on a tls config using the provided api server as
+// input. Returns an error if the provided api server contains an invalid
+// suite.
+func SetCipherSuitesUsingAPIServer(apiServerConfig *configv1.APIServer) (func(*tls.Config), error) {
+	cipherSuites, err := CipherSuites(apiServerConfig.Spec.TLSSecurityProfile)
+	if err != nil {
+		return nil, err
+	}
+	var suites []uint16
+	for _, suiteString := range cipherSuites {
+		suite, err := crypto.CipherSuite(suiteString)
+		if err != nil {
+			return nil, err
+		}
+		suites = append(suites, suite)
+	}
+	return func(tlsConfig *tls.Config) {
+		tlsConfig.CipherSuites = suites
+	}, nil
 }

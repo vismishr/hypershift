@@ -29,7 +29,6 @@ import (
 	"github.com/openshift/cluster-node-tuning-operator/pkg/performanceprofile/controller/performanceprofile/components"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -81,18 +80,18 @@ var x86ValidKernelPageSizes = []string{
 
 var validatorContext = context.TODO()
 
-// ValidateCreate implements webhook.Validator so a webhook will be registered for the type
-func (r *PerformanceProfile) ValidateCreate() (admission.Warnings, error) {
-	klog.Infof("Create validation for the performance profile %q", r.Name)
+// ValidateCreate implements admission.Validator so a webhook will be registered for the type
+func (r *PerformanceProfile) ValidateCreate(ctx context.Context, obj *PerformanceProfile) (admission.Warnings, error) {
+	klog.Infof("Create validation for the performance profile %q", obj.Name)
 
-	return r.validateCreateOrUpdate()
+	return obj.validateCreateOrUpdate()
 }
 
-// ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
-func (r *PerformanceProfile) ValidateUpdate(old runtime.Object) (admission.Warnings, error) {
-	klog.Infof("Update validation for the performance profile %q", r.Name)
+// ValidateUpdate implements admission.Validator so a webhook will be registered for the type
+func (r *PerformanceProfile) ValidateUpdate(ctx context.Context, oldObj, newObj *PerformanceProfile) (admission.Warnings, error) {
+	klog.Infof("Update validation for the performance profile %q", newObj.Name)
 
-	return r.validateCreateOrUpdate()
+	return newObj.validateCreateOrUpdate()
 }
 
 func (r *PerformanceProfile) validateCreateOrUpdate() (admission.Warnings, error) {
@@ -118,9 +117,9 @@ func (r *PerformanceProfile) validateCreateOrUpdate() (admission.Warnings, error
 		r.Name, allErrs)
 }
 
-// ValidateDelete implements webhook.Validator so a webhook will be registered for the type
-func (r *PerformanceProfile) ValidateDelete() (admission.Warnings, error) {
-	klog.Infof("Delete validation for the performance profile %q", r.Name)
+// ValidateDelete implements admission.Validator so a webhook will be registered for the type
+func (r *PerformanceProfile) ValidateDelete(ctx context.Context, obj *PerformanceProfile) (admission.Warnings, error) {
+	klog.Infof("Delete validation for the performance profile %q", obj.Name)
 
 	// TODO(user): fill in your validation logic upon object deletion.
 	return admission.Warnings{}, nil
@@ -369,6 +368,13 @@ func (r *PerformanceProfile) validateHugePages(nodes corev1.NodeList) field.Erro
 		return allErrs
 	}
 
+	// Validate that if hugepages are configured, defaultHugepagesSize must be provided
+	if len(r.Spec.HugePages.Pages) > 0 && r.Spec.HugePages.DefaultHugePagesSize == nil {
+		allErrs = append(allErrs, field.Required(
+			field.NewPath("spec.hugepages.defaultHugepagesSize"),
+			"defaultHugepagesSize must be specified when hugepages are configured"))
+	}
+
 	// We can only partially validate this if we have no nodes
 	// We can check that the value used is legitimate but we cannot check
 	// whether it is supposed to be x86 or aarch64
@@ -396,7 +402,7 @@ func (r *PerformanceProfile) validateHugePages(nodes corev1.NodeList) field.Erro
 	if r.Spec.HugePages.DefaultHugePagesSize != nil {
 		defaultSize := *r.Spec.HugePages.DefaultHugePagesSize
 		errField := "spec.hugepages.defaultHugepagesSize"
-		errMsg := "hugepages default size should be equal to one of"
+		errMsg := fmt.Sprintf("The compatible default huge page sizes for the selected kernel page size %s are:", kernelPageSize)
 		docsRef := "https://docs.kernel.org/mm/vmemmap_dedup.html"
 		if x86 && !slices.Contains(x86ValidHugepagesSizes, string(defaultSize)) {
 			allErrs = append(
@@ -413,8 +419,14 @@ func (r *PerformanceProfile) validateHugePages(nodes corev1.NodeList) field.Erro
 				field.Invalid(
 					field.NewPath(errField),
 					r.Spec.HugePages.DefaultHugePagesSize,
-					fmt.Sprintf("%s %v. doc reference=%s", errMsg, aarch64HugePagesByKernelPageSize[kernelPageSize], docsRef),
-				),
+					fmt.Sprintf(
+						"%s %v. doc reference=%s. "+
+							"In case you are trying to define a default hugepage size that requires a different kernel page size, "+
+							"please set the needed kernel page size under the spec.kernelPageSize field.",
+						errMsg,
+						aarch64HugePagesByKernelPageSize[kernelPageSize],
+						docsRef,
+					)),
 			)
 		} else if !x86 && !aarch64 && !hugepagesSizes.Has(string(defaultSize)) {
 			allErrs = append(
@@ -430,14 +442,14 @@ func (r *PerformanceProfile) validateHugePages(nodes corev1.NodeList) field.Erro
 
 	for i, page := range r.Spec.HugePages.Pages {
 		errField := "spec.hugepages.pages"
-		errMsg := "the page size should be equal to one of"
+		errMsg := fmt.Sprintf("The compatible huge page sizes for the selected kernel page size %s are:", kernelPageSize)
 		docsRef := "https://docs.kernel.org/mm/vmemmap_dedup.html"
 		if x86 && !slices.Contains(x86ValidHugepagesSizes, string(page.Size)) {
 			allErrs = append(
 				allErrs,
 				field.Invalid(
 					field.NewPath(errField),
-					r.Spec.HugePages.Pages,
+					page.Size,
 					fmt.Sprintf("%s %v. doc reference=%s", errMsg, x86ValidHugepagesSizes, docsRef),
 				),
 			)
@@ -446,16 +458,22 @@ func (r *PerformanceProfile) validateHugePages(nodes corev1.NodeList) field.Erro
 				allErrs,
 				field.Invalid(
 					field.NewPath(errField),
-					r.Spec.HugePages.Pages,
-					fmt.Sprintf("%s %v. doc reference=%s", errMsg, aarch64HugePagesByKernelPageSize[(kernelPageSize)], docsRef),
-				),
+					page.Size,
+					fmt.Sprintf(
+						"%s %v. doc reference=%s. "+
+							"In case you are trying to define a hugepage that requires a different kernel page size, "+
+							"please set the needed kernel page size under the spec.kernelPageSize field.",
+						errMsg,
+						aarch64HugePagesByKernelPageSize[kernelPageSize],
+						docsRef,
+					)),
 			)
 		} else if !x86 && !aarch64 && !hugepagesSizes.Has(string(page.Size)) {
 			allErrs = append(
 				allErrs,
 				field.Invalid(
 					field.NewPath(errField),
-					r.Spec.HugePages.Pages,
+					page.Size,
 					fmt.Sprintf("%s %v. doc reference=%s", errMsg, hugepagesSizes, docsRef),
 				),
 			)

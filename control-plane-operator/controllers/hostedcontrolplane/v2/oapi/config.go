@@ -10,7 +10,7 @@ import (
 	"github.com/openshift/hypershift/support/config"
 	component "github.com/openshift/hypershift/support/controlplane-component"
 	"github.com/openshift/hypershift/support/globalconfig"
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/k8sutil"
 
 	configv1 "github.com/openshift/api/config/v1"
 	openshiftcpv1 "github.com/openshift/api/openshiftcontrolplane/v1"
@@ -29,7 +29,7 @@ func adaptConfigMap(cpContext component.WorkloadContext, cm *corev1.ConfigMap) e
 	}
 
 	openshiftAPIServerConfig := &openshiftcpv1.OpenShiftAPIServerConfig{}
-	if err := util.DeserializeResource(cm.Data[openshiftAPIServerConfigKey], openshiftAPIServerConfig, api.Scheme); err != nil {
+	if err := k8sutil.DeserializeResource(cm.Data[openshiftAPIServerConfigKey], openshiftAPIServerConfig, api.Scheme); err != nil {
 		return fmt.Errorf("failed to decode existing openshift apiserver configuration: %w", err)
 	}
 
@@ -42,8 +42,10 @@ func adaptConfigMap(cpContext component.WorkloadContext, cm *corev1.ConfigMap) e
 	if err != nil {
 		return err
 	}
-	adaptConfig(openshiftAPIServerConfig, cpContext.HCP, observedConfig.Project, featureGates)
-	serializedConfig, err := util.SerializeResource(openshiftAPIServerConfig, api.Scheme)
+	if err := adaptConfig(openshiftAPIServerConfig, cpContext.HCP, observedConfig.Project, featureGates); err != nil {
+		return err
+	}
+	serializedConfig, err := k8sutil.SerializeResource(openshiftAPIServerConfig, api.Scheme)
 	if err != nil {
 		return fmt.Errorf("failed to serialize openshift apiserver configuration: %w", err)
 	}
@@ -51,7 +53,7 @@ func adaptConfigMap(cpContext component.WorkloadContext, cm *corev1.ConfigMap) e
 	return nil
 }
 
-func adaptConfig(cfg *openshiftcpv1.OpenShiftAPIServerConfig, hcp *hyperv1.HostedControlPlane, projectConfig *configv1.Project, featureGates []string) {
+func adaptConfig(cfg *openshiftcpv1.OpenShiftAPIServerConfig, hcp *hyperv1.HostedControlPlane, projectConfig *configv1.Project, featureGates []string) error {
 	if hcp.Spec.AuditWebhook != nil && len(hcp.Spec.AuditWebhook.Name) > 0 {
 		cfg.APIServerArguments["audit-webhook-config-file"] = []string{path.Join("/etc/kubernetes/auditwebhook", hyperv1.AuditWebhookKubeconfigKey)}
 		cfg.APIServerArguments["audit-webhook-mode"] = []string{"batch"}
@@ -59,8 +61,10 @@ func adaptConfig(cfg *openshiftcpv1.OpenShiftAPIServerConfig, hcp *hyperv1.Hoste
 	}
 
 	configuration := hcp.Spec.Configuration
-	cfg.ServingInfo.MinTLSVersion = config.MinTLSVersion(configuration.GetTLSSecurityProfile())
-	cfg.ServingInfo.CipherSuites = config.CipherSuites(configuration.GetTLSSecurityProfile())
+
+	if err := config.ApplyServingInfoFromTLSProfile(&cfg.ServingInfo.ServingInfo, configuration.GetTLSSecurityProfile()); err != nil {
+		return err
+	}
 
 	if configuration != nil && configuration.Image != nil {
 		cfg.ImagePolicyConfig.ExternalRegistryHostnames = configuration.Image.ExternalRegistryHostnames
@@ -94,4 +98,21 @@ func adaptConfig(cfg *openshiftcpv1.OpenShiftAPIServerConfig, hcp *hyperv1.Hoste
 	if len(featureGates) > 0 {
 		cfg.APIServerArguments["feature-gates"] = featureGates
 	}
+
+	// Override WatchList feature gate to disabled
+	if cfg.APIServerArguments["feature-gates"] == nil {
+		cfg.APIServerArguments["feature-gates"] = []string{}
+	}
+	// Filter out any existing WatchList settings
+	var filteredGates []string
+	for _, gate := range cfg.APIServerArguments["feature-gates"] {
+		if gate != "WatchList=true" && gate != "WatchList=false" {
+			filteredGates = append(filteredGates, gate)
+		}
+	}
+	// Set WatchList to disabled
+	filteredGates = append(filteredGates, "WatchList=false")
+	cfg.APIServerArguments["feature-gates"] = filteredGates
+
+	return nil
 }

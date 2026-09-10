@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/openshift/hypershift/support/api"
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/netutil"
 
 	routev1 "github.com/openshift/api/route/v1"
 
@@ -45,9 +45,11 @@ func TestApplyManifest(t *testing.T) {
 	existingDeployment.DeletionTimestamp = &metav1.Time{Time: time.Now()}
 	existingDeployment.ManagedFields = []metav1.ManagedFieldsEntry{
 		{
-			Manager:   "hypershift-controlplane-manager",
-			Operation: metav1.ManagedFieldsOperationUpdate,
-			Time:      &metav1.Time{},
+			Manager:    "hypershift-controlplane-manager",
+			Operation:  metav1.ManagedFieldsOperationUpdate,
+			APIVersion: "apps/v1",
+			FieldsType: "FieldsV1",
+			Time:       &metav1.Time{},
 		},
 	}
 
@@ -55,6 +57,13 @@ func TestApplyManifest(t *testing.T) {
 	existingDeployment.Finalizers = []string{"test-finalizer"}
 	existingDeployment.Labels["existing-label"] = "test"
 	existingDeployment.Annotations["existing-annotation"] = "test"
+
+	// Stamp the hash on the existing object so the hash comparison is a no-op.
+	hash := computeDesiredHash(deployment)
+	if existingDeployment.Annotations == nil {
+		existingDeployment.Annotations = make(map[string]string)
+	}
+	existingDeployment.Annotations[DesiredStateHashAnnotation] = hash
 
 	// make sure unset spec fields are ignored.
 	existingDeployment.Spec.ProgressDeadlineSeconds = ptr.To[int32](600)
@@ -106,8 +115,8 @@ func TestApplyManifestLabelRemoval(t *testing.T) {
 			Name:      routeName,
 			Namespace: namespace,
 			Labels: map[string]string{
-				util.HCPRouteLabel: namespace,
-				"other-label":      "keep-me",
+				netutil.HCPRouteLabel: namespace,
+				"other-label":         "keep-me",
 			},
 		},
 		Spec: routev1.RouteSpec{
@@ -126,8 +135,8 @@ func TestApplyManifestLabelRemoval(t *testing.T) {
 			Name:      routeName,
 			Namespace: namespace,
 			Labels: map[string]string{
-				util.HCPRouteLabel: util.RemoveLabelMarker, // Mark for removal
-				"other-label":      "keep-me",              // Keep this label
+				netutil.HCPRouteLabel: netutil.RemoveLabelMarker, // Mark for removal
+				"other-label":         "keep-me",                 // Keep this label
 			},
 		},
 		Spec: routev1.RouteSpec{
@@ -162,7 +171,7 @@ func TestApplyManifestLabelRemoval(t *testing.T) {
 	}
 
 	// HCPRouteLabel should be removed
-	if _, exists := updatedRoute.Labels[util.HCPRouteLabel]; exists {
+	if _, exists := updatedRoute.Labels[netutil.HCPRouteLabel]; exists {
 		t.Errorf("expected HCPRouteLabel to be removed, but it still exists")
 	}
 
@@ -191,7 +200,7 @@ func TestApplyManifestLabelRemovalWithEmptyLabels(t *testing.T) {
 			Name:      routeName,
 			Namespace: namespace,
 			Labels: map[string]string{
-				util.HCPRouteLabel: namespace,
+				netutil.HCPRouteLabel: namespace,
 			},
 		},
 		Spec: routev1.RouteSpec{
@@ -208,7 +217,7 @@ func TestApplyManifestLabelRemovalWithEmptyLabels(t *testing.T) {
 			Name:      routeName,
 			Namespace: namespace,
 			Labels: map[string]string{
-				util.HCPRouteLabel: util.RemoveLabelMarker,
+				netutil.HCPRouteLabel: netutil.RemoveLabelMarker,
 			},
 		},
 		Spec: routev1.RouteSpec{
@@ -244,7 +253,7 @@ func TestApplyManifestLabelRemovalWithEmptyLabels(t *testing.T) {
 	}
 
 	// HCPRouteLabel should be removed
-	if _, exists := updatedRoute.Labels[util.HCPRouteLabel]; exists {
+	if _, exists := updatedRoute.Labels[netutil.HCPRouteLabel]; exists {
 		t.Errorf("expected HCPRouteLabel to be removed, but it still exists")
 	}
 
@@ -270,8 +279,8 @@ func TestApplyManifestLabelRemovalOnCreate(t *testing.T) {
 			Name:      routeName,
 			Namespace: namespace,
 			Labels: map[string]string{
-				util.HCPRouteLabel: util.RemoveLabelMarker, // Mark for removal
-				"other-label":      "keep-me",              // Keep this label
+				netutil.HCPRouteLabel: netutil.RemoveLabelMarker, // Mark for removal
+				"other-label":         "keep-me",                 // Keep this label
 			},
 		},
 		Spec: routev1.RouteSpec{
@@ -306,7 +315,7 @@ func TestApplyManifestLabelRemovalOnCreate(t *testing.T) {
 	}
 
 	// HCPRouteLabel should not exist (removal marker was cleaned up before creation)
-	if _, exists := createdRoute.Labels[util.HCPRouteLabel]; exists {
+	if _, exists := createdRoute.Labels[netutil.HCPRouteLabel]; exists {
 		t.Errorf("expected HCPRouteLabel to be removed before creation, but it still exists")
 	}
 
@@ -318,5 +327,294 @@ func TestApplyManifestLabelRemovalOnCreate(t *testing.T) {
 	// Verify that only one label remains
 	if len(createdRoute.Labels) != 1 {
 		t.Errorf("expected 1 label remaining, got %d: %v", len(createdRoute.Labels), createdRoute.Labels)
+	}
+}
+
+func makeHashTestDeployment(args ...string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dep",
+			Namespace: "test-ns",
+		},
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:    "main",
+						Image:   "registry.example.com/image:latest",
+						Command: []string{"/usr/bin/server"},
+						Args:    args,
+					}},
+				},
+			},
+		},
+	}
+}
+
+func TestApplyManifest_DesiredStateHash(t *testing.T) {
+	t.Run("create stamps the hash annotation", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo", "--bar", "--baz")
+		client := fake.NewClientBuilder().Build()
+		result, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep)
+		if err != nil {
+			t.Fatalf("ApplyManifest failed: %v", err)
+		}
+		if result != controllerutil.OperationResultCreated {
+			t.Fatalf("expected Created, got %s", result)
+		}
+
+		var created appsv1.Deployment
+		if err := client.Get(t.Context(), types.NamespacedName{Name: "test-dep", Namespace: "test-ns"}, &created); err != nil {
+			t.Fatalf("get failed: %v", err)
+		}
+		hash := created.Annotations[DesiredStateHashAnnotation]
+		if len(hash) != 64 {
+			t.Fatalf("expected 64-char hash, got %q (len=%d)", hash, len(hash))
+		}
+	})
+
+	t.Run("trailing slice removal detected", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo", "--bar", "--baz")
+		client := fake.NewClientBuilder().Build()
+		// Create
+		if _, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep); err != nil {
+			t.Fatal(err)
+		}
+
+		// Remove --baz
+		dep2 := makeHashTestDeployment("--foo", "--bar")
+		result, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep2)
+		if err != nil {
+			t.Fatalf("ApplyManifest failed: %v", err)
+		}
+		if result != controllerutil.OperationResultUpdated {
+			t.Errorf("expected Updated (trailing arg removed), got %s", result)
+		}
+	})
+
+	t.Run("nil args detected", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo", "--bar")
+		client := fake.NewClientBuilder().Build()
+		if _, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep); err != nil {
+			t.Fatal(err)
+		}
+
+		// Set args to nil
+		dep2 := makeHashTestDeployment()
+		result, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep2)
+		if err != nil {
+			t.Fatalf("ApplyManifest failed: %v", err)
+		}
+		if result != controllerutil.OperationResultUpdated {
+			t.Errorf("expected Updated (args nil'd), got %s", result)
+		}
+	})
+
+	t.Run("idempotent on identical state", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo", "--bar")
+		client := fake.NewClientBuilder().Build()
+		if _, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep); err != nil {
+			t.Fatal(err)
+		}
+
+		dep2 := makeHashTestDeployment("--foo", "--bar")
+		result, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep2)
+		if err != nil {
+			t.Fatalf("ApplyManifest failed: %v", err)
+		}
+		if result != controllerutil.OperationResultNone {
+			t.Errorf("expected None (idempotent), got %s", result)
+		}
+	})
+
+	t.Run("deterministic hash", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo", "--bar", "--baz")
+		h1 := computeDesiredHash(dep)
+		h2 := computeDesiredHash(dep)
+		if h1 != h2 {
+			t.Errorf("hash is not deterministic: %s != %s", h1, h2)
+		}
+		if len(h1) != 64 {
+			t.Errorf("expected 64-char hex hash, got len=%d: %s", len(h1), h1)
+		}
+	})
+}
+
+func TestApplyManifest_DesiredStateHashEdgeCases(t *testing.T) {
+	t.Run("external drift detected via DeepDerivative fallback despite matching hash", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo", "--bar")
+		client := fake.NewClientBuilder().Build()
+
+		// Create - stamps the hash based on dep's desired spec.
+		if _, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep); err != nil {
+			t.Fatal(err)
+		}
+
+		// Simulate an external modification to the live object's spec (e.g. someone
+		// running `kubectl edit`, or an unrelated controller), without touching the
+		// hash annotation our controller stamped on create.
+		var drifted appsv1.Deployment
+		if err := client.Get(t.Context(), types.NamespacedName{Name: "test-dep", Namespace: "test-ns"}, &drifted); err != nil {
+			t.Fatal(err)
+		}
+		drifted.Spec.Template.Spec.Containers[0].Image = "someone-else/hijacked:latest"
+		if err := client.Update(t.Context(), &drifted); err != nil {
+			t.Fatal(err)
+		}
+
+		// Reconcile again with the exact same desired manifest as before, so the
+		// hash comparison alone would say "no update needed". The DeepDerivative
+		// fallback must still catch the drift and force an update.
+		dep2 := makeHashTestDeployment("--foo", "--bar")
+		result, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep2)
+		if err != nil {
+			t.Fatalf("ApplyManifest failed: %v", err)
+		}
+		if result != controllerutil.OperationResultUpdated {
+			t.Errorf("expected Updated (external drift detected via DeepDerivative fallback), got %s", result)
+		}
+
+		// Verify the drift was actually corrected.
+		var reconciled appsv1.Deployment
+		if err := client.Get(t.Context(), types.NamespacedName{Name: "test-dep", Namespace: "test-ns"}, &reconciled); err != nil {
+			t.Fatal(err)
+		}
+		if reconciled.Spec.Template.Spec.Containers[0].Image != "registry.example.com/image:latest" {
+			t.Errorf("expected drifted image to be corrected, got %q", reconciled.Spec.Template.Spec.Containers[0].Image)
+		}
+	})
+
+	t.Run("migration force-stamps hash on pre-existing object", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo")
+		// Pre-existing object without hash annotation
+		existing := dep.DeepCopy()
+		existing.ResourceVersion = "1"
+		client := fake.NewClientBuilder().WithObjects(existing).Build()
+
+		dep2 := makeHashTestDeployment("--foo")
+		result, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep2)
+		if err != nil {
+			t.Fatalf("ApplyManifest failed: %v", err)
+		}
+		if result != controllerutil.OperationResultUpdated {
+			t.Errorf("expected Updated (migration stamp), got %s", result)
+		}
+
+		// Verify hash was stamped
+		var updated appsv1.Deployment
+		if err := client.Get(t.Context(), types.NamespacedName{Name: "test-dep", Namespace: "test-ns"}, &updated); err != nil {
+			t.Fatal(err)
+		}
+		if updated.Annotations[DesiredStateHashAnnotation] == "" {
+			t.Error("expected hash annotation after migration, got empty")
+		}
+	})
+
+	t.Run("second reconcile after migration is no-op", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo")
+		existing := dep.DeepCopy()
+		existing.ResourceVersion = "1"
+		client := fake.NewClientBuilder().WithObjects(existing).Build()
+
+		// First reconcile: migration stamp
+		dep2 := makeHashTestDeployment("--foo")
+		if _, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep2); err != nil {
+			t.Fatal(err)
+		}
+
+		// Second reconcile: should be no-op
+		dep3 := makeHashTestDeployment("--foo")
+		result, err := (&applyProvider{}).ApplyManifest(t.Context(), client, dep3)
+		if err != nil {
+			t.Fatalf("ApplyManifest failed: %v", err)
+		}
+		if result != controllerutil.OperationResultNone {
+			t.Errorf("expected None (post-migration no-op), got %s", result)
+		}
+	})
+
+	t.Run("loop detector compatible", func(t *testing.T) {
+		dep := makeHashTestDeployment("--foo")
+		client := fake.NewClientBuilder().Build()
+		provider := &applyProvider{loopDetector: newUpdateLoopDetector()}
+
+		// Create
+		if _, err := provider.ApplyManifest(t.Context(), client, dep); err != nil {
+			t.Fatal(err)
+		}
+
+		// 3 identical reconciles
+		for i := 0; i < 3; i++ {
+			d := makeHashTestDeployment("--foo")
+			if _, err := provider.ApplyManifest(t.Context(), client, d); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if err := provider.ValidateUpdateEvents(1); err != nil {
+			t.Errorf("loop detector fired on stable reconciles: %v", err)
+		}
+	})
+}
+
+func TestToUnstructured(t *testing.T) {
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "test",
+			Namespace:       "ns",
+			UID:             types.UID("test-uid"),
+			Generation:      5,
+			ResourceVersion: "42",
+			ManagedFields: []metav1.ManagedFieldsEntry{
+				{Manager: "test"},
+			},
+			Annotations: map[string]string{
+				DesiredStateHashAnnotation: "abc123",
+				"other-annotation":         "keep",
+			},
+			Labels: map[string]string{
+				"app": "test",
+			},
+		},
+		Status: appsv1.DeploymentStatus{Replicas: 3},
+	}
+
+	u, err := toUnstructured(dep)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	metadata := u["metadata"].(map[string]any)
+
+	// Volatile fields should be stripped
+	for _, field := range []string{"uid", "generation", "creationTimestamp", "resourceVersion", "managedFields"} {
+		if _, ok := metadata[field]; ok {
+			t.Errorf("expected %s to be stripped, but it's present", field)
+		}
+	}
+
+	// Status should be stripped
+	if _, ok := u["status"]; ok {
+		t.Error("expected status to be stripped")
+	}
+
+	// Hash annotation should be stripped
+	annotations := metadata["annotations"].(map[string]any)
+	if _, ok := annotations[DesiredStateHashAnnotation]; ok {
+		t.Error("expected hash annotation to be stripped")
+	}
+
+	// Other annotations and labels should be preserved
+	if annotations["other-annotation"] != "keep" {
+		t.Error("expected other-annotation to be preserved")
+	}
+	labels := metadata["labels"].(map[string]any)
+	if labels["app"] != "test" {
+		t.Error("expected app label to be preserved")
+	}
+
+	// Name should be preserved
+	if metadata["name"] != "test" {
+		t.Error("expected name to be preserved")
 	}
 }

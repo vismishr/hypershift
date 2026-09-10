@@ -8,7 +8,7 @@ import (
 	oapiv2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/oapi"
 	"github.com/openshift/hypershift/support/azureutil"
 	component "github.com/openshift/hypershift/support/controlplane-component"
-	"github.com/openshift/hypershift/support/util"
+	"github.com/openshift/hypershift/support/podspec"
 
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -64,8 +64,12 @@ func NewComponent() component.ControlPlaneComponent {
 			component.WithAdaptFunction(adaptAzureCSIFileSecretProvider),
 			component.WithPredicate(isAroHCP),
 		).
+		WithManifestAdapter(
+			"controller-config.yaml",
+			component.WithAdaptFunction(component.NewGenericControllerConfigAdapter("0.0.0.0:8443", "")),
+		).
 		WithDependencies(oapiv2.ComponentName).
-		InjectAvailabilityProberContainer(util.AvailabilityProberOpts{
+		InjectAvailabilityProberContainer(podspec.AvailabilityProberOpts{
 			KubeconfigVolumeName: "guest-kubeconfig",
 			RequiredAPIs: []schema.GroupVersionKind{
 				{Group: "operator.openshift.io", Version: "v1", Kind: "Storage"},
@@ -76,14 +80,11 @@ func NewComponent() component.ControlPlaneComponent {
 }
 
 func isStorageAndCSIManaged(cpContext component.WorkloadContext) (bool, error) {
-	if cpContext.HCP.Spec.Platform.Type == hyperv1.IBMCloudPlatform || cpContext.HCP.Spec.Platform.Type == hyperv1.PowerVSPlatform {
-		return false, nil
-	}
-	return true, nil
+	return component.IsStorageAndCSIManaged(cpContext.HCP.Spec.Platform.Type), nil
 }
 
 func isAroHCP(cpContext component.WorkloadContext) bool {
-	return azureutil.IsAroHCP()
+	return azureutil.IsAroHCPByHCP(cpContext.HCP)
 }
 
 type operand struct {
@@ -153,7 +154,7 @@ func checkOperandsRolloutStatus(cpContext component.WorkloadContext) (bool, erro
 			}
 		}
 
-		if !util.IsDeploymentReady(cpContext, deployment) {
+		if !podspec.IsDeploymentReady(cpContext, deployment) {
 			errs = append(errs, fmt.Errorf("deployment %s is not ready", operand.DeploymentName))
 		}
 	}

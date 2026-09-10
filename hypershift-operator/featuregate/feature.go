@@ -28,6 +28,32 @@ const (
 	// alpha: v0.1.49
 	// beta: x.y.z
 	GCPPlatform featuregate.Feature = "GCPPlatform"
+
+	// HCPEtcdBackup enables the HCPEtcdBackup CRD for OADP-driven etcd backup orchestration.
+	// owner: @jparrill
+	// alpha: v0.1.49
+	// beta: x.y.z
+	HCPEtcdBackup featuregate.Feature = "HCPEtcdBackup"
+
+	// KarpenterOperator gates deploying the karpenter-operator as a standalone component instead of using the embedded karpenter-operator code in HyperShift.
+	// owner: openshift-autoscaling
+	// alpha: v0.1.79
+	// beta: x.y.z
+	KarpenterOperator featuregate.Feature = "KarpenterOperator"
+
+	// EtcdSharding enables etcd sharding by resource kind, allowing resources to be
+	// routed to dedicated etcd instances for improved performance and isolation.
+	// alpha: v0.1.49
+	// beta: x.y.z
+	EtcdSharding featuregate.Feature = "EtcdSharding"
+
+	// OSStreams enables dual-stream RHEL 9/10 support in NodePool boot image resolution.
+	// When enabled, NodePools resolve the RHEL stream dynamically from the release version
+	// (e.g., OCP 5.0+ defaults to rhel-10). When disabled, boot images always use rhel-9.
+	// owner: @jparrill
+	// alpha: v0.1.49
+	// default: OCP 5.0
+	OSStreams featuregate.Feature = "OSStreams"
 )
 
 // Initialize new features here
@@ -37,6 +63,10 @@ var (
 	aroHCPManagedIdentitiesFeature = featuregates.NewFeature(AROHCPManagedIdentities, featuregates.WithEnableForFeatureSets(configv1.TechPreviewNoUpgrade))
 	openStackFeature               = featuregates.NewFeature(OpenStack, featuregates.WithEnableForFeatureSets(configv1.TechPreviewNoUpgrade))
 	gcpHCPFeature                  = featuregates.NewFeature(GCPPlatform, featuregates.WithEnableForFeatureSets(configv1.TechPreviewNoUpgrade))
+	hcpEtcdBackupFeature           = featuregates.NewFeature(HCPEtcdBackup, featuregates.WithEnableForFeatureSets(configv1.TechPreviewNoUpgrade))
+	karpenterOperatorFeature       = featuregates.NewFeature(KarpenterOperator, featuregates.WithEnableForFeatureSets(configv1.TechPreviewNoUpgrade))
+	etcdShardingFeature            = featuregates.NewFeature(EtcdSharding, featuregates.WithEnableForFeatureSets(configv1.TechPreviewNoUpgrade))
+	osStreamsFeature               = featuregates.NewFeature(OSStreams, featuregates.WithEnableForFeatureSets(configv1.TechPreviewNoUpgrade, configv1.Default))
 )
 
 func init() {
@@ -44,6 +74,10 @@ func init() {
 	allFeatures.AddFeature(aroHCPManagedIdentitiesFeature)
 	allFeatures.AddFeature(openStackFeature)
 	allFeatures.AddFeature(gcpHCPFeature)
+	allFeatures.AddFeature(hcpEtcdBackupFeature)
+	allFeatures.AddFeature(karpenterOperatorFeature)
+	allFeatures.AddFeature(etcdShardingFeature)
+	allFeatures.AddFeature(osStreamsFeature)
 
 	// Default to configuring the Default featureset
 	ConfigureFeatureSet(string(configv1.Default))
